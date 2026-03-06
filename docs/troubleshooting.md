@@ -71,6 +71,10 @@ Multiple possible causes:
 **Cause:** Removed in newer glib crate versions.
 **Fix:** Use `std::sync::mpsc` + `glib::timeout_add_local` polling instead.
 
+### Terminal shows only one line (collapsed height)
+**Cause:** `GtkOverlay` sizes based on its child widget (`bg_picture`). When no background image is set, `bg_picture` is hidden and has zero natural size, collapsing the entire overlay.
+**Fix:** Call `overlay.set_measure_overlay(&terminal, true)` so the terminal overlay widget contributes to size measurement even when `bg_picture` is hidden. Also set `overlay.set_hexpand(true)` and `overlay.set_vexpand(true)`.
+
 ### D-Bus: `register_object` API mismatch
 **Cause:** gio 0.20 uses builder pattern, not positional args.
 **Fix:** Use `connection.register_object(path, &interface_info).method_call(closure).build()`.

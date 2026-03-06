@@ -29,15 +29,17 @@ Everything controllable via API so AI agents can operate the workspace.
 - [x] Shell script for random rotation daemon (`custerm-random-bg.sh`)
 - [x] Config hot-reload (file watcher)
 
-### Phase 3: Tabs + Panel System
+### Phase 3: Tabs + Panel System ✅
 Terminal tabs first, then generalize to support different panel types.
 
-- [ ] **Tab model**: `Panel` trait with `TerminalPanel` as first impl
-- [ ] **TabBar**: new / close / switch / reorder (drag)
-- [ ] **Split panes**: horizontal / vertical split within a tab
-- [ ] **Pane resize**: drag dividers
-- [ ] **Focus tracking**: active pane border highlight
-- [ ] **Keyboard shortcuts**: Ctrl+Shift+T/W/Tab, Ctrl+Shift+E/O (split), Ctrl+Shift+[1-9]
+- [x] **Tab model**: `Panel` trait with `TerminalPanel` as first impl
+- [x] **TabBar**: new / close / switch / reorder (drag)
+- [x] **Split panes**: horizontal / vertical split within a tab
+- [x] **Pane resize**: drag dividers
+- [x] **Focus tracking**: active pane focus via `EventControllerFocus`
+- [x] **Keyboard shortcuts**: Ctrl+Shift+T/W/Tab, Ctrl+Shift+E/O (split), Ctrl+Shift+[1-9]
+- [x] **Configurable tab position**: top, bottom, left, right (`[tabs] position` in config)
+- [x] **In-terminal search**: Ctrl+F search bar with VTE regex (next/prev/case toggle)
 - [ ] **Panel type registry**: extensible system for registering new panel types
 
 ### Phase 4: Control API

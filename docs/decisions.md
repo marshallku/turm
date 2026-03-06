@@ -67,3 +67,19 @@ This protocol is used by custermctl but the socket server is not yet implemented
 ## 9. Rust Edition 2024
 
 Using the latest Rust edition. No compatibility concerns since the project is new.
+
+## 10. In-Terminal Search via VTE Regex
+
+**Problem:** Popular terminals (Ghostty, Kitty) lack built-in Ctrl+F search, requiring piping through external tools.
+
+**Decision:** Implemented search using VTE4's built-in `search_set_regex` / `search_find_next` / `search_find_previous` with PCRE2 regex. Search bar is a `gtk4::Box` overlay at the bottom of each terminal panel.
+
+**UX details:**
+- Search text is preserved when closing, but fully selected on reopen (type to replace, Enter to reuse)
+- `glib::idle_add_local_once` is needed for `select_region` — GTK4 Entry ignores selection before focus is fully settled
+
+## 11. Configurable Tab Position
+
+**Decision:** Tab bar position (`top`, `bottom`, `left`, `right`) is configurable via `[tabs] position` in config. Uses `gtk4::Notebook::set_tab_pos()`. Hot-reloads on config change.
+
+**Rationale:** Vertical tabs (left/right) make better use of widescreen displays and are preferred by some users.

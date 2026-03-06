@@ -24,6 +24,10 @@ custerm/
 │   │   ├── app.rs           # GtkApplication setup, dark theme
 │   │   ├── window.rs        # ApplicationWindow, D-Bus polling, bg init
 │   │   ├── terminal.rs      # VTE terminal + background overlay compositing
+│   │   ├── tabs.rs          # Tab manager (Notebook, tab bar, keyboard shortcuts)
+│   │   ├── split.rs         # Split pane tree (SplitNode, TabContent)
+│   │   ├── search.rs        # In-terminal search bar (Ctrl+F, VTE regex search)
+│   │   ├── panel.rs         # Panel trait
 │   │   └── dbus.rs          # D-Bus service (com.marshall.custerm)
 │   ├── custerm.desktop      # Desktop entry for system integration
 │   └── install.sh           # Build + install script

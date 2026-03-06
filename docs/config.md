@@ -28,6 +28,9 @@ directory = "/mnt/disk2/Wallpapers/"  # Directory for random picks
 tint = 0.85         # Tint overlay opacity (0.0 = no tint, 1.0 = fully opaque)
 opacity = 0.95      # Terminal opacity
 
+[tabs]
+position = "left"   # top, bottom, left, right
+
 [socket]
 path = "/tmp/custerm.sock"
 
@@ -76,4 +79,4 @@ name = "catppuccin-mocha"
 
 - All fields have defaults; config file is optional
 - Missing sections are filled with defaults via `#[serde(default)]`
-- Config is read once at startup (hot-reload not yet implemented)
+- Config hot-reloads automatically via file watcher (font, background, tint, tab position)

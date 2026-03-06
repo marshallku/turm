@@ -30,15 +30,20 @@ This pattern is required because GTK widgets are not `Send+Sync` and can only be
 
 ## Terminal (`terminal.rs`)
 
-### TerminalTab Struct
+### TerminalPanel Struct
 
 ```rust
-pub struct TerminalTab {
-    pub overlay: gtk4::Overlay,      // Container with layered children
-    pub terminal: vte4::Terminal,    // VTE terminal widget
-    pub bg_picture: gtk4::Picture,   // Background image layer
-    pub tint_overlay: gtk4::DrawingArea, // Color tint drawn over image
-    pub tint_opacity: Rc<Cell<f64>>, // Tint opacity value (0.0 - 1.0)
+pub struct TerminalPanel {
+    pub overlay: gtk4::Overlay,
+    pub terminal: vte4::Terminal,
+    pub bg_picture: gtk4::Picture,
+    pub tint_overlay: gtk4::Box,
+    pub tint_css: gtk4::CssProvider,
+    pub tint_opacity: Rc<Cell<f64>>,
+    pub tint_color: Rc<Cell<gdk::RGBA>>,
+    pub image_opacity: Rc<Cell<f64>>,
+    pub has_background: Rc<Cell<bool>>,
+    pub search_bar: SearchBar,
 }
 ```
 
@@ -46,9 +51,12 @@ pub struct TerminalTab {
 
 ```
 bg_picture (GtkPicture, content-fit: cover)  ← child of overlay
-  └─ tint_overlay (DrawingArea, rgba #1e1e2e)  ← overlay
-      └─ terminal (VTE Terminal)               ← overlay
+  └─ tint_overlay (Box, CSS rgba)            ← overlay
+      └─ terminal (VTE Terminal)             ← overlay (set_measure_overlay=true)
+          └─ search_bar (Box, valign=End)    ← overlay (hidden by default)
 ```
+
+**Critical:** `overlay.set_measure_overlay(&terminal, true)` ensures the terminal contributes to overlay size measurement. Without this, when `bg_picture` is hidden (no background image), the overlay collapses to zero height since the child has no natural size.
 
 ### Font Scaling
 
@@ -84,6 +92,46 @@ Catppuccin Mocha 16-color palette:
 VTE handles PTY internally via `terminal.spawn_async()`. No custom PTY management needed on Linux.
 
 On child exit, the window closes automatically via `connect_child_exited`.
+
+## Tabs (`tabs.rs`)
+
+### TabManager
+
+Manages `gtk4::Notebook` with `TabContent` entries (split pane trees).
+
+- Tab position configurable via `[tabs] position` in config (`top`, `bottom`, `left`, `right`)
+- Tab bar auto-hides when only one tab exists
+- Tab position hot-reloads on config change
+
+### Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+F` | Toggle search bar |
+| `Ctrl+Shift+T` | New tab |
+| `Ctrl+Shift+W` | Close focused pane/tab |
+| `Ctrl+Shift+E` | Split horizontal |
+| `Ctrl+Shift+O` | Split vertical |
+| `Ctrl+Shift+N` / `Ctrl+Shift+Right` | Focus next pane |
+| `Ctrl+Shift+P` / `Ctrl+Shift+Left` | Focus previous pane |
+| `Ctrl+Shift+Tab` | Next tab |
+| `Ctrl+Shift+1-9` | Switch to tab N |
+
+## Search (`search.rs`)
+
+In-terminal text search using VTE's built-in regex search API.
+
+- **Toggle:** `Ctrl+F` opens/closes the search bar (overlay at bottom of terminal)
+- **Search:** Uses `vte4::Regex::for_search()` with PCRE2, applied via `terminal.search_set_regex()`
+- **Navigation:** `Enter` = next match, `Shift+Enter` = previous match
+- **Close:** `Escape` closes search and returns focus to terminal
+- **Case sensitivity:** Toggle button, default is case-insensitive (`PCRE2_CASELESS`)
+- **Reopen behavior:** Previous search text is preserved but fully selected, so typing immediately replaces it
+- **Wrap around:** Enabled by default
+
+## Split Panes (`split.rs`)
+
+Binary tree of `SplitNode` (Leaf = terminal, Branch = `gtk4::Paned` with two children). Each tab has a `TabContent` with a root `SplitNode` and a stable container `gtk4::Box`.
 
 ## D-Bus Interface (`dbus.rs`)
 
