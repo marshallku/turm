@@ -128,6 +128,13 @@ pub struct CustermConfig {
 }
 
 impl CustermConfig {
+    pub fn config_path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("/etc"))
+            .join("custerm")
+            .join("config.toml")
+    }
+
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path();
 
@@ -142,10 +149,30 @@ impl CustermConfig {
         Ok(config)
     }
 
-    fn config_path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("/etc"))
-            .join("custerm")
-            .join("config.toml")
+    pub fn write_default() -> Result<PathBuf> {
+        let path = Self::config_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let default_config = r#"[terminal]
+# shell = "/bin/zsh"
+font_family = "JetBrainsMono Nerd Font Mono"
+font_size = 14
+
+[background]
+# directory = "/path/to/wallpapers"
+# interval = 300
+# tint = 0.9
+# opacity = 0.95
+
+[socket]
+# path = "/tmp/custerm.sock"
+
+[theme]
+name = "catppuccin-mocha"
+"#;
+        std::fs::write(&path, default_config)?;
+        Ok(path)
     }
 }
