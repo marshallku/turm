@@ -1,5 +1,7 @@
 mod app;
 mod dbus;
+mod panel;
+mod tabs;
 mod terminal;
 mod window;
 

@@ -1,5 +1,11 @@
 # Roadmap
 
+## Vision
+
+custerm = terminal-centric programmable workspace.
+Terminal at the core, but extensible to browser panels, AI agents, and custom views.
+Everything controllable via API so AI agents can operate the workspace.
+
 ## Implementation Phases
 
 ### Phase 1: MVP Terminal ✅
@@ -15,53 +21,70 @@
 - [x] Desktop entry + install script
 
 ### Phase 2: Background Images ✅
-- [x] Background image cache (scan directory, cache to file)
-- [x] GtkOverlay compositing (image → tint → terminal)
+- [x] GPU-rendered background via `gtk4::Picture` + `gdk::Texture`
+- [x] GtkOverlay compositing (picture → tint → terminal)
 - [x] VTE transparent background (`set_clear_background(false)`)
-- [x] Random image selection
-- [x] Tint overlay with configurable opacity
-- [x] D-Bus interface for dynamic control
-  - [x] SetBackground, NextBackground, ClearBackground
-  - [x] SetTint, GetCurrentBackground
+- [x] Tint overlay via CSS (no Cairo)
+- [x] D-Bus interface for dynamic control (SetBackground, ClearBackground, SetTint)
+- [x] Shell script for random rotation daemon (`custerm-random-bg.sh`)
+- [x] Config hot-reload (file watcher)
 
-### Phase 3: Tabs + Splits (Not Started)
-- [ ] Tab model (multiple TerminalTabs)
-- [ ] TabBar component (new/close/switch)
-- [ ] Split pane layout (horizontal/vertical)
-- [ ] Pane resize
-- [ ] Focus tracking
-- [ ] Keyboard shortcuts: Ctrl+Shift+T/W/E/O/[1-9]
+### Phase 3: Tabs + Panel System
+Terminal tabs first, then generalize to support different panel types.
 
-### Phase 4: Socket API + CLI (Partial)
+- [ ] **Tab model**: `Panel` trait with `TerminalPanel` as first impl
+- [ ] **TabBar**: new / close / switch / reorder (drag)
+- [ ] **Split panes**: horizontal / vertical split within a tab
+- [ ] **Pane resize**: drag dividers
+- [ ] **Focus tracking**: active pane border highlight
+- [ ] **Keyboard shortcuts**: Ctrl+Shift+T/W/Tab, Ctrl+Shift+E/O (split), Ctrl+Shift+[1-9]
+- [ ] **Panel type registry**: extensible system for registering new panel types
+
+### Phase 4: Control API
+Single programmable interface for both human CLI and AI agents.
+
 - [x] CLI tool (custermctl) with clap subcommands
 - [x] cmux V2 JSON protocol types
 - [x] Unix socket client
-- [ ] Socket server in custerm-linux
-- [ ] Command dispatch (wire CLI commands to actual actions)
-- [ ] Env var injection per session (CUSTERM_SOCKET, CUSTERM_SESSION_ID)
+- [ ] **Socket server** in custerm-linux (replace/supplement D-Bus for richer control)
+- [ ] **Command dispatch**: wire all commands to actual panel/tab/split actions
+- [ ] **Env var injection**: CUSTERM_SOCKET, CUSTERM_SESSION_ID per terminal session
+- [ ] **Event stream**: subscribe to terminal output, focus changes, panel lifecycle
+- [ ] **Query API**: read terminal screen content, list panels/tabs, get state
 
-### Phase 5: macOS App (Stub Only)
-- [x] Swift Package with basic NSWindow
-- [ ] Terminal view (SwiftTerm or Ghostty embedding)
-- [ ] PTY integration via custerm-core
-- [ ] Background images
-- [ ] Socket/IPC control
+### Phase 5: WebView Panel
+Embed browser as a panel type alongside terminals.
 
-### Phase 6: Integrations + Polish (Not Started)
-- [ ] Config hot-reload
-- [ ] Background auto-rotation daemon (timer based on config interval)
-- [ ] Git sidebar (branch, PR status)
-- [ ] AI agent notifications (OSC 9/99/777 parsing)
-- [ ] Clipboard integration
-- [ ] URL detection
-- [ ] Session persistence/restore
-- [ ] Browser panel integration
+- [ ] **WebKitGTK panel**: browser view as a Panel impl
+- [ ] **URL bar / navigation** within panel
+- [ ] **DevTools toggle**
+- [ ] **JS ↔ custerm bridge**: page scripts can call custerm API
+- [ ] **Side-by-side workflow**: terminal + docs/PR/CI in one window
+
+### Phase 6: AI Agent Integration
+Make custerm a first-class environment for AI coding agents.
+
+- [ ] **Agent protocol**: structured input/output channel (beyond raw PTY text)
+- [ ] **Screen reading API**: semantic terminal content (not just raw bytes)
+- [ ] **Command execution API**: AI sends commands, gets structured results
+- [ ] **Notification channel**: OSC 9/99/777 parsing for agent status
+- [ ] **Approval workflow**: AI proposes action → user confirms in custerm UI
+- [ ] **Context sharing**: share terminal history, file paths, git status with agent
+
+### Phase 7: Polish + Ecosystem
+- [ ] Theme system (parse theme files, multiple palettes)
+- [ ] Clipboard integration (OSC 52)
+- [ ] URL detection + click-to-open
+- [ ] Session persistence / restore
+- [ ] Plugin system (Lua or WASM for custom panels/commands)
+- [ ] macOS native app (Swift/AppKit)
 
 ## Pending Cleanup
-- [ ] Verify background images render correctly after `set_clear_background(false)` fix
-- [ ] Test D-Bus interface end-to-end
 - [ ] Consider whether custerm-core/pty.rs and state.rs are needed for Linux (VTE handles PTY)
+- [ ] Unify D-Bus and Socket API (D-Bus for system integration, Socket for rich control)
 
 ## Reference Projects
 - `~/dev/cmux/` — Socket protocol, CLI structure, window/workspace model
-- `~/dotfiles/zsh/kitty-random-bg.sh` — Background rotation logic (ported to `background.rs`)
+- `~/kitty-random-bg.sh` — Background rotation logic (ported to custerm-random-bg.sh)
+- Zellij — Panel/plugin architecture reference
+- Wezterm — Lua scripting, multiplexer model

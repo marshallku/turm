@@ -10,6 +10,8 @@ use vte4::Terminal;
 
 use custerm_core::config::CustermConfig;
 
+use crate::panel::Panel;
+
 const PALETTE: &[&str] = &[
     "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af",
     "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
@@ -22,7 +24,7 @@ const FONT_SCALE_STEP: f64 = 0.1;
 const MIN_FONT_SCALE: f64 = 0.3;
 const MAX_FONT_SCALE: f64 = 3.0;
 
-pub struct TerminalTab {
+pub struct TerminalPanel {
     pub overlay: gtk4::Overlay,
     pub terminal: Terminal,
     pub bg_picture: gtk4::Picture,
@@ -34,8 +36,8 @@ pub struct TerminalTab {
     pub has_background: Rc<Cell<bool>>,
 }
 
-impl TerminalTab {
-    pub fn new(config: &CustermConfig) -> Self {
+impl TerminalPanel {
+    pub fn new(config: &CustermConfig, on_exit: impl Fn() + 'static) -> Self {
         let terminal = Terminal::new();
 
         // Font
@@ -45,7 +47,7 @@ impl TerminalTab {
         terminal.set_font(Some(&font_desc));
         terminal.set_font_scale(DEFAULT_FONT_SCALE);
 
-        // Colors - Catppuccin Mocha, opaque by default
+        // Colors
         let fg = parse_color("#cdd6f4");
         let bg = parse_color("#1e1e2e");
         let palette = make_palette();
@@ -58,7 +60,7 @@ impl TerminalTab {
         terminal.set_hexpand(true);
         terminal.set_vexpand(true);
 
-        // Keyboard shortcuts: Ctrl+= zoom in, Ctrl+- zoom out, Ctrl+0 reset
+        // Zoom shortcuts
         let zoom_controller = gtk4::EventControllerKey::new();
         let term_clone = terminal.clone();
         zoom_controller.connect_key_pressed(move |_, keyval, _, modifier| {
@@ -85,7 +87,7 @@ impl TerminalTab {
         });
         terminal.add_controller(zoom_controller);
 
-        // Spawn shell with CUSTERM_DBUS env var for per-session control
+        // Spawn shell
         let shell = config.terminal.shell.clone();
         let dbus_env = format!("CUSTERM_DBUS={}", crate::dbus::bus_name());
         terminal.spawn_async(
@@ -100,15 +102,11 @@ impl TerminalTab {
             |_result| {},
         );
 
-        terminal.connect_child_exited(|terminal, _status| {
-            if let Some(toplevel) = terminal.root() {
-                if let Some(window) = toplevel.downcast_ref::<gtk4::Window>() {
-                    window.close();
-                }
-            }
+        terminal.connect_child_exited(move |_terminal, _status| {
+            on_exit();
         });
 
-        // Background image layer (GPU-rendered via gtk4::Picture)
+        // Background image layer (GPU-rendered)
         let image_opacity = Rc::new(Cell::new(config.background.opacity));
         let bg_picture = gtk4::Picture::new();
         bg_picture.set_content_fit(gtk4::ContentFit::Cover);
@@ -117,7 +115,7 @@ impl TerminalTab {
         bg_picture.set_visible(false);
         bg_picture.set_opacity(config.background.opacity);
 
-        // Tint overlay (CSS-driven, no Cairo)
+        // Tint overlay (CSS-driven)
         let tint_opacity = Rc::new(Cell::new(config.background.tint));
         let tint_color = Rc::new(Cell::new(parse_color(&config.background.tint_color)));
         let tint_overlay = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -133,7 +131,7 @@ impl TerminalTab {
         );
         tint_overlay.add_css_class("custerm-tint");
 
-        // CSS to force VTE background transparent (text stays opaque)
+        // VTE transparent CSS
         let css_provider = gtk4::CssProvider::new();
         css_provider.load_from_string("vte-terminal { background-color: transparent; }");
         gtk4::style_context_add_provider_for_display(
@@ -142,7 +140,7 @@ impl TerminalTab {
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
         );
 
-        // Stack: bg_picture (base) -> tint_overlay -> terminal
+        // Stack: bg_picture → tint → terminal
         let overlay = gtk4::Overlay::new();
         overlay.set_child(Some(&bg_picture));
         overlay.add_overlay(&tint_overlay);
@@ -159,10 +157,6 @@ impl TerminalTab {
             image_opacity,
             has_background: Rc::new(Cell::new(false)),
         }
-    }
-
-    pub fn widget(&self) -> &gtk4::Overlay {
-        &self.overlay
     }
 
     pub fn set_background(&self, path: &Path) {
@@ -227,6 +221,56 @@ impl TerminalTab {
             (c.blue() * 255.0) as u8,
         ), opacity);
     }
+
+    pub fn apply_config(&self, config: &CustermConfig) {
+        let font_desc = gtk4::pango::FontDescription::from_string(
+            &format!("{} {}", config.terminal.font_family, config.terminal.font_size),
+        );
+        self.terminal.set_font(Some(&font_desc));
+
+        self.tint_opacity.set(config.background.tint);
+        self.tint_color.set(parse_color(&config.background.tint_color));
+        update_tint_css(&self.tint_css, &config.background.tint_color, config.background.tint);
+
+        self.image_opacity.set(config.background.opacity);
+        if self.has_background.get() {
+            self.bg_picture.set_opacity(config.background.opacity);
+        }
+
+        match &config.background.image {
+            Some(image) => {
+                let path = Path::new(image);
+                if path.exists() {
+                    self.set_background(path);
+                }
+            }
+            None => {
+                if self.has_background.get() {
+                    self.clear_background();
+                }
+            }
+        }
+    }
+}
+
+impl Panel for TerminalPanel {
+    fn widget(&self) -> &gtk4::Widget {
+        self.overlay.upcast_ref()
+    }
+
+    fn title(&self) -> String {
+        self.terminal.window_title()
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "Terminal".to_string())
+    }
+
+    fn panel_type(&self) -> &str {
+        "terminal"
+    }
+
+    fn grab_focus(&self) {
+        self.terminal.grab_focus();
+    }
 }
 
 fn update_tint_css(provider: &gtk4::CssProvider, hex_color: &str, opacity: f64) {
@@ -243,14 +287,6 @@ fn update_tint_css(provider: &gtk4::CssProvider, hex_color: &str, opacity: f64) 
 
 fn make_palette() -> Vec<gdk::RGBA> {
     PALETTE.iter().map(|c| parse_color(c)).collect()
-}
-
-pub fn parse_color_pub(hex: &str) -> gdk::RGBA {
-    parse_color(hex)
-}
-
-pub fn update_tint_css_pub(provider: &gtk4::CssProvider, hex_color: &str, opacity: f64) {
-    update_tint_css(provider, hex_color, opacity);
 }
 
 fn parse_color(hex: &str) -> gdk::RGBA {
