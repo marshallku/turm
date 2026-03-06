@@ -1,5 +1,7 @@
 # custerm
 
+<img width="2240" height="1400" alt="image" src="https://github.com/user-attachments/assets/dfc35653-c89a-43c5-8351-fea72648e713" />
+
 A custom terminal emulator built with a shared Rust core and platform-native UIs. GPU-rendered background images, Catppuccin Mocha theme, and a control API designed for both human and AI agent use.
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
