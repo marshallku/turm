@@ -28,8 +28,8 @@ fn default_opacity() -> f64 {
     0.95
 }
 
-fn default_socket_path() -> String {
-    "/tmp/custerm.sock".to_string()
+fn default_terminal_opacity() -> f64 {
+    1.0
 }
 
 fn default_theme() -> String {
@@ -71,6 +71,9 @@ pub struct BackgroundConfig {
 
     #[serde(default = "default_opacity")]
     pub opacity: f64,
+
+    #[serde(default = "default_terminal_opacity")]
+    pub terminal_opacity: f64,
 }
 
 impl Default for BackgroundConfig {
@@ -80,20 +83,6 @@ impl Default for BackgroundConfig {
             tint: default_tint(),
             tint_color: default_tint_color(),
             opacity: default_opacity(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SocketConfig {
-    #[serde(default = "default_socket_path")]
-    pub path: String,
-}
-
-impl Default for SocketConfig {
-    fn default() -> Self {
-        Self {
-            path: default_socket_path(),
         }
     }
 }
@@ -119,9 +108,6 @@ pub struct CustermConfig {
 
     #[serde(default)]
     pub background: BackgroundConfig,
-
-    #[serde(default)]
-    pub socket: SocketConfig,
 
     #[serde(default)]
     pub theme: ThemeConfig,
@@ -165,9 +151,7 @@ font_size = 14
 # tint = 0.85
 # tint_color = "#1e1e2e"
 # opacity = 0.95
-
-[socket]
-# path = "/tmp/custerm.sock"
+# terminal_opacity = 1.0
 
 [theme]
 name = "catppuccin-mocha"
