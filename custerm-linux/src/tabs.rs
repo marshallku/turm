@@ -26,6 +26,8 @@ impl TabManager {
         notebook.set_scrollable(true);
         notebook.set_show_border(false);
         notebook.set_show_tabs(false);
+        notebook.set_hexpand(true);
+        notebook.set_vexpand(true);
 
         let tab_pos = match config.tabs.position.as_str() {
             "left" => gtk4::PositionType::Left,

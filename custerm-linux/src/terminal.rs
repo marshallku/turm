@@ -145,6 +145,9 @@ impl TerminalPanel {
         overlay.set_child(Some(&bg_picture));
         overlay.add_overlay(&tint_overlay);
         overlay.add_overlay(&terminal);
+        overlay.set_measure_overlay(&terminal, true);
+        overlay.set_hexpand(true);
+        overlay.set_vexpand(true);
 
         Self {
             overlay,
