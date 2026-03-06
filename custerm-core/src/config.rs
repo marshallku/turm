@@ -28,10 +28,6 @@ fn default_opacity() -> f64 {
     0.95
 }
 
-fn default_terminal_opacity() -> f64 {
-    1.0
-}
-
 fn default_theme() -> String {
     "catppuccin-mocha".to_string()
 }
@@ -71,9 +67,6 @@ pub struct BackgroundConfig {
 
     #[serde(default = "default_opacity")]
     pub opacity: f64,
-
-    #[serde(default = "default_terminal_opacity")]
-    pub terminal_opacity: f64,
 }
 
 impl Default for BackgroundConfig {
@@ -151,7 +144,7 @@ font_size = 14
 # tint = 0.85
 # tint_color = "#1e1e2e"
 # opacity = 0.95
-# terminal_opacity = 1.0
+
 
 [theme]
 name = "catppuccin-mocha"

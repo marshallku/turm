@@ -30,7 +30,7 @@ pub struct TerminalTab {
     pub tint_opacity: Rc<Cell<f64>>,
     pub tint_color: Rc<Cell<gdk::RGBA>>,
     pub bg_texture: Rc<Cell<Option<gdk::Texture>>>,
-    pub terminal_opacity: Rc<Cell<f64>>,
+    pub image_opacity: Rc<Cell<f64>>,
     pub has_background: Rc<Cell<bool>>,
 }
 
@@ -109,7 +109,7 @@ impl TerminalTab {
         });
 
         // Background image layer
-        let terminal_opacity = Rc::new(Cell::new(config.background.opacity));
+        let image_opacity = Rc::new(Cell::new(config.background.opacity));
         let bg_texture: Rc<Cell<Option<gdk::Texture>>> = Rc::new(Cell::new(None));
         let bg_drawing = gtk4::DrawingArea::new();
         bg_drawing.set_hexpand(true);
@@ -117,7 +117,7 @@ impl TerminalTab {
         bg_drawing.set_visible(false);
 
         let tex_ref = bg_texture.clone();
-        let opacity_ref = terminal_opacity.clone();
+        let opacity_ref = image_opacity.clone();
         bg_drawing.set_draw_func(move |_widget, cr, width, height| {
             let texture = tex_ref.take();
             if let Some(ref tex) = texture {
@@ -197,7 +197,7 @@ impl TerminalTab {
             tint_opacity,
             tint_color,
             bg_texture,
-            terminal_opacity,
+            image_opacity,
             has_background: Rc::new(Cell::new(false)),
         }
     }

@@ -87,7 +87,7 @@ fn watch_config(terminal: &TerminalTab) {
     let tint_opacity = terminal.tint_opacity.clone();
     let tint_color = terminal.tint_color.clone();
     let tint_overlay = terminal.tint_overlay.clone();
-    let terminal_opacity = terminal.terminal_opacity.clone();
+    let image_opacity = terminal.image_opacity.clone();
     let term = terminal.terminal.clone();
     let has_bg = terminal.has_background.clone();
     let bg_texture = terminal.bg_texture.clone();
@@ -119,8 +119,8 @@ fn watch_config(terminal: &TerminalTab) {
         tint_color.set(crate::terminal::parse_color_pub(&config.background.tint_color));
         tint_overlay.queue_draw();
 
-        // Opacity (controls image opacity, not terminal widget)
-        terminal_opacity.set(config.background.opacity);
+        // Image opacity
+        image_opacity.set(config.background.opacity);
         if has_bg.get() {
             bg_drawing.queue_draw();
         }
