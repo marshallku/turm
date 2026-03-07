@@ -121,6 +121,9 @@ Clients can subscribe to real-time events via `event.subscribe`. The socket stay
 | `tab.closed` | `{panel_id, tab}` | Tab closed |
 | `terminal.output` | `{panel_id, text}` | Terminal receives output (high frequency) |
 | `terminal.cwd_changed` | `{panel_id, cwd}` | Terminal CWD changes (OSC 7) |
+| `terminal.shell_precmd` | `{panel_id}` | Shell prompt ready (precmd) |
+| `terminal.shell_preexec` | `{panel_id}` | Command about to execute (preexec) |
+| `terminal.notification` | `{panel_id, summary, body}` | OSC 9/777 notification received |
 | `webview.loaded` | `{panel_id}` | WebView finishes loading |
 | `webview.title_changed` | `{panel_id, title}` | WebView title changes |
 | `webview.navigated` | `{panel_id, url}` | WebView URI changes |

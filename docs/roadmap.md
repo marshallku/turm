@@ -78,10 +78,10 @@ Make custerm a first-class environment for AI coding agents.
 - [x] **Command execution API**: `terminal.exec` (command + newline), `terminal.feed` (raw PTY input)
 - [x] **CWD tracking**: `terminal.cwd_changed` event via OSC 7
 - [x] **CLI commands**: `custermctl terminal read/state/exec/feed`
-- [ ] **Notification channel**: OSC 9/99/777 parsing for agent status
+- [x] **Notification channel**: OSC 9/777 notifications via `terminal.notification` event
+- [x] **Shell integration signals**: `terminal.shell_precmd` / `terminal.shell_preexec` events
 - [ ] **Approval workflow**: AI proposes action → user confirms in custerm UI
 - [ ] **Context sharing**: share terminal history, file paths, git status with agent
-- [ ] **Shell integration signals**: precmd/preexec events for command lifecycle tracking
 
 ### Phase: Deployment & Distribution ✅
 - [x] `--version` flag for both binaries
