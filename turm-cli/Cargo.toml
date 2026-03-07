@@ -1,0 +1,20 @@
+[package]
+name = "turm-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "turmctl"
+path = "src/main.rs"
+
+[dependencies]
+turm-core = { path = "../turm-core" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+flate2 = "1"
+tar = "0.4"
+semver = "1"
+tempfile = "3"

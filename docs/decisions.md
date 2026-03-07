@@ -5,6 +5,7 @@
 **Problem:** Tauri IPC introduced noticeable input latency in the terminal. Every keypress went through JS → Tauri invoke → Rust → PTY, and output went PTY → Rust → Tauri event → JS → xterm.js. The round-trip was perceptible.
 
 **Decision:** Switched to platform-native UIs with a shared Rust core:
+
 - Linux: GTK4 + VTE4 (VTE handles PTY internally, zero IPC overhead)
 - macOS: Swift/AppKit (SwiftTerm or Ghostty embedding, TBD)
 
@@ -14,13 +15,14 @@
 
 **Rationale:** VTE has its own optimized PTY management. Using `portable-pty` alongside VTE would mean double PTY handling. Let VTE do what it does best.
 
-**Consequence:** `custerm-core/pty.rs` is not used by custerm-linux. It exists for macOS and potential future socket server needs.
+**Consequence:** `turm-core/pty.rs` is not used by turm-linux. It exists for macOS and potential future socket server needs.
 
 ## 3. D-Bus for Linux IPC (Not Unix Socket)
 
 **Rationale:** D-Bus is the standard Linux IPC mechanism. Using it means:
+
 - No custom socket server needed
-- System integration (other tools can control custerm)
+- System integration (other tools can control turm)
 - Session bus handles lifecycle automatically
 
 **GTK thread safety issue:** GTK widgets are not `Send+Sync`. D-Bus callbacks can't directly modify widgets.
@@ -34,16 +36,17 @@
 **Stack:** `bg_picture` (child) → `tint_overlay` (overlay) → `terminal` (overlay)
 
 **Critical detail:** VTE paints its own opaque background by default. To see the image layers beneath, you must:
+
 1. Call `terminal.set_clear_background(false)`
 2. Set VTE background color to transparent `RGBA(0,0,0,0)`
 
 Without step 1, VTE covers the entire overlay with its own background color.
 
-## 5. Binary Names: custerm + custermctl
+## 5. Binary Names: turm + turmctl
 
-**Problem:** Both custerm-linux and custerm-cli had `[[bin]] name = "custerm"`, causing Cargo output filename collision.
+**Problem:** Both turm-linux and turm-cli had `[[bin]] name = "turm"`, causing Cargo output filename collision.
 
-**Decision:** CLI binary renamed to `custermctl` (follows kubectl, sysctl naming convention).
+**Decision:** CLI binary renamed to `turmctl` (follows kubectl, sysctl naming convention).
 
 ## 6. Catppuccin Mocha Hardcoded
 
@@ -56,7 +59,7 @@ Without step 1, VTE covers the entire overlay with its own background color.
 **Format:** Newline-delimited JSON with UUID request IDs.
 **Reference:** ~/dev/cmux/ (Marshall's macOS terminal multiplexer)
 
-This protocol is used by custermctl but the socket server is not yet implemented in custerm-linux (D-Bus is used instead for now).
+This protocol is used by turmctl but the socket server is not yet implemented in turm-linux (D-Bus is used instead for now).
 
 ## 8. Forced Dark Theme
 
@@ -75,6 +78,7 @@ Using the latest Rust edition. No compatibility concerns since the project is ne
 **Decision:** Implemented search using VTE4's built-in `search_set_regex` / `search_find_next` / `search_find_previous` with PCRE2 regex. Search bar is a `gtk4::Box` overlay at the bottom of each terminal panel.
 
 **UX details:**
+
 - Search text is preserved when closing, but fully selected on reopen (type to replace, Enter to reuse)
 - `glib::idle_add_local_once` is needed for `select_region` — GTK4 Entry ignores selection before focus is fully settled
 

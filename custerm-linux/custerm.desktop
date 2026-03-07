@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=custerm
-Comment=Custom Terminal Emulator
-Exec=custerm
-Icon=utilities-terminal
-Type=Application
-Categories=System;TerminalEmulator;
-Keywords=terminal;shell;console;
-StartupNotify=true

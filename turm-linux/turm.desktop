@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=turm
+Comment=Custom Terminal Emulator
+Exec=turm
+Icon=utilities-terminal
+Type=Application
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;console;
+StartupNotify=true

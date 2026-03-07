@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-REPO="marshallku/custerm"
+REPO="marshallku/turm"
 INSTALL_DIR="${HOME}/.local/bin"
 DESKTOP_DIR="${HOME}/.local/share/applications"
 TARGET_VERSION=""
@@ -10,7 +10,7 @@ SYSTEM_INSTALL=false
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
-    echo "Install custerm from GitHub Releases."
+    echo "Install turm from GitHub Releases."
     echo ""
     echo "Options:"
     echo "  --version VERSION    Install a specific version (e.g., v0.1.0)"
@@ -55,7 +55,7 @@ check_deps() {
     pkg-config --exists webkitgtk-6.0 2>/dev/null || missing+=("webkitgtk-6.0")
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "Warning: missing system dependencies: ${missing[*]}"
-        echo "custerm requires these libraries to run. Install them via your package manager."
+        echo "turm requires these libraries to run. Install them via your package manager."
     fi
 }
 
@@ -75,30 +75,30 @@ if [[ -z "${VERSION}" ]]; then
     exit 1
 fi
 
-echo "Installing custerm ${VERSION}..."
+echo "Installing turm ${VERSION}..."
 
-ASSET_NAME="custerm-${VERSION}-x86_64-linux.tar.gz"
+ASSET_NAME="turm-${VERSION}-x86_64-linux.tar.gz"
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET_NAME}"
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "${TMPDIR}"' EXIT
 
 echo "Downloading ${ASSET_NAME}..."
-curl -fsSL -o "${TMPDIR}/custerm.tar.gz" "${DOWNLOAD_URL}"
+curl -fsSL -o "${TMPDIR}/turm.tar.gz" "${DOWNLOAD_URL}"
 
 echo "Extracting..."
-tar -xzf "${TMPDIR}/custerm.tar.gz" -C "${TMPDIR}"
+tar -xzf "${TMPDIR}/turm.tar.gz" -C "${TMPDIR}"
 
 if ${SYSTEM_INSTALL}; then
     echo "Installing to ${INSTALL_DIR} (requires sudo)..."
-    sudo install -Dm755 "${TMPDIR}/custerm" "${INSTALL_DIR}/custerm"
-    sudo install -Dm755 "${TMPDIR}/custermctl" "${INSTALL_DIR}/custermctl"
-    sudo install -Dm644 "${TMPDIR}/custerm.desktop" "${DESKTOP_DIR}/custerm.desktop"
+    sudo install -Dm755 "${TMPDIR}/turm" "${INSTALL_DIR}/turm"
+    sudo install -Dm755 "${TMPDIR}/turmctl" "${INSTALL_DIR}/turmctl"
+    sudo install -Dm644 "${TMPDIR}/turm.desktop" "${DESKTOP_DIR}/turm.desktop"
 else
     mkdir -p "${INSTALL_DIR}" "${DESKTOP_DIR}"
-    install -m755 "${TMPDIR}/custerm" "${INSTALL_DIR}/custerm"
-    install -m755 "${TMPDIR}/custermctl" "${INSTALL_DIR}/custermctl"
-    install -m644 "${TMPDIR}/custerm.desktop" "${DESKTOP_DIR}/custerm.desktop"
+    install -m755 "${TMPDIR}/turm" "${INSTALL_DIR}/turm"
+    install -m755 "${TMPDIR}/turmctl" "${INSTALL_DIR}/turmctl"
+    install -m644 "${TMPDIR}/turm.desktop" "${DESKTOP_DIR}/turm.desktop"
 fi
 
 check_deps
@@ -111,6 +111,6 @@ if ! echo "${PATH}" | tr ':' '\n' | grep -qx "${INSTALL_DIR}"; then
 fi
 
 echo ""
-echo "custerm ${VERSION} installed successfully!"
-echo "  custerm    -> ${INSTALL_DIR}/custerm"
-echo "  custermctl -> ${INSTALL_DIR}/custermctl"
+echo "turm ${VERSION} installed successfully!"
+echo "  turm    -> ${INSTALL_DIR}/turm"
+echo "  turmctl -> ${INSTALL_DIR}/turmctl"

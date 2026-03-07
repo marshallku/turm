@@ -33,11 +33,11 @@ jobs:
       - name: Bundle tarball
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          ARCHIVE="custerm-v${VERSION}-x86_64-linux.tar.gz"
+          ARCHIVE="turm-v${VERSION}-x86_64-linux.tar.gz"
           mkdir -p dist
-          cp target/release/custerm dist/
-          cp target/release/custermctl dist/
-          cp custerm-linux/custerm.desktop dist/
+          cp target/release/turm dist/
+          cp target/release/turmctl dist/
+          cp turm-linux/turm.desktop dist/
           tar -czf "${ARCHIVE}" -C dist .
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"

@@ -1,17 +1,17 @@
 # Configuration
 
-Path: `~/.config/custerm/config.toml`
+Path: `~/.config/turm/config.toml`
 
 ## Generate Default Config
 
 ```bash
-custerm --init-config
+turm --init-config
 ```
 
 ## Print Config Path
 
 ```bash
-custerm --config-path
+turm --config-path
 ```
 
 ## Full Example
@@ -32,7 +32,7 @@ opacity = 0.95      # Terminal opacity
 position = "left"   # top, bottom, left, right
 
 [socket]
-path = "/tmp/custerm.sock"
+path = "/tmp/turm.sock"
 
 [theme]
 name = "catppuccin-mocha"
@@ -42,38 +42,38 @@ name = "catppuccin-mocha"
 
 ### [terminal]
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `shell` | `$SHELL` or `/bin/sh` | Shell to spawn |
-| `font_family` | `JetBrainsMono Nerd Font Mono` | Font family |
-| `font_size` | `14` | Font size in points |
+| Key           | Default                        | Description         |
+| ------------- | ------------------------------ | ------------------- |
+| `shell`       | `$SHELL` or `/bin/sh`          | Shell to spawn      |
+| `font_family` | `JetBrainsMono Nerd Font Mono` | Font family         |
+| `font_size`   | `14`                           | Font size in points |
 
 ### [background]
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `image` | — (optional) | Single image file path (takes priority over directory) |
-| `directory` | — (optional) | Path to wallpaper directory (random pick) |
-| `tint` | `0.9` | Tint overlay opacity (0.0=transparent, 1.0=fully opaque) |
-| `opacity` | `0.95` | Terminal opacity |
+| Key         | Default      | Description                                              |
+| ----------- | ------------ | -------------------------------------------------------- |
+| `image`     | — (optional) | Single image file path (takes priority over directory)   |
+| `directory` | — (optional) | Path to wallpaper directory (random pick)                |
+| `tint`      | `0.9`        | Tint overlay opacity (0.0=transparent, 1.0=fully opaque) |
+| `opacity`   | `0.95`       | Terminal opacity                                         |
 
 ### [tabs]
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `position` | `top` | Tab bar position: `top`, `bottom`, `left`, `right` |
+| Key        | Default | Description                                        |
+| ---------- | ------- | -------------------------------------------------- |
+| `position` | `top`   | Tab bar position: `top`, `bottom`, `left`, `right` |
 
 ### [socket]
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `path` | `/tmp/custerm.sock` | Unix socket path |
+| Key    | Default          | Description      |
+| ------ | ---------------- | ---------------- |
+| `path` | `/tmp/turm.sock` | Unix socket path |
 
 ### [theme]
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `name` | `catppuccin-mocha` | Theme name |
+| Key    | Default            | Description |
+| ------ | ------------------ | ----------- |
+| `name` | `catppuccin-mocha` | Theme name  |
 
 ## Notes
 

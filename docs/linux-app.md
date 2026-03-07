@@ -1,16 +1,17 @@
-# Linux App (custerm-linux)
+# Linux App (turm-linux)
 
 ## Entry Point (`main.rs`)
 
 CLI flags handled before GTK launch:
-- `--init-config` — writes default config to `~/.config/custerm/config.toml`
+
+- `--init-config` — writes default config to `~/.config/turm/config.toml`
 - `--config-path` — prints config file path
 
 ## Application (`app.rs`)
 
-- GTK Application ID: `com.marshall.custerm`
+- GTK Application ID: `com.marshall.turm`
 - Forces dark theme on startup via `set_gtk_application_prefer_dark_theme(true)`
-- Loads config with `CustermConfig::load()`, falls back to defaults
+- Loads config with `TurmConfig::load()`, falls back to defaults
 
 ## Window (`window.rs`)
 
@@ -67,22 +68,26 @@ bg_picture (GtkPicture, content-fit: cover)  ← child of overlay
 ### Background Image Compositing
 
 **`set_background(path)`:**
+
 1. Sets `bg_picture` file and makes it visible
 2. Shows `tint_overlay`
 3. Calls `terminal.set_clear_background(false)` — **critical**: stops VTE from painting opaque bg
 4. Sets VTE background color to fully transparent `RGBA(0, 0, 0, 0)`
 
 **`clear_background()`:**
+
 1. Hides `bg_picture` and `tint_overlay`
 2. Calls `terminal.set_clear_background(true)` — re-enables VTE opaque bg
 3. Restores opaque Catppuccin Mocha background color
 
 **`set_tint(opacity)`:**
+
 - Updates `tint_opacity` Rc<Cell> and queues redraw
 
 ### Color Palette
 
 Catppuccin Mocha 16-color palette:
+
 - Foreground: `#cdd6f4`
 - Background: `#1e1e2e` (opaque) / `rgba(0,0,0,0)` (with bg image)
 - See `PALETTE` constant and `parse_color()` function
@@ -107,20 +112,20 @@ Manages `gtk4::Notebook` with `TabContent` entries (split pane trees).
 
 All shortcuts use `Ctrl+Shift` — Ctrl-only keys pass through to terminal/webview.
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+Shift+B` | Toggle tab bar (collapsed/expanded) |
-| `Ctrl+Shift+F` | Toggle search bar |
-| `Ctrl+Shift+T` | New tab |
-| `Ctrl+Shift+W` | Close focused pane/tab |
-| `Ctrl+Shift+C` | Copy (terminal) |
-| `Ctrl+Shift+V` | Paste (terminal) |
-| `Ctrl+Shift+E` | Split horizontal |
-| `Ctrl+Shift+O` | Split vertical |
-| `Ctrl+Shift+N` / `Ctrl+Shift+Right` | Focus next pane |
-| `Ctrl+Shift+P` / `Ctrl+Shift+Left` | Focus previous pane |
-| `Ctrl+Shift+Tab` | Next tab |
-| `Ctrl+Shift+1-9` | Switch to tab N |
+| Shortcut                            | Action                              |
+| ----------------------------------- | ----------------------------------- |
+| `Ctrl+Shift+B`                      | Toggle tab bar (collapsed/expanded) |
+| `Ctrl+Shift+F`                      | Toggle search bar                   |
+| `Ctrl+Shift+T`                      | New tab                             |
+| `Ctrl+Shift+W`                      | Close focused pane/tab              |
+| `Ctrl+Shift+C`                      | Copy (terminal)                     |
+| `Ctrl+Shift+V`                      | Paste (terminal)                    |
+| `Ctrl+Shift+E`                      | Split horizontal                    |
+| `Ctrl+Shift+O`                      | Split vertical                      |
+| `Ctrl+Shift+N` / `Ctrl+Shift+Right` | Focus next pane                     |
+| `Ctrl+Shift+P` / `Ctrl+Shift+Left`  | Focus previous pane                 |
+| `Ctrl+Shift+Tab`                    | Next tab                            |
+| `Ctrl+Shift+1-9`                    | Switch to tab N                     |
 
 ## Search (`search.rs`)
 
@@ -140,49 +145,49 @@ Binary tree of `SplitNode` (Leaf = terminal, Branch = `gtk4::Paned` with two chi
 
 ## D-Bus Interface (`dbus.rs`)
 
-Bus name: `com.marshall.custerm`
-Object path: `/com/marshall/custerm`
+Bus name: `com.marshall.turm`
+Object path: `/com/marshall/turm`
 
 ### Methods
 
-| Method | Args | Description |
-|--------|------|-------------|
-| `SetBackground` | `path: String` | Set specific background image |
-| `NextBackground` | — | Random next from cache |
-| `ClearBackground` | — | Remove background, restore solid color |
-| `SetTint` | `opacity: f64` | Set tint overlay opacity |
-| `GetCurrentBackground` | — | Returns current image path |
+| Method                 | Args           | Description                            |
+| ---------------------- | -------------- | -------------------------------------- |
+| `SetBackground`        | `path: String` | Set specific background image          |
+| `NextBackground`       | —              | Random next from cache                 |
+| `ClearBackground`      | —              | Remove background, restore solid color |
+| `SetTint`              | `opacity: f64` | Set tint overlay opacity               |
+| `GetCurrentBackground` | —              | Returns current image path             |
 
 ### Testing D-Bus
 
 ```bash
 # Next random background
-gdbus call --session -d com.marshall.custerm -o /com/marshall/custerm -m com.marshall.custerm.NextBackground
+gdbus call --session -d com.marshall.turm -o /com/marshall/turm -m com.marshall.turm.NextBackground
 
 # Get current background
-gdbus call --session -d com.marshall.custerm -o /com/marshall/custerm -m com.marshall.custerm.GetCurrentBackground
+gdbus call --session -d com.marshall.turm -o /com/marshall/turm -m com.marshall.turm.GetCurrentBackground
 
 # Set tint
-gdbus call --session -d com.marshall.custerm -o /com/marshall/custerm -m com.marshall.custerm.SetTint 0.7
+gdbus call --session -d com.marshall.turm -o /com/marshall/turm -m com.marshall.turm.SetTint 0.7
 
 # Set specific image
-gdbus call --session -d com.marshall.custerm -o /com/marshall/custerm -m com.marshall.custerm.SetBackground "/path/to/image.jpg"
+gdbus call --session -d com.marshall.turm -o /com/marshall/turm -m com.marshall.turm.SetBackground "/path/to/image.jpg"
 
 # Clear background
-gdbus call --session -d com.marshall.custerm -o /com/marshall/custerm -m com.marshall.custerm.ClearBackground
+gdbus call --session -d com.marshall.turm -o /com/marshall/turm -m com.marshall.turm.ClearBackground
 ```
 
 ## Installation
 
 ```bash
 # Build + install
-./custerm-linux/install.sh
+./turm-linux/install.sh
 
 # Or manually
-cargo build --release -p custerm-linux
-sudo install -Dm755 target/release/custerm /usr/local/bin/custerm
-sudo install -Dm644 custerm-linux/custerm.desktop /usr/share/applications/custerm.desktop
+cargo build --release -p turm-linux
+sudo install -Dm755 target/release/turm /usr/local/bin/turm
+sudo install -Dm644 turm-linux/turm.desktop /usr/share/applications/turm.desktop
 
 # Set as default terminal (GNOME)
-gsettings set org.gnome.desktop.default-applications.terminal exec custerm
+gsettings set org.gnome.desktop.default-applications.terminal exec turm
 ```

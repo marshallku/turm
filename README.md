@@ -1,4 +1,4 @@
-# custerm
+# turm
 
 <img width="3440" height="1440" alt="image" src="https://github.com/user-attachments/assets/a1392646-1255-40ed-9722-ea8523a5c342" />
 
@@ -13,8 +13,8 @@ A custom terminal emulator built with a shared Rust core and platform-native UIs
 - **Tabs** — create, switch, and split terminal tabs (horizontal/vertical)
 - **Dynamic font scaling** — `Ctrl+=`/`Ctrl+-`/`Ctrl+0`
 - **D-Bus control** — change backgrounds, tint, and more at runtime
-- **CLI tool (`custermctl`)** — control the terminal from the command line
-- **TOML configuration** — simple config at `~/.config/custerm/config.toml`
+- **CLI tool (`turmctl`)** — control the terminal from the command line
+- **TOML configuration** — simple config at `~/.config/turm/config.toml`
 
 ## Screenshots
 
@@ -39,13 +39,13 @@ Install GTK4 and libvte-2.91-gtk4 from your distribution's package manager.
 cargo build
 
 # Run the terminal
-cargo run -p custerm-linux
+cargo run -p turm-linux
 
 # Generate a default config file
-cargo run -p custerm-linux -- --init-config
+cargo run -p turm-linux -- --init-config
 
 # Control the running terminal via CLI
-cargo run -p custerm-cli -- <command>
+cargo run -p turm-cli -- <command>
 ```
 
 ## Install
@@ -53,17 +53,18 @@ cargo run -p custerm-cli -- <command>
 ### From GitHub Releases (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/marshallku/custerm/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/marshallku/turm/master/install.sh | bash
 ```
 
 Options:
+
 - `--version v0.2.0` — install a specific version
 - `--system` — install to `/usr/local/bin` (requires sudo)
 
 ### From source
 
 ```bash
-cd custerm-linux
+cd turm-linux
 ./install.sh
 ```
 
@@ -72,13 +73,13 @@ This builds a release binary and installs the desktop entry.
 ### Update
 
 ```bash
-custermctl update check    # check for new versions
-custermctl update apply    # download and install latest
+turmctl update check    # check for new versions
+turmctl update apply    # download and install latest
 ```
 
 ## Configuration
 
-Config file: `~/.config/custerm/config.toml`
+Config file: `~/.config/turm/config.toml`
 
 ```toml
 [terminal]
@@ -95,7 +96,7 @@ opacity = 0.95
 position = "top"  # top, bottom, left, right
 
 [socket]
-path = "/tmp/custerm.sock"
+path = "/tmp/turm.sock"
 
 [theme]
 name = "catppuccin-mocha"
@@ -106,11 +107,11 @@ All fields have defaults — the config file is entirely optional.
 ## Project Structure
 
 ```
-custerm/
-├── custerm-core/    # Shared Rust library (config, background, protocol, state)
-├── custerm-linux/   # GTK4 + VTE4 native terminal app
-├── custerm-cli/     # CLI control tool (custermctl)
-├── custerm-macos/   # Swift/AppKit app (stub)
+turm/
+├── turm-core/    # Shared Rust library (config, background, protocol, state)
+├── turm-linux/   # GTK4 + VTE4 native terminal app
+├── turm-cli/     # CLI control tool (turmctl)
+├── turm-macos/   # Swift/AppKit app (stub)
 └── docs/            # Internal documentation
 ```
 

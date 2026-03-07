@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "custerm-core",
-    "custerm-linux",
-    "custerm-cli",
+    "turm-core",
+    "turm-linux",
+    "turm-cli",
 ]
 
 [workspace.package]
