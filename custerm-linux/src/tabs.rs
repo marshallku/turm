@@ -40,7 +40,7 @@ impl TabManager {
         let notebook = gtk4::Notebook::new();
         notebook.set_scrollable(true);
         notebook.set_show_border(false);
-        notebook.set_show_tabs(false);
+        notebook.set_show_tabs(true);
         notebook.set_hexpand(true);
         notebook.set_vexpand(true);
 
@@ -77,10 +77,9 @@ impl TabManager {
         let collapsed = manager.tab_bar_collapsed.clone();
         manager
             .notebook
-            .connect_page_removed(move |notebook, _, _| {
-                if !*collapsed.borrow() {
-                    notebook.set_show_tabs(tabs_ref.borrow().len() > 1);
-                }
+            .connect_page_removed(move |_notebook, _, _| {
+                // Keep references alive; tab bar always visible (collapsed or expanded)
+                let _ = (&tabs_ref, &collapsed);
             });
 
         // Focus the right panel when switching tabs
@@ -293,20 +292,55 @@ impl TabManager {
 
     // -- Tab bar toggle --
 
-    /// Toggle tab bar visibility (collapse/expand). Returns new visible state.
+    /// Toggle tab bar between expanded and collapsed (icon-only) mode.
+    /// Returns true if now expanded.
     pub fn toggle_tab_bar(&self) -> bool {
         let collapsed = {
             let mut c = self.tab_bar_collapsed.borrow_mut();
             *c = !*c;
             *c
         };
-        if collapsed {
-            self.notebook.set_show_tabs(false);
-        } else {
-            // Restore: show tabs if more than 1
-            self.notebook.set_show_tabs(self.tabs.borrow().len() > 1);
-        }
+        self.apply_collapsed_state(collapsed);
         !collapsed
+    }
+
+    fn apply_collapsed_state(&self, collapsed: bool) {
+        // Toggle CSS class on notebook for width changes
+        if collapsed {
+            self.notebook.add_css_class("custerm-collapsed");
+        } else {
+            self.notebook.remove_css_class("custerm-collapsed");
+        }
+
+        // Show/hide label + close button on each tab
+        let tabs = self.tabs.borrow();
+        for tab in tabs.iter() {
+            if let Some(tab_label) = self.notebook.tab_label(&tab.container)
+                && let Some(hbox) = tab_label.downcast_ref::<gtk4::Box>()
+            {
+                // Children: [Icon, Label, CloseButton]
+                let mut child = hbox.first_child();
+                let mut idx = 0;
+                while let Some(widget) = child {
+                    child = widget.next_sibling();
+                    if idx > 0 {
+                        widget.set_visible(!collapsed);
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        // Show/hide add button in action widget
+        if let Some(action) = self.notebook.action_widget(gtk4::PackType::End)
+            && let Some(hbox) = action.downcast_ref::<gtk4::Box>()
+            && let Some(toggle_btn) = hbox.first_child()
+            && let Some(add_btn) = toggle_btn.next_sibling()
+        {
+            add_btn.set_visible(!collapsed);
+        }
+
+        self.notebook.set_show_tabs(true);
     }
 
     // -- Tab rename --
@@ -321,7 +355,8 @@ impl TabManager {
             if panels.iter().any(|p| p.id() == panel_id) {
                 // Update the notebook tab label text
                 if let Some(tab_label) = self.notebook.tab_label(&tab.container)
-                    && let Some(label_widget) = tab_label.first_child()
+                    && let Some(icon) = tab_label.first_child()
+                    && let Some(label_widget) = icon.next_sibling()
                     && let Some(label) = label_widget.downcast_ref::<gtk4::Label>()
                 {
                     label.set_text(title);
@@ -774,13 +809,10 @@ impl TabManager {
     }
 
     fn update_tab_visibility(&self) {
-        let multiple = self.tabs.borrow().len() > 1;
-        if multiple {
-            // Auto-expand tab bar when multiple tabs exist
+        if *self.tab_bar_collapsed.borrow() {
+            // New tabs auto-expand the tab bar
             *self.tab_bar_collapsed.borrow_mut() = false;
-            self.notebook.set_show_tabs(true);
-        } else {
-            self.notebook.set_show_tabs(false);
+            self.apply_collapsed_state(false);
         }
     }
 
@@ -808,11 +840,16 @@ impl TabManager {
     fn make_tab_label(&self, panel: &Rc<PanelVariant>, page_container: &gtk4::Box) -> gtk4::Box {
         let hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
         let vertical = self.is_vertical_tabs();
-        let default_title = match &**panel {
-            PanelVariant::Terminal(_) => "Terminal",
-            PanelVariant::WebView(_) => "WebView",
+        let (icon_name, default_title) = match &**panel {
+            PanelVariant::Terminal(_) => ("utilities-terminal-symbolic", "Terminal"),
+            PanelVariant::WebView(_) => ("web-browser-symbolic", "WebView"),
         };
+
+        let icon = gtk4::Image::from_icon_name(icon_name);
+        icon.add_css_class("custerm-tab-icon");
+
         let label = gtk4::Label::new(Some(default_title));
+        label.add_css_class("custerm-tab-label");
         label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         if vertical {
             label.set_hexpand(true);
@@ -828,8 +865,16 @@ impl TabManager {
         close_btn.add_css_class("custerm-tab-close");
         close_btn.set_tooltip_text(Some("Close tab"));
 
+        // Order: [Icon, Label, CloseButton]
+        hbox.append(&icon);
         hbox.append(&label);
         hbox.append(&close_btn);
+
+        // If currently collapsed, hide label and close button
+        if *self.tab_bar_collapsed.borrow() {
+            label.set_visible(false);
+            close_btn.set_visible(false);
+        }
 
         // Hook title updates based on panel type (suppressed when custom title is set)
         let panel_id_for_title = panel.id().to_string();
@@ -942,7 +987,6 @@ impl TabManager {
         let focused = self.focused.clone();
         let container = page_container.clone();
         let bus = self.event_bus.clone();
-        let collapsed = self.tab_bar_collapsed.clone();
         close_btn.connect_clicked(move |_| {
             let Some(idx) = nb.page_num(&container) else {
                 eprintln!("[custerm] close: page not found");
@@ -965,9 +1009,6 @@ impl TabManager {
 
             tabs.borrow_mut().remove(idx);
             nb.remove_page(Some(idx as u32));
-            if !*collapsed.borrow() {
-                nb.set_show_tabs(tabs.borrow().len() > 1);
-            }
 
             broadcast(
                 &bus,
@@ -1213,6 +1254,14 @@ fn setup_tab_actions(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow)
 fn build_tab_css(tab_width: u32) -> String {
     format!(
         r#"
+notebook {{
+    background-color: transparent;
+}}
+
+notebook > stack {{
+    background-color: transparent;
+}}
+
 notebook header {{
     background-color: #181825;
     padding: 0;
@@ -1261,6 +1310,23 @@ notebook header.right tab {{
 notebook header.bottom tab {{
     border-radius: 0 0 6px 6px;
     margin: 0 1px 2px;
+}}
+
+/* Collapsed mode */
+notebook.custerm-collapsed header.left tab,
+notebook.custerm-collapsed header.right tab {{
+    min-width: 0;
+    padding: 8px;
+}}
+
+notebook.custerm-collapsed header.top tab,
+notebook.custerm-collapsed header.bottom tab {{
+    padding: 4px 8px;
+}}
+
+.custerm-tab-icon {{
+    min-width: 16px;
+    min-height: 16px;
 }}
 
 .custerm-tab-close {{
