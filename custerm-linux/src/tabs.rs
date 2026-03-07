@@ -863,30 +863,55 @@ fn setup_shortcuts(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow) {
 
     controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
     controller.connect_key_pressed(move |_, keyval, _, modifier| {
-        // Ctrl+F: toggle search (terminal panels only)
-        if keyval == gdk::Key::f
-            && modifier.contains(gdk::ModifierType::CONTROL_MASK)
-            && !modifier.contains(gdk::ModifierType::SHIFT_MASK)
-        {
-            if let Some(mgr) = mgr.upgrade()
-                && let Some(panel) = mgr.active_panel()
-                && let Some(term) = panel.as_terminal()
-            {
-                term.search_bar.toggle(&term.terminal);
-            }
-            return glib::Propagation::Stop;
-        }
-
-        let ctrl_shift = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK;
-        if !modifier.contains(ctrl_shift) {
-            return glib::Propagation::Proceed;
-        }
-
         let Some(mgr) = mgr.upgrade() else {
             return glib::Propagation::Proceed;
         };
 
+        let ctrl = modifier.contains(gdk::ModifierType::CONTROL_MASK);
+        let shift = modifier.contains(gdk::ModifierType::SHIFT_MASK);
+        let ctrl_only = ctrl && !shift;
+        let ctrl_shift = ctrl && shift;
+
+        let panel = mgr.active_panel();
+        let is_terminal = panel.as_ref().is_some_and(|p| p.as_terminal().is_some());
+        let is_webview = panel.as_ref().is_some_and(|p| p.as_webview().is_some());
+
+        // -- Ctrl-only shortcuts --
+        if ctrl_only {
+            match keyval {
+                // Ctrl+F: toggle search (terminal only)
+                gdk::Key::f if is_terminal => {
+                    if let Some(term) = panel.as_ref().and_then(|p| p.as_terminal()) {
+                        term.search_bar.toggle(&term.terminal);
+                    }
+                    return glib::Propagation::Stop;
+                }
+                // Let webview handle its own Ctrl shortcuts (Ctrl+R, Ctrl+L, Ctrl+F, etc.)
+                _ if is_webview => return glib::Propagation::Proceed,
+                _ => return glib::Propagation::Proceed,
+            }
+        }
+
+        // -- Ctrl+Shift shortcuts --
+        if !ctrl_shift {
+            return glib::Propagation::Proceed;
+        }
+
         match keyval {
+            // Ctrl+Shift+C: copy (terminal)
+            gdk::Key::C if is_terminal => {
+                if let Some(term) = panel.as_ref().and_then(|p| p.as_terminal()) {
+                    term.terminal.copy_clipboard_format(vte4::Format::Text);
+                }
+                glib::Propagation::Stop
+            }
+            // Ctrl+Shift+V: paste (terminal)
+            gdk::Key::V if is_terminal => {
+                if let Some(term) = panel.as_ref().and_then(|p| p.as_terminal()) {
+                    term.terminal.paste_clipboard();
+                }
+                glib::Propagation::Stop
+            }
             // Ctrl+Shift+T: new tab
             gdk::Key::T => {
                 mgr.add_tab(&win);
