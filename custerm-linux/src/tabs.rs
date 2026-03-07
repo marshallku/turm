@@ -24,6 +24,7 @@ pub struct TabManager {
     focused: Rc<RefCell<Option<Rc<PanelVariant>>>>,
     config: Rc<RefCell<CustermConfig>>,
     event_bus: EventBus,
+    tab_css: gtk4::CssProvider,
 }
 
 impl TabManager {
@@ -43,22 +44,23 @@ impl TabManager {
         };
         notebook.set_tab_pos(tab_pos);
 
+        // Tab bar CSS
+        let tab_css = gtk4::CssProvider::new();
+        tab_css.load_from_string(&build_tab_css(config.tabs.width));
+        gtk4::style_context_add_provider_for_display(
+            &gdk::Display::default().unwrap(),
+            &tab_css,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 3,
+        );
+
         let manager = Rc::new(Self {
             notebook,
             tabs: Rc::new(RefCell::new(Vec::new())),
             focused: Rc::new(RefCell::new(None)),
             config: Rc::new(RefCell::new(config.clone())),
             event_bus,
+            tab_css,
         });
-
-        // Tab bar CSS
-        let css = gtk4::CssProvider::new();
-        css.load_from_string(TAB_CSS);
-        gtk4::style_context_add_provider_for_display(
-            &gdk::Display::default().unwrap(),
-            &css,
-            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 3,
-        );
 
         // Update tab bar visibility on page remove
         let tabs_ref = manager.tabs.clone();
@@ -267,6 +269,7 @@ impl TabManager {
             _ => gtk4::PositionType::Top,
         };
         self.notebook.set_tab_pos(tab_pos);
+        self.tab_css.load_from_string(&build_tab_css(config.tabs.width));
 
         for tab in self.tabs.borrow().iter() {
             let mut panels = Vec::new();
@@ -696,9 +699,12 @@ impl TabManager {
         let focused = self.focused.clone();
         let container = page_container.clone();
         close_btn.connect_clicked(move |_| {
-            let page_idx = nb.page_num(&container);
-            let Some(idx) = page_idx else { return };
+            let Some(idx) = nb.page_num(&container) else {
+                eprintln!("[custerm] close: page not found");
+                return;
+            };
             let idx = idx as usize;
+            eprintln!("[custerm] close: removing tab {idx}");
 
             tabs.borrow_mut().remove(idx);
             nb.remove_page(Some(idx as u32));
@@ -833,68 +839,72 @@ fn setup_shortcuts(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow) {
     window.add_controller(controller);
 }
 
-const TAB_CSS: &str = r#"
-notebook header {
+fn build_tab_css(tab_width: u32) -> String {
+    format!(
+        r#"
+notebook header {{
     background-color: #181825;
     padding: 0;
-}
+}}
 
-notebook header tabs {
+notebook header tabs {{
     background-color: transparent;
-}
+}}
 
-notebook header tab {
+notebook header tab {{
     background-color: #1e1e2e;
     color: #6c7086;
     padding: 4px 8px;
     margin: 2px 1px 0;
     border-radius: 6px 6px 0 0;
     min-height: 24px;
-}
+}}
 
-notebook header tab:checked {
+notebook header tab:checked {{
     background-color: #313244;
     color: #cdd6f4;
-}
+}}
 
-notebook header tab:hover:not(:checked) {
+notebook header tab:hover:not(:checked) {{
     background-color: #262637;
     color: #bac2de;
-}
+}}
 
 /* Vertical tabs (left) */
-notebook header.left tab {
+notebook header.left tab {{
     border-radius: 6px 0 0 6px;
     margin: 1px 0 1px 2px;
     padding: 6px 8px;
-    min-width: 120px;
-}
+    min-width: {tab_width}px;
+}}
 
 /* Vertical tabs (right) */
-notebook header.right tab {
+notebook header.right tab {{
     border-radius: 0 6px 6px 0;
     margin: 1px 2px 1px 0;
     padding: 6px 8px;
-    min-width: 120px;
-}
+    min-width: {tab_width}px;
+}}
 
 /* Bottom tabs */
-notebook header.bottom tab {
+notebook header.bottom tab {{
     border-radius: 0 0 6px 6px;
     margin: 0 1px 2px;
-}
+}}
 
-.custerm-tab-close {
+.custerm-tab-close {{
     min-width: 16px;
     min-height: 16px;
     padding: 0;
     margin: 0;
     border-radius: 4px;
     color: #6c7086;
-}
+}}
 
-.custerm-tab-close:hover {
+.custerm-tab-close:hover {{
     background-color: #45475a;
     color: #f38ba8;
+}}
+"#
+    )
 }
-"#;
