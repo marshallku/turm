@@ -304,8 +304,7 @@ impl TabManager {
             self.notebook.set_show_tabs(false);
         } else {
             // Restore: show tabs if more than 1
-            self.notebook
-                .set_show_tabs(self.tabs.borrow().len() > 1);
+            self.notebook.set_show_tabs(self.tabs.borrow().len() > 1);
         }
         !collapsed
     }
