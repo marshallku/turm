@@ -37,9 +37,9 @@ Terminal tabs first, then generalize to support different panel types.
 - [x] **Split panes**: horizontal / vertical split within a tab
 - [x] **Pane resize**: drag dividers
 - [x] **Focus tracking**: active pane focus via `EventControllerFocus`
-- [x] **Keyboard shortcuts**: Ctrl+Shift+T/W/Tab, Ctrl+Shift+E/O (split), Ctrl+Shift+[1-9], Ctrl+Shift+C/V (copy/paste), Ctrl+B (sidebar toggle)
+- [x] **Keyboard shortcuts**: Ctrl+Shift+T/W/Tab, Ctrl+Shift+E/O (split), Ctrl+Shift+[1-9], Ctrl+Shift+C/V (copy/paste), Ctrl+Shift+B (tab bar toggle), Ctrl+Shift+F (search)
 - [x] **Configurable tab position**: top, bottom, left, right (`[tabs] position` in config)
-- [x] **In-terminal search**: Ctrl+F search bar with VTE regex (next/prev/case toggle)
+- [x] **In-terminal search**: Ctrl+Shift+F search bar with VTE regex (next/prev/case toggle)
 - [ ] **Panel type registry**: extensible system for registering new panel types
 
 ### Phase 4: Control API
@@ -92,7 +92,10 @@ Make custerm a first-class environment for AI coding agents.
 ### Phase 5.5: Tab Bar Controls
 Collapsible tab bar and renamable tabs.
 
-- [x] **Tab bar toggle**: Ctrl+B collapses/expands the tab bar
+- [x] **Tab bar toggle**: Ctrl+Shift+B toggles between collapsed (icon-only) and expanded mode
+- [x] **Collapsed mode**: Icon-only tabs + toggle button (default state)
+- [x] **Auto-expand**: Tab bar expands on 1→2 tab transition; user toggle overrides auto behavior
+- [x] **Action buttons**: Toggle + add (terminal/browser popover) in tab bar
 - [x] **Socket API**: `tabs.toggle_bar`, `tab.rename`
 - [x] **CLI commands**: `custermctl tab toggle-bar`, `custermctl tab rename --id <id> <title>`
 - [x] **Double-click rename**: Double-click tab label for inline rename

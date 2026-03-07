@@ -26,7 +26,7 @@ custerm/
 │   │   ├── terminal.rs      # VTE terminal + background overlay compositing
 │   │   ├── tabs.rs          # Tab manager (Notebook, tab bar, keyboard shortcuts)
 │   │   ├── split.rs         # Split pane tree (SplitNode, TabContent)
-│   │   ├── search.rs        # In-terminal search bar (Ctrl+F, VTE regex search)
+│   │   ├── search.rs        # In-terminal search bar (Ctrl+Shift+F, VTE regex search)
 │   │   ├── panel.rs         # Panel trait + PanelVariant enum
 │   │   ├── webview.rs       # WebView panel (WebKitGTK 6.0)
 │   │   ├── socket.rs        # Unix socket server + command dispatcher
@@ -146,7 +146,9 @@ The `Panel` trait provides a common interface (`widget()`, `title()`, `panel_typ
 
 ### Tab Bar Controls
 
-The tab bar can be toggled (collapsed/expanded) with `Ctrl+B` or via socket API. Tabs can be renamed by double-clicking the tab label or via socket API. Custom titles suppress auto-title updates from terminal/webview.
+The tab bar has two modes: **collapsed** (icon-only, default) and **expanded** (icon + label + close button). Toggle with `Ctrl+Shift+B` or the toggle button in the tab bar. Tabs can be renamed by double-clicking the tab label or via socket API. Custom titles suppress auto-title updates from terminal/webview.
+
+**Auto-expand**: When going from 1 to 2 tabs, the tab bar auto-expands. Once the user manually toggles, that preference is preserved. The tab bar is never fully hidden — collapsed mode shows panel type icons and a toggle button.
 
 | Command | Params | Behavior |
 |---------|--------|----------|

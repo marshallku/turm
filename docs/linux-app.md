@@ -105,11 +105,16 @@ Manages `gtk4::Notebook` with `TabContent` entries (split pane trees).
 
 ### Keyboard Shortcuts
 
+All shortcuts use `Ctrl+Shift` — Ctrl-only keys pass through to terminal/webview.
+
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+F` | Toggle search bar |
+| `Ctrl+Shift+B` | Toggle tab bar (collapsed/expanded) |
+| `Ctrl+Shift+F` | Toggle search bar |
 | `Ctrl+Shift+T` | New tab |
 | `Ctrl+Shift+W` | Close focused pane/tab |
+| `Ctrl+Shift+C` | Copy (terminal) |
+| `Ctrl+Shift+V` | Paste (terminal) |
 | `Ctrl+Shift+E` | Split horizontal |
 | `Ctrl+Shift+O` | Split vertical |
 | `Ctrl+Shift+N` / `Ctrl+Shift+Right` | Focus next pane |
@@ -121,7 +126,7 @@ Manages `gtk4::Notebook` with `TabContent` entries (split pane trees).
 
 In-terminal text search using VTE's built-in regex search API.
 
-- **Toggle:** `Ctrl+F` opens/closes the search bar (overlay at bottom of terminal)
+- **Toggle:** `Ctrl+Shift+F` opens/closes the search bar (overlay at bottom of terminal)
 - **Search:** Uses `vte4::Regex::for_search()` with PCRE2, applied via `terminal.search_set_regex()`
 - **Navigation:** `Enter` = next match, `Shift+Enter` = previous match
 - **Close:** `Escape` closes search and returns focus to terminal
