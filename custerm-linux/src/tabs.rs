@@ -27,8 +27,10 @@ pub struct TabManager {
     tab_css: gtk4::CssProvider,
     /// Custom tab titles set via rename (overrides auto-titles)
     custom_titles: Rc<RefCell<std::collections::HashMap<String, String>>>,
-    /// Whether the tab bar is collapsed (hidden regardless of tab count)
+    /// Whether the tab bar is collapsed (icon-only mode)
     tab_bar_collapsed: Rc<RefCell<bool>>,
+    /// Whether the user has explicitly toggled the tab bar state
+    user_toggled: Rc<RefCell<bool>>,
 }
 
 impl TabManager {
@@ -69,8 +71,12 @@ impl TabManager {
             event_bus,
             tab_css,
             custom_titles: Rc::new(RefCell::new(std::collections::HashMap::new())),
-            tab_bar_collapsed: Rc::new(RefCell::new(false)),
+            tab_bar_collapsed: Rc::new(RefCell::new(true)),
+            user_toggled: Rc::new(RefCell::new(false)),
         });
+
+        // Apply initial collapsed state
+        manager.notebook.add_css_class("custerm-collapsed");
 
         // Update tab bar visibility on page remove
         let tabs_ref = manager.tabs.clone();
@@ -295,6 +301,7 @@ impl TabManager {
     /// Toggle tab bar between expanded and collapsed (icon-only) mode.
     /// Returns true if now expanded.
     pub fn toggle_tab_bar(&self) -> bool {
+        *self.user_toggled.borrow_mut() = true;
         let collapsed = {
             let mut c = self.tab_bar_collapsed.borrow_mut();
             *c = !*c;
@@ -809,8 +816,11 @@ impl TabManager {
     }
 
     fn update_tab_visibility(&self) {
-        if *self.tab_bar_collapsed.borrow() {
-            // New tabs auto-expand the tab bar
+        // Auto-expand only on 1 -> 2 transition, and only if user hasn't manually toggled
+        if !*self.user_toggled.borrow()
+            && self.tabs.borrow().len() == 2
+            && *self.tab_bar_collapsed.borrow()
+        {
             *self.tab_bar_collapsed.borrow_mut() = false;
             self.apply_collapsed_state(false);
         }
@@ -1242,6 +1252,9 @@ fn setup_tab_actions(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow)
         pop.popdown();
         mgr.add_webview_tab("about:blank", &win);
     });
+
+    // Hide add button initially (starts collapsed)
+    add_btn.set_visible(false);
 
     action_box.append(&toggle_btn);
     action_box.append(&add_btn);
