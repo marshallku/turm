@@ -74,12 +74,14 @@ Embed browser as a panel type alongside terminals.
 ### Phase 6: AI Agent Integration
 Make custerm a first-class environment for AI coding agents.
 
-- [ ] **Agent protocol**: structured input/output channel (beyond raw PTY text)
-- [ ] **Screen reading API**: semantic terminal content (not just raw bytes)
-- [ ] **Command execution API**: AI sends commands, gets structured results
+- [x] **Screen reading API**: `terminal.read` (full screen or row/col range), `terminal.state` (cursor, dimensions, CWD, title)
+- [x] **Command execution API**: `terminal.exec` (command + newline), `terminal.feed` (raw PTY input)
+- [x] **CWD tracking**: `terminal.cwd_changed` event via OSC 7
+- [x] **CLI commands**: `custermctl terminal read/state/exec/feed`
 - [ ] **Notification channel**: OSC 9/99/777 parsing for agent status
 - [ ] **Approval workflow**: AI proposes action → user confirms in custerm UI
 - [ ] **Context sharing**: share terminal history, file paths, git status with agent
+- [ ] **Shell integration signals**: precmd/preexec events for command lifecycle tracking
 
 ### Phase: Deployment & Distribution ✅
 - [x] `--version` flag for both binaries

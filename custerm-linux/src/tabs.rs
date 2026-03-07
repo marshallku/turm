@@ -135,7 +135,6 @@ impl TabManager {
         self.notebook
             .set_tab_reorderable(&tab_content.container, true);
         self.tabs.borrow_mut().push(tab_content);
-        self.update_tab_visibility();
 
         let page_num = self.notebook.n_pages() - 1;
         self.notebook.set_current_page(Some(page_num));
@@ -171,7 +170,6 @@ impl TabManager {
         self.notebook
             .set_tab_reorderable(&tab_content.container, true);
         self.tabs.borrow_mut().push(tab_content);
-        self.update_tab_visibility();
 
         let page_num = self.notebook.n_pages() - 1;
         self.notebook.set_current_page(Some(page_num));
@@ -257,7 +255,6 @@ impl TabManager {
                 let panel_id = focused_panel.id().to_string();
                 self.tabs.borrow_mut().remove(tab_idx);
                 self.notebook.remove_page(Some(tab_idx as u32));
-                self.update_tab_visibility();
 
                 broadcast(
                     &self.event_bus,
@@ -645,6 +642,27 @@ impl TabManager {
                     ),
                 );
             });
+
+            // Hook CWD change events (OSC 7)
+            let bus = self.event_bus.clone();
+            let panel_id = term.id.clone();
+            term.terminal
+                .connect_current_directory_uri_changed(move |term| {
+                    let cwd = term.current_directory_uri().map(|u| {
+                        let s = u.to_string();
+                        s.strip_prefix("file://").unwrap_or(&s).to_string()
+                    });
+                    broadcast(
+                        &bus,
+                        &Event::new(
+                            "terminal.cwd_changed",
+                            json!({
+                                "panel_id": panel_id,
+                                "cwd": cwd,
+                            }),
+                        ),
+                    );
+                });
         }
 
         self.track_focus(&panel);
@@ -774,7 +792,6 @@ impl TabManager {
                         drop(tabs);
                         self.tabs.borrow_mut().remove(tab_idx);
                         self.notebook.remove_page(Some(tab_idx as u32));
-                        self.update_tab_visibility();
 
                         broadcast(
                             bus,
@@ -822,17 +839,6 @@ impl TabManager {
             }
         }
         None
-    }
-
-    fn update_tab_visibility(&self) {
-        // Auto-expand only on 1 -> 2 transition, and only if user hasn't manually toggled
-        if !*self.user_toggled.borrow()
-            && self.tabs.borrow().len() == 2
-            && *self.tab_bar_collapsed.borrow()
-        {
-            *self.tab_bar_collapsed.borrow_mut() = false;
-            self.apply_collapsed_state(false);
-        }
     }
 
     fn focus_active_tab_panel(&self) {

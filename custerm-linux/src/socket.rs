@@ -10,6 +10,8 @@ use serde_json::json;
 
 use custerm_core::protocol::{Event, Request, Response};
 
+use vte4::prelude::*;
+
 use crate::tabs::TabManager;
 
 const WALLPAPER_CACHE: &str = ".cache/terminal-wallpapers.txt";
@@ -367,6 +369,27 @@ pub fn dispatch(cmd: SocketCommand, mgr: &Rc<TabManager>, window: &ApplicationWi
                     "Missing 'id' and/or 'title' param",
                 ),
             };
+            let _ = cmd.reply.send(resp);
+        }
+
+        // -- Terminal agent commands --
+        "terminal.read" => {
+            let resp = handle_terminal_read(req, mgr);
+            let _ = cmd.reply.send(resp);
+        }
+
+        "terminal.state" => {
+            let resp = handle_terminal_state(req, mgr);
+            let _ = cmd.reply.send(resp);
+        }
+
+        "terminal.exec" => {
+            let resp = handle_terminal_exec(req, mgr);
+            let _ = cmd.reply.send(resp);
+        }
+
+        "terminal.feed" => {
+            let resp = handle_terminal_feed(req, mgr);
             let _ = cmd.reply.send(resp);
         }
 
@@ -1022,4 +1045,122 @@ fn toggle_bg_mode() -> bool {
 
 pub fn cleanup(socket_path: &str) {
     let _ = std::fs::remove_file(socket_path);
+}
+
+// -- Terminal agent command helpers --
+
+fn resolve_terminal(
+    req: &Request,
+    mgr: &Rc<TabManager>,
+) -> Result<Rc<crate::panel::PanelVariant>, Response> {
+    // If id is provided, find that specific panel; otherwise use active panel
+    let panel = if let Some(id) = req.params.get("id").and_then(|v| v.as_str()) {
+        mgr.find_panel_by_id(id).ok_or_else(|| {
+            Response::error(
+                req.id.clone(),
+                "not_found",
+                &format!("Panel not found: {id}"),
+            )
+        })?
+    } else {
+        mgr.active_panel()
+            .ok_or_else(|| Response::error(req.id.clone(), "no_panel", "No active panel"))?
+    };
+
+    if panel.as_terminal().is_none() {
+        return Err(Response::error(
+            req.id.clone(),
+            "wrong_panel_type",
+            "Panel is not a terminal",
+        ));
+    }
+    Ok(panel)
+}
+
+fn handle_terminal_read(req: &Request, mgr: &Rc<TabManager>) -> Response {
+    let panel = match resolve_terminal(req, mgr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let term = panel.as_terminal().unwrap();
+
+    // Optional range params
+    let has_range = req.params.get("start_row").is_some();
+    let text = if has_range {
+        let start_row = req
+            .params
+            .get("start_row")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let start_col = req
+            .params
+            .get("start_col")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let end_row = req
+            .params
+            .get("end_row")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_else(|| term.terminal.row_count() as i64 - 1);
+        let end_col = req
+            .params
+            .get("end_col")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_else(|| term.terminal.column_count() as i64 - 1);
+        term.read_range(start_row, start_col, end_row, end_col)
+    } else {
+        term.read_screen()
+    };
+
+    let (col, row) = term.terminal.cursor_position();
+    Response::success(
+        req.id.clone(),
+        json!({
+            "text": text,
+            "cursor": [row, col],
+            "rows": term.terminal.row_count(),
+            "cols": term.terminal.column_count(),
+        }),
+    )
+}
+
+fn handle_terminal_state(req: &Request, mgr: &Rc<TabManager>) -> Response {
+    let panel = match resolve_terminal(req, mgr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let term = panel.as_terminal().unwrap();
+    Response::success(req.id.clone(), term.state())
+}
+
+fn handle_terminal_exec(req: &Request, mgr: &Rc<TabManager>) -> Response {
+    let panel = match resolve_terminal(req, mgr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let command = match req.params.get("command").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => {
+            return Response::error(req.id.clone(), "invalid_params", "Missing 'command' param");
+        }
+    };
+    let term = panel.as_terminal().unwrap();
+    // Send command + newline to execute
+    term.feed_input(&format!("{command}\n"));
+    Response::success(req.id.clone(), json!({ "status": "ok" }))
+}
+
+fn handle_terminal_feed(req: &Request, mgr: &Rc<TabManager>) -> Response {
+    let panel = match resolve_terminal(req, mgr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let text = match req.params.get("text").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return Response::error(req.id.clone(), "invalid_params", "Missing 'text' param"),
+    };
+    let term = panel.as_terminal().unwrap();
+    // Send raw text (no newline appended)
+    term.feed_input(text);
+    Response::success(req.id.clone(), json!({ "status": "ok" }))
 }

@@ -245,6 +245,49 @@ impl TerminalPanel {
         );
     }
 
+    /// Read visible terminal screen text
+    pub fn read_screen(&self) -> String {
+        self.terminal
+            .text_format(vte4::Format::Text)
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    }
+
+    /// Read a specific range of terminal text (row/col are 0-based)
+    pub fn read_range(&self, start_row: i64, start_col: i64, end_row: i64, end_col: i64) -> String {
+        let (text, _len) = self.terminal.text_range_format(
+            vte4::Format::Text,
+            start_row as std::ffi::c_long,
+            start_col as std::ffi::c_long,
+            end_row as std::ffi::c_long,
+            end_col as std::ffi::c_long,
+        );
+        text.map(|s: gtk4::glib::GString| s.to_string())
+            .unwrap_or_default()
+    }
+
+    /// Get terminal state: cursor, dimensions, CWD, title
+    pub fn state(&self) -> serde_json::Value {
+        let (cursor_col, cursor_row) = self.terminal.cursor_position();
+        let cwd = self.terminal.current_directory_uri().map(|u| {
+            // Strip file:// prefix
+            let s = u.to_string();
+            s.strip_prefix("file://").unwrap_or(&s).to_string()
+        });
+        serde_json::json!({
+            "cols": self.terminal.column_count(),
+            "rows": self.terminal.row_count(),
+            "cursor": [cursor_row, cursor_col],
+            "cwd": cwd,
+            "title": self.terminal.window_title().map(|t| t.to_string()),
+        })
+    }
+
+    /// Send text to the terminal PTY (execute a command)
+    pub fn feed_input(&self, text: &str) {
+        self.terminal.feed_child(text.as_bytes());
+    }
+
     pub fn apply_config(&self, config: &CustermConfig) {
         let font_desc = gtk4::pango::FontDescription::from_string(&format!(
             "{} {}",

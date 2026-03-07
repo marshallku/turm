@@ -45,6 +45,10 @@ pub enum Command {
     #[command(subcommand)]
     Webview(WebviewCommand),
 
+    /// Terminal agent commands (read, exec, state)
+    #[command(subcommand)]
+    Terminal(TerminalCommand),
+
     /// Check for updates or update custerm
     #[command(subcommand)]
     Update(UpdateCommand),
@@ -121,6 +125,50 @@ pub enum SplitCommand {
 pub enum EventCommand {
     /// Subscribe to terminal events (streams JSON lines)
     Subscribe,
+}
+
+#[derive(Subcommand)]
+pub enum TerminalCommand {
+    /// Read visible terminal screen text
+    Read {
+        /// Panel ID (defaults to active terminal)
+        #[arg(long)]
+        id: Option<String>,
+        /// Start row (0-based, for range read)
+        #[arg(long)]
+        start_row: Option<i64>,
+        /// Start column (0-based, for range read)
+        #[arg(long)]
+        start_col: Option<i64>,
+        /// End row (0-based, for range read)
+        #[arg(long)]
+        end_row: Option<i64>,
+        /// End column (0-based, for range read)
+        #[arg(long)]
+        end_col: Option<i64>,
+    },
+    /// Get terminal state (cursor, dimensions, CWD, title)
+    State {
+        /// Panel ID (defaults to active terminal)
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Execute a command in the terminal (sends text + newline)
+    Exec {
+        /// Panel ID (defaults to active terminal)
+        #[arg(long)]
+        id: Option<String>,
+        /// Command to execute
+        command: String,
+    },
+    /// Send raw text to the terminal (no newline appended)
+    Feed {
+        /// Panel ID (defaults to active terminal)
+        #[arg(long)]
+        id: Option<String>,
+        /// Text to send
+        text: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -318,6 +366,13 @@ impl Cli {
                 WebviewCommand::Devtools { .. } => "webview.devtools",
             }
             .to_string(),
+            Command::Terminal(cmd) => match cmd {
+                TerminalCommand::Read { .. } => "terminal.read",
+                TerminalCommand::State { .. } => "terminal.state",
+                TerminalCommand::Exec { .. } => "terminal.exec",
+                TerminalCommand::Feed { .. } => "terminal.feed",
+            }
+            .to_string(),
             Command::Update(_) => unreachable!("update commands are handled locally"),
         }
     }
@@ -343,6 +398,39 @@ impl Cli {
             Command::Tab(cmd) => match cmd {
                 TabCommand::Rename { id, title } => json!({ "id": id, "title": title }),
                 _ => json!({}),
+            },
+            Command::Terminal(cmd) => match cmd {
+                TerminalCommand::Read {
+                    id,
+                    start_row,
+                    start_col,
+                    end_row,
+                    end_col,
+                } => {
+                    let mut p = json!({});
+                    if let Some(id) = id {
+                        p["id"] = json!(id);
+                    }
+                    if let Some(sr) = start_row {
+                        p["start_row"] = json!(sr);
+                        p["start_col"] = json!(start_col.unwrap_or(0));
+                        p["end_row"] = json!(end_row.unwrap_or(*sr));
+                        p["end_col"] = json!(end_col.unwrap_or(999));
+                    }
+                    p
+                }
+                TerminalCommand::State { id } => match id {
+                    Some(id) => json!({ "id": id }),
+                    None => json!({}),
+                },
+                TerminalCommand::Exec { id, command } => match id {
+                    Some(id) => json!({ "id": id, "command": command }),
+                    None => json!({ "command": command }),
+                },
+                TerminalCommand::Feed { id, text } => match id {
+                    Some(id) => json!({ "id": id, "text": text }),
+                    None => json!({ "text": text }),
+                },
             },
             Command::Split(_) | Command::Event(_) | Command::Update(_) => {
                 json!({})

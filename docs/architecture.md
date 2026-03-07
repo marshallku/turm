@@ -99,7 +99,7 @@ custermctl ──Unix socket──► socket server (per-client thread)
                           oneshot response ──► socket thread ──► client
 ```
 
-**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `tab.rename`, `tabs.toggle_bar`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`, `webview.open`, `webview.navigate`, `webview.back`, `webview.forward`, `webview.reload`, `webview.execute_js`, `webview.get_content`, `webview.screenshot`, `webview.query`, `webview.query_all`, `webview.get_styles`, `webview.click`, `webview.fill`, `webview.scroll`, `webview.page_info`, `webview.devtools`
+**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `tab.rename`, `tabs.toggle_bar`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`, `terminal.read`, `terminal.state`, `terminal.exec`, `terminal.feed`, `webview.open`, `webview.navigate`, `webview.back`, `webview.forward`, `webview.reload`, `webview.execute_js`, `webview.get_content`, `webview.screenshot`, `webview.query`, `webview.query_all`, `webview.get_styles`, `webview.click`, `webview.fill`, `webview.scroll`, `webview.page_info`, `webview.devtools`
 
 **Cleanup**: Socket file removed on window destroy.
 
@@ -120,6 +120,7 @@ Clients can subscribe to real-time events via `event.subscribe`. The socket stay
 | `tab.created` | `{panel_id, tab}` | New tab opened |
 | `tab.closed` | `{panel_id, tab}` | Tab closed |
 | `terminal.output` | `{panel_id, text}` | Terminal receives output (high frequency) |
+| `terminal.cwd_changed` | `{panel_id, cwd}` | Terminal CWD changes (OSC 7) |
 | `webview.loaded` | `{panel_id}` | WebView finishes loading |
 | `webview.title_changed` | `{panel_id, title}` | WebView title changes |
 | `webview.navigated` | `{panel_id, url}` | WebView URI changes |
@@ -134,6 +135,27 @@ Clients can subscribe to real-time events via `event.subscribe`. The socket stay
 **`session.info`** (`{id}`): Returns detailed panel info. Terminal: `{id, type, title, tab, focused, cols, rows, cursor: [row, col]}`. WebView: `{id, type, title, tab, focused, url}`.
 
 **`tab.info`**: Returns extended tab info: `{count, current, tabs: [{index, panel_count, title}]}`.
+
+## Terminal Agent API
+
+Commands for programmatic terminal interaction (AI agent integration).
+
+| Command | Params | Response |
+|---------|--------|----------|
+| `terminal.read` | `id?`, `start_row?`, `start_col?`, `end_row?`, `end_col?` | `{text, cursor: [row, col], rows, cols}` |
+| `terminal.state` | `id?` | `{cols, rows, cursor: [row, col], cwd, title}` |
+| `terminal.exec` | `id?`, `command` | Sends command + newline to terminal PTY |
+| `terminal.feed` | `id?`, `text` | Sends raw text to terminal PTY (no newline) |
+
+All commands default to the active terminal panel when `id` is omitted.
+
+**CLI usage**:
+```bash
+custermctl terminal state
+custermctl terminal read --start-row 0 --end-row 5
+custermctl terminal exec "ls -la"
+custermctl terminal feed $'\x03'  # Send Ctrl+C
+```
 
 ## Panel System
 
