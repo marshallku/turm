@@ -80,8 +80,8 @@ Make custerm a first-class environment for AI coding agents.
 - [x] **CLI commands**: `custermctl terminal read/state/exec/feed`
 - [x] **Notification channel**: OSC 9/777 notifications via `terminal.notification` event
 - [x] **Shell integration signals**: `terminal.shell_precmd` / `terminal.shell_preexec` events
-- [ ] **Approval workflow**: AI proposes action → user confirms in custerm UI
-- [ ] **Context sharing**: share terminal history, file paths, git status with agent
+- [x] **Approval workflow**: `agent.approve` shows modal dialog, returns user's choice
+- [x] **Context sharing**: `terminal.history` (scrollback), `terminal.context` (state + screen + history)
 
 ### Phase: Deployment & Distribution ✅
 - [x] `--version` flag for both binaries

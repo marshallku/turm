@@ -49,6 +49,10 @@ pub enum Command {
     #[command(subcommand)]
     Terminal(TerminalCommand),
 
+    /// AI agent commands (approval workflow)
+    #[command(subcommand)]
+    Agent(AgentCommand),
+
     /// Check for updates or update custerm
     #[command(subcommand)]
     Update(UpdateCommand),
@@ -168,6 +172,39 @@ pub enum TerminalCommand {
         id: Option<String>,
         /// Text to send
         text: String,
+    },
+    /// Read terminal scrollback history
+    History {
+        /// Panel ID (defaults to active terminal)
+        #[arg(long)]
+        id: Option<String>,
+        /// Number of scrollback lines to read
+        #[arg(long, default_value_t = 100)]
+        lines: i64,
+    },
+    /// Get combined terminal context (state + screen + scrollback)
+    Context {
+        /// Panel ID (defaults to active terminal)
+        #[arg(long)]
+        id: Option<String>,
+        /// Number of scrollback history lines to include
+        #[arg(long, default_value_t = 50)]
+        history_lines: i64,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentCommand {
+    /// Request user approval for an action (shows dialog, blocks until response)
+    Approve {
+        /// Dialog message describing the action
+        message: String,
+        /// Dialog title
+        #[arg(long, default_value = "Agent Action")]
+        title: String,
+        /// Custom button labels (comma-separated, first = approve)
+        #[arg(long)]
+        actions: Option<String>,
     },
 }
 
@@ -371,6 +408,12 @@ impl Cli {
                 TerminalCommand::State { .. } => "terminal.state",
                 TerminalCommand::Exec { .. } => "terminal.exec",
                 TerminalCommand::Feed { .. } => "terminal.feed",
+                TerminalCommand::History { .. } => "terminal.history",
+                TerminalCommand::Context { .. } => "terminal.context",
+            }
+            .to_string(),
+            Command::Agent(cmd) => match cmd {
+                AgentCommand::Approve { .. } => "agent.approve",
             }
             .to_string(),
             Command::Update(_) => unreachable!("update commands are handled locally"),
@@ -431,6 +474,34 @@ impl Cli {
                     Some(id) => json!({ "id": id, "text": text }),
                     None => json!({ "text": text }),
                 },
+                TerminalCommand::History { id, lines } => {
+                    let mut p = json!({ "lines": lines });
+                    if let Some(id) = id {
+                        p["id"] = json!(id);
+                    }
+                    p
+                }
+                TerminalCommand::Context { id, history_lines } => {
+                    let mut p = json!({ "history_lines": history_lines });
+                    if let Some(id) = id {
+                        p["id"] = json!(id);
+                    }
+                    p
+                }
+            },
+            Command::Agent(cmd) => match cmd {
+                AgentCommand::Approve {
+                    message,
+                    title,
+                    actions,
+                } => {
+                    let mut p = json!({ "message": message, "title": title });
+                    if let Some(actions) = actions {
+                        let acts: Vec<&str> = actions.split(',').map(|s| s.trim()).collect();
+                        p["actions"] = json!(acts);
+                    }
+                    p
+                }
             },
             Command::Split(_) | Command::Event(_) | Command::Update(_) => {
                 json!({})

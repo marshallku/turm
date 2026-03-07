@@ -99,7 +99,7 @@ custermctl ──Unix socket──► socket server (per-client thread)
                           oneshot response ──► socket thread ──► client
 ```
 
-**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `tab.rename`, `tabs.toggle_bar`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`, `terminal.read`, `terminal.state`, `terminal.exec`, `terminal.feed`, `webview.open`, `webview.navigate`, `webview.back`, `webview.forward`, `webview.reload`, `webview.execute_js`, `webview.get_content`, `webview.screenshot`, `webview.query`, `webview.query_all`, `webview.get_styles`, `webview.click`, `webview.fill`, `webview.scroll`, `webview.page_info`, `webview.devtools`
+**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `tab.rename`, `tabs.toggle_bar`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`, `terminal.read`, `terminal.state`, `terminal.exec`, `terminal.feed`, `terminal.history`, `terminal.context`, `agent.approve`, `webview.open`, `webview.navigate`, `webview.back`, `webview.forward`, `webview.reload`, `webview.execute_js`, `webview.get_content`, `webview.screenshot`, `webview.query`, `webview.query_all`, `webview.get_styles`, `webview.click`, `webview.fill`, `webview.scroll`, `webview.page_info`, `webview.devtools`
 
 **Cleanup**: Socket file removed on window destroy.
 
@@ -149,6 +149,8 @@ Commands for programmatic terminal interaction (AI agent integration).
 | `terminal.state` | `id?` | `{cols, rows, cursor: [row, col], cwd, title}` |
 | `terminal.exec` | `id?`, `command` | Sends command + newline to terminal PTY |
 | `terminal.feed` | `id?`, `text` | Sends raw text to terminal PTY (no newline) |
+| `terminal.history` | `id?`, `lines?` (default 100) | `{text, lines_requested, rows, cols}` — scrollback buffer |
+| `terminal.context` | `id?`, `history_lines?` (default 50) | `{state, screen, history}` — combined context |
 
 All commands default to the active terminal panel when `id` is omitted.
 
@@ -158,6 +160,24 @@ custermctl terminal state
 custermctl terminal read --start-row 0 --end-row 5
 custermctl terminal exec "ls -la"
 custermctl terminal feed $'\x03'  # Send Ctrl+C
+custermctl terminal history --lines 200
+custermctl terminal context --history-lines 100
+```
+
+## Approval Workflow
+
+AI agents can request user approval before taking actions.
+
+| Command | Params | Response |
+|---------|--------|----------|
+| `agent.approve` | `message`, `title?`, `actions?` | `{approved, action, index}` |
+
+Shows a modal GTK dialog and blocks until the user responds. The `actions` param is an array of button labels (default: `["Approve", "Deny"]`). The first action (index 0) is treated as "approved".
+
+**CLI usage**:
+```bash
+custermctl agent approve "Delete 15 files from /tmp?"
+custermctl agent approve "Deploy to production?" --title "Deploy" --actions "Deploy,Cancel"
 ```
 
 ## Panel System

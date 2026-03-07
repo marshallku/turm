@@ -393,6 +393,20 @@ pub fn dispatch(cmd: SocketCommand, mgr: &Rc<TabManager>, window: &ApplicationWi
             let _ = cmd.reply.send(resp);
         }
 
+        "terminal.history" => {
+            let resp = handle_terminal_history(req, mgr);
+            let _ = cmd.reply.send(resp);
+        }
+
+        "terminal.context" => {
+            let resp = handle_terminal_context(req, mgr);
+            let _ = cmd.reply.send(resp);
+        }
+
+        "agent.approve" => {
+            handle_agent_approve(cmd, window);
+        }
+
         _ => {
             let _ = cmd.reply.send(Response::error(
                 req.id.clone(),
@@ -1163,4 +1177,136 @@ fn handle_terminal_feed(req: &Request, mgr: &Rc<TabManager>) -> Response {
     // Send raw text (no newline appended)
     term.feed_input(text);
     Response::success(req.id.clone(), json!({ "status": "ok" }))
+}
+
+fn handle_terminal_history(req: &Request, mgr: &Rc<TabManager>) -> Response {
+    let panel = match resolve_terminal(req, mgr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let term = panel.as_terminal().unwrap();
+
+    // Number of scrollback lines to read (default 100)
+    let lines = req
+        .params
+        .get("lines")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(100);
+
+    let row_count = term.terminal.row_count() as i64;
+    let col_count = term.terminal.column_count() as i64;
+
+    // Negative rows access scrollback in VTE
+    let start_row = -lines;
+    let end_row = row_count - 1;
+
+    let text = term.read_range(start_row, 0, end_row, col_count - 1);
+    Response::success(
+        req.id.clone(),
+        json!({
+            "text": text,
+            "lines_requested": lines,
+            "rows": row_count,
+            "cols": col_count,
+        }),
+    )
+}
+
+fn handle_terminal_context(req: &Request, mgr: &Rc<TabManager>) -> Response {
+    let panel = match resolve_terminal(req, mgr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let term = panel.as_terminal().unwrap();
+
+    let state = term.state();
+    let screen = term.read_screen();
+
+    // Recent scrollback (last 50 lines above visible area)
+    let history_lines = req
+        .params
+        .get("history_lines")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(50);
+    let col_count = term.terminal.column_count() as i64;
+    let history = term.read_range(-history_lines, 0, -1, col_count - 1);
+
+    Response::success(
+        req.id.clone(),
+        json!({
+            "state": state,
+            "screen": screen,
+            "history": history,
+        }),
+    )
+}
+
+fn handle_agent_approve(cmd: SocketCommand, window: &ApplicationWindow) {
+    let req = &cmd.request;
+    let title = req
+        .params
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Agent Action");
+    let message = match req.params.get("message").and_then(|v| v.as_str()) {
+        Some(m) => m,
+        None => {
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "invalid_params",
+                "Missing 'message' param",
+            ));
+            return;
+        }
+    };
+    let actions = req
+        .params
+        .get("actions")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec!["Approve".to_string(), "Deny".to_string()]);
+
+    let dialog = gtk4::AlertDialog::builder()
+        .modal(true)
+        .message(title)
+        .detail(message)
+        .buttons(actions.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+        .default_button(0)
+        .cancel_button(actions.len() as i32 - 1)
+        .build();
+
+    let req_id = req.id.clone();
+    let actions_clone = actions.clone();
+    dialog.choose(Some(window), gtk4::gio::Cancellable::NONE, move |result| {
+        let resp = match result {
+            Ok(idx) => {
+                let action = actions_clone
+                    .get(idx as usize)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let approved = idx == 0;
+                Response::success(
+                    req_id.clone(),
+                    json!({
+                        "approved": approved,
+                        "action": action,
+                        "index": idx,
+                    }),
+                )
+            }
+            Err(_) => Response::success(
+                req_id.clone(),
+                json!({
+                    "approved": false,
+                    "action": "cancelled",
+                    "index": -1,
+                }),
+            ),
+        };
+        let _ = cmd.reply.send(resp);
+    });
 }
