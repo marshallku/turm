@@ -102,6 +102,9 @@ impl TabManager {
             }
         });
 
+        // Action buttons in the tab bar
+        setup_tab_actions(&manager, window);
+
         // Keyboard shortcuts
         setup_shortcuts(&manager, window);
 
@@ -1148,6 +1151,77 @@ fn setup_shortcuts(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow) {
     window.add_controller(controller);
 }
 
+fn setup_tab_actions(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow) {
+    let action_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
+    action_box.add_css_class("custerm-tab-actions");
+
+    // Toggle button (collapse/expand tab bar)
+    let toggle_btn = gtk4::Button::from_icon_name("sidebar-show-symbolic");
+    toggle_btn.add_css_class("flat");
+    toggle_btn.add_css_class("custerm-action-btn");
+    toggle_btn.set_tooltip_text(Some("Toggle tab bar (Ctrl+B)"));
+
+    let mgr = manager.clone();
+    toggle_btn.connect_clicked(move |_| {
+        mgr.toggle_tab_bar();
+    });
+
+    // Add button with popover for terminal/webview choice
+    let add_btn = gtk4::MenuButton::new();
+    add_btn.set_icon_name("list-add-symbolic");
+    add_btn.add_css_class("flat");
+    add_btn.add_css_class("custerm-action-btn");
+    add_btn.set_tooltip_text(Some("New tab"));
+
+    let popover = gtk4::Popover::new();
+    let pop_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    pop_box.add_css_class("custerm-add-menu");
+
+    let term_btn = gtk4::Button::new();
+    let term_content = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    term_content.append(&gtk4::Image::from_icon_name("utilities-terminal-symbolic"));
+    term_content.append(&gtk4::Label::new(Some("Terminal")));
+    term_btn.set_child(Some(&term_content));
+    term_btn.add_css_class("flat");
+    term_btn.add_css_class("custerm-add-item");
+
+    let browser_btn = gtk4::Button::new();
+    let browser_content = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    browser_content.append(&gtk4::Image::from_icon_name("web-browser-symbolic"));
+    browser_content.append(&gtk4::Label::new(Some("Browser")));
+    browser_btn.set_child(Some(&browser_content));
+    browser_btn.add_css_class("flat");
+    browser_btn.add_css_class("custerm-add-item");
+
+    pop_box.append(&term_btn);
+    pop_box.append(&browser_btn);
+    popover.set_child(Some(&pop_box));
+    add_btn.set_popover(Some(&popover));
+
+    let mgr = manager.clone();
+    let win = window.clone();
+    let pop = popover.clone();
+    term_btn.connect_clicked(move |_| {
+        pop.popdown();
+        mgr.add_tab(&win);
+    });
+
+    let mgr = manager.clone();
+    let win = window.clone();
+    let pop = popover.clone();
+    browser_btn.connect_clicked(move |_| {
+        pop.popdown();
+        mgr.add_webview_tab("about:blank", &win);
+    });
+
+    action_box.append(&toggle_btn);
+    action_box.append(&add_btn);
+
+    manager
+        .notebook
+        .set_action_widget(&action_box, gtk4::PackType::End);
+}
+
 fn build_tab_css(tab_width: u32) -> String {
     format!(
         r#"
@@ -1213,6 +1287,37 @@ notebook header.bottom tab {{
 .custerm-tab-close:hover {{
     background-color: #45475a;
     color: #f38ba8;
+}}
+
+.custerm-tab-actions {{
+    padding: 4px;
+}}
+
+.custerm-action-btn {{
+    min-width: 24px;
+    min-height: 24px;
+    padding: 2px;
+    border-radius: 6px;
+    color: #6c7086;
+}}
+
+.custerm-action-btn:hover {{
+    background-color: #313244;
+    color: #cdd6f4;
+}}
+
+.custerm-add-menu {{
+    padding: 4px;
+}}
+
+.custerm-add-item {{
+    padding: 6px 12px;
+    border-radius: 4px;
+    color: #cdd6f4;
+}}
+
+.custerm-add-item:hover {{
+    background-color: #313244;
 }}
 "#
     )
