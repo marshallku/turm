@@ -97,7 +97,7 @@ custermctl ──Unix socket──► socket server (per-client thread)
                           oneshot response ──► socket thread ──► client
 ```
 
-**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `tab.new`, `tab.close`, `tab.list`, `split.horizontal`, `split.vertical`
+**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `split.horizontal`, `split.vertical`
 
 **Cleanup**: Socket file removed on window destroy.
 

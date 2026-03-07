@@ -49,7 +49,7 @@ Single programmable interface for both human CLI and AI agents.
 - [x] cmux V2 JSON protocol types
 - [x] Unix socket client
 - [x] **Socket server** in custerm-linux (Unix socket, per-PID path)
-- [x] **Command dispatch**: system.ping, background.set/clear/set_tint, tab.new/close/list, split.horizontal/vertical
+- [x] **Command dispatch**: system.ping, background.set/clear/set_tint/next/toggle, tab.new/close/list, split.horizontal/vertical
 - [x] **Env var injection**: CUSTERM_SOCKET per terminal session
 - [ ] **Event stream**: subscribe to terminal output, focus changes, panel lifecycle
 - [ ] **Query API**: read terminal screen content, list panels/tabs, get state

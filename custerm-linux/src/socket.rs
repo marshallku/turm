@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc;
 
@@ -10,6 +10,9 @@ use serde_json::json;
 use custerm_core::protocol::{Request, Response};
 
 use crate::tabs::TabManager;
+
+const WALLPAPER_CACHE: &str = ".cache/terminal-wallpapers.txt";
+const BG_MODE_FILE: &str = ".cache/custerm-bg-mode";
 
 pub struct SocketCommand {
     pub request: Request,
@@ -142,6 +145,42 @@ pub fn dispatch(
             }
         }
 
+        "background.next" => {
+            if !is_bg_active() {
+                return Response::success(req.id.clone(), json!({ "status": "ok", "mode": "deactive" }));
+            }
+            match select_random_image() {
+                Some(img) => {
+                    let path = Path::new(&img);
+                    if !path.exists() {
+                        return Response::error(req.id.clone(), "not_found", &format!("File not found: {img}"));
+                    }
+                    if let Some(panel) = mgr.active_panel() {
+                        panel.set_background(path);
+                        Response::success(req.id.clone(), json!({ "status": "ok", "path": img }))
+                    } else {
+                        Response::error(req.id.clone(), "no_panel", "No active panel")
+                    }
+                }
+                None => Response::error(req.id.clone(), "no_images", "No images in wallpaper cache"),
+            }
+        }
+
+        "background.toggle" => {
+            let now_active = toggle_bg_mode();
+            if let Some(panel) = mgr.active_panel() {
+                if now_active {
+                    if let Some(img) = select_random_image() {
+                        panel.set_background(Path::new(&img));
+                    }
+                } else {
+                    panel.clear_background();
+                }
+            }
+            let mode = if now_active { "active" } else { "deactive" };
+            Response::success(req.id.clone(), json!({ "status": "ok", "mode": mode }))
+        }
+
         "background.set_tint" => {
             let opacity = req.params.get("opacity").and_then(|v| v.as_f64());
             match opacity {
@@ -194,6 +233,41 @@ pub fn dispatch(
             &format!("Unknown method: {}", req.method),
         ),
     }
+}
+
+fn home_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
+}
+
+fn select_random_image() -> Option<String> {
+    let cache_path = home_dir().join(WALLPAPER_CACHE);
+    let content = std::fs::read_to_string(cache_path).ok()?;
+    let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() {
+        return None;
+    }
+    use std::time::SystemTime;
+    let seed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as usize;
+    Some(lines[seed % lines.len()].to_string())
+}
+
+fn is_bg_active() -> bool {
+    let mode_path = home_dir().join(BG_MODE_FILE);
+    match std::fs::read_to_string(mode_path) {
+        Ok(s) => s.trim() != "deactive",
+        Err(_) => true,
+    }
+}
+
+fn toggle_bg_mode() -> bool {
+    let mode_path = home_dir().join(BG_MODE_FILE);
+    let new_active = !is_bg_active();
+    let mode = if new_active { "active" } else { "deactive" };
+    let _ = std::fs::write(mode_path, mode);
+    new_active
 }
 
 pub fn cleanup(socket_path: &str) {

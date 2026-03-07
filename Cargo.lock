@@ -196,6 +196,7 @@ name = "custerm-linux"
 version = "0.1.0"
 dependencies = [
  "custerm-core",
+ "dirs",
  "gtk4",
  "serde_json",
  "vte4",
