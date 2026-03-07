@@ -1,11 +1,21 @@
 mod client;
 mod commands;
+mod update;
 
 use clap::Parser;
-use commands::{Cli, Command, EventCommand};
+use commands::{Cli, Command, EventCommand, UpdateCommand};
 
 fn main() {
     let cli = Cli::parse();
+
+    // Handle update commands locally (no socket needed)
+    if let Command::Update(cmd) = &cli.command {
+        match cmd {
+            UpdateCommand::Check => update::check_update(),
+            UpdateCommand::Apply { version } => update::apply_update(version.clone()),
+        }
+        return;
+    }
 
     let socket_path = cli.socket.clone().unwrap_or_else(|| {
         std::env::var("CUSTERM_SOCKET").unwrap_or_else(|_| "/tmp/custerm.sock".to_string())

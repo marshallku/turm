@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libvte-2.91-gtk4-dev libwebkitgtk-6.0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --workspace --release
+
+      - name: Bundle tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE="custerm-v${VERSION}-x86_64-linux.tar.gz"
+          mkdir -p dist
+          cp target/release/custerm dist/
+          cp target/release/custermctl dist/
+          cp custerm-linux/custerm.desktop dist/
+          tar -czf "${ARCHIVE}" -C dist .
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install git-cliff
+        run: cargo install git-cliff --locked
+
+      - name: Generate release notes
+        run: |
+          git-cliff --latest --strip header -o RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: ${{ env.ARCHIVE }}
+          generate_release_notes: false

@@ -81,6 +81,14 @@ Make custerm a first-class environment for AI coding agents.
 - [ ] **Approval workflow**: AI proposes action → user confirms in custerm UI
 - [ ] **Context sharing**: share terminal history, file paths, git status with agent
 
+### Phase: Deployment & Distribution ✅
+- [x] `--version` flag for both binaries
+- [x] GitHub Actions CI (fmt, clippy, test, build)
+- [x] GitHub Actions Release (build + tarball + GitHub Release on tag push)
+- [x] Curl-pipeable install script (`install.sh`)
+- [x] Self-update via `custermctl update check/apply`
+- [x] cargo-release + git-cliff config for versioning and changelogs
+
 ### Phase 7: Polish + Ecosystem
 - [ ] Theme system (parse theme files, multiple palettes)
 - [ ] Clipboard integration (OSC 52)

@@ -50,12 +50,31 @@ cargo run -p custerm-cli -- <command>
 
 ## Install
 
+### From GitHub Releases (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/marshallku/custerm/master/install.sh | bash
+```
+
+Options:
+- `--version v0.2.0` — install a specific version
+- `--system` — install to `/usr/local/bin` (requires sudo)
+
+### From source
+
 ```bash
 cd custerm-linux
 ./install.sh
 ```
 
 This builds a release binary and installs the desktop entry.
+
+### Update
+
+```bash
+custermctl update check    # check for new versions
+custermctl update apply    # download and install latest
+```
 
 ## Configuration
 

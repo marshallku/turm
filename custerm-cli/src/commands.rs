@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 
 #[derive(Parser)]
-#[command(name = "custerm", about = "custerm CLI")]
+#[command(name = "custermctl", about = "custerm CLI", version)]
 pub struct Cli {
     /// Socket path override
     #[arg(long)]
@@ -44,6 +44,22 @@ pub enum Command {
     /// WebView panel management
     #[command(subcommand)]
     Webview(WebviewCommand),
+
+    /// Check for updates or update custerm
+    #[command(subcommand)]
+    Update(UpdateCommand),
+}
+
+#[derive(Subcommand)]
+pub enum UpdateCommand {
+    /// Check if a newer version is available
+    Check,
+    /// Download and install the latest version
+    Apply {
+        /// Install a specific version (e.g., v0.1.0)
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -280,6 +296,7 @@ impl Cli {
                 WebviewCommand::PageInfo { .. } => "webview.page_info",
             }
             .to_string(),
+            Command::Update(_) => unreachable!("update commands are handled locally"),
         }
     }
 
@@ -301,7 +318,9 @@ impl Cli {
                 BackgroundCommand::SetTint { opacity } => json!({ "opacity": opacity }),
                 BackgroundCommand::Next | BackgroundCommand::Toggle => json!({}),
             },
-            Command::Tab(_) | Command::Split(_) | Command::Event(_) => json!({}),
+            Command::Tab(_) | Command::Split(_) | Command::Event(_) | Command::Update(_) => {
+                json!({})
+            }
             Command::Webview(cmd) => match cmd {
                 WebviewCommand::Open { url, mode } => json!({ "url": url, "mode": mode }),
                 WebviewCommand::Navigate { id, url } => json!({ "id": id, "url": url }),

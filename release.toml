@@ -1,0 +1,7 @@
+[workspace]
+shared-version = true
+consolidate-commits = true
+tag-name = "v{{version}}"
+pre-release-commit-message = "release: v{{version}}"
+tag-message = "v{{version}}"
+push-remote = "origin"

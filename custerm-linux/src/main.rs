@@ -10,8 +10,12 @@ mod webview;
 mod window;
 
 fn main() {
-
     let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("custerm {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
 
     if args.iter().any(|a| a == "--init-config") {
         match custerm_core::config::CustermConfig::write_default() {
