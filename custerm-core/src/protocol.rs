@@ -41,7 +41,11 @@ impl Event {
 }
 
 impl Request {
-    pub fn new(id: impl Into<String>, method: impl Into<String>, params: serde_json::Value) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        method: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Self {
         Self {
             id: id.into(),
             method: method.into(),

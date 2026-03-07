@@ -2,11 +2,11 @@ use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
 
-use gtk4::prelude::*;
 use gtk4::gdk;
 use gtk4::glib;
-use vte4::prelude::*;
+use gtk4::prelude::*;
 use vte4::Terminal;
+use vte4::prelude::*;
 
 use custerm_core::config::CustermConfig;
 
@@ -14,10 +14,8 @@ use crate::panel::Panel;
 use crate::search::SearchBar;
 
 const PALETTE: &[&str] = &[
-    "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af",
-    "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
-    "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af",
-    "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8",
+    "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
+    "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8",
 ];
 
 const DEFAULT_FONT_SCALE: f64 = 1.0;
@@ -44,9 +42,10 @@ impl TerminalPanel {
         let terminal = Terminal::new();
 
         // Font
-        let font_desc = gtk4::pango::FontDescription::from_string(
-            &format!("{} {}", config.terminal.font_family, config.terminal.font_size),
-        );
+        let font_desc = gtk4::pango::FontDescription::from_string(&format!(
+            "{} {}",
+            config.terminal.font_family, config.terminal.font_size
+        ));
         terminal.set_font(Some(&font_desc));
         terminal.set_font_scale(DEFAULT_FONT_SCALE);
 
@@ -127,7 +126,11 @@ impl TerminalPanel {
         tint_overlay.set_vexpand(true);
         tint_overlay.set_visible(false);
         let tint_css = gtk4::CssProvider::new();
-        update_tint_css(&tint_css, &config.background.tint_color, config.background.tint);
+        update_tint_css(
+            &tint_css,
+            &config.background.tint_color,
+            config.background.tint,
+        );
         gtk4::style_context_add_provider_for_display(
             &gdk::Display::default().unwrap(),
             &tint_css,
@@ -206,7 +209,8 @@ impl TerminalPanel {
         let bg = gdk::RGBA::new(0.0, 0.0, 0.0, 0.0);
         let palette = make_palette();
         let palette_refs: Vec<&gdk::RGBA> = palette.iter().collect();
-        self.terminal.set_colors(Some(&fg), Some(&bg), &palette_refs);
+        self.terminal
+            .set_colors(Some(&fg), Some(&bg), &palette_refs);
         self.terminal.set_color_background(&bg);
     }
 
@@ -222,28 +226,40 @@ impl TerminalPanel {
         let bg = parse_color("#1e1e2e");
         let palette = make_palette();
         let palette_refs: Vec<&gdk::RGBA> = palette.iter().collect();
-        self.terminal.set_colors(Some(&fg), Some(&bg), &palette_refs);
+        self.terminal
+            .set_colors(Some(&fg), Some(&bg), &palette_refs);
     }
 
     pub fn set_tint(&self, opacity: f64) {
         self.tint_opacity.set(opacity);
         let c = self.tint_color.get();
-        update_tint_css(&self.tint_css, &format!("#{:02x}{:02x}{:02x}",
-            (c.red() * 255.0) as u8,
-            (c.green() * 255.0) as u8,
-            (c.blue() * 255.0) as u8,
-        ), opacity);
+        update_tint_css(
+            &self.tint_css,
+            &format!(
+                "#{:02x}{:02x}{:02x}",
+                (c.red() * 255.0) as u8,
+                (c.green() * 255.0) as u8,
+                (c.blue() * 255.0) as u8,
+            ),
+            opacity,
+        );
     }
 
     pub fn apply_config(&self, config: &CustermConfig) {
-        let font_desc = gtk4::pango::FontDescription::from_string(
-            &format!("{} {}", config.terminal.font_family, config.terminal.font_size),
-        );
+        let font_desc = gtk4::pango::FontDescription::from_string(&format!(
+            "{} {}",
+            config.terminal.font_family, config.terminal.font_size
+        ));
         self.terminal.set_font(Some(&font_desc));
 
         self.tint_opacity.set(config.background.tint);
-        self.tint_color.set(parse_color(&config.background.tint_color));
-        update_tint_css(&self.tint_css, &config.background.tint_color, config.background.tint);
+        self.tint_color
+            .set(parse_color(&config.background.tint_color));
+        update_tint_css(
+            &self.tint_css,
+            &config.background.tint_color,
+            config.background.tint,
+        );
 
         self.image_opacity.set(config.background.opacity);
         if self.has_background.get() {
@@ -272,7 +288,8 @@ impl Panel for TerminalPanel {
     }
 
     fn title(&self) -> String {
-        self.terminal.window_title()
+        self.terminal
+            .window_title()
             .map(|t| t.to_string())
             .unwrap_or_else(|| "Terminal".to_string())
     }

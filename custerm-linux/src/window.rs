@@ -89,7 +89,8 @@ impl CustermWindow {
     }
 }
 
-fn watch_config(tab_manager: &Rc<TabManager>) {    let config_path = CustermConfig::config_path();
+fn watch_config(tab_manager: &Rc<TabManager>) {
+    let config_path = CustermConfig::config_path();
     let file = gio::File::for_path(&config_path);
 
     let monitor = match file.monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE) {
@@ -102,7 +103,10 @@ fn watch_config(tab_manager: &Rc<TabManager>) {    let config_path = CustermConf
 
     let mgr = tab_manager.clone();
     monitor.connect_changed(move |_, _, _, event| {
-        if !matches!(event, gio::FileMonitorEvent::Changed | gio::FileMonitorEvent::Created) {
+        if !matches!(
+            event,
+            gio::FileMonitorEvent::Changed | gio::FileMonitorEvent::Created
+        ) {
             return;
         }
 

@@ -18,8 +18,7 @@ pub fn run() {
     });
 
     app.connect_activate(|app| {
-        let config = custerm_core::config::CustermConfig::load()
-            .unwrap_or_default();
+        let config = custerm_core::config::CustermConfig::load().unwrap_or_default();
         let window = CustermWindow::new(app, &config);
         window.present();
     });

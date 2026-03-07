@@ -84,18 +84,16 @@ impl SearchBar {
         let term_for_key = terminal.clone();
         let container_for_key = container.clone();
         let terminal_for_focus = terminal.clone();
-        key_controller.connect_key_pressed(move |_, keyval, _, modifier| {
-            match keyval {
-                gdk::Key::Escape => {
-                    close_search(&container_for_key, &term_for_key, &terminal_for_focus);
-                    glib::Propagation::Stop
-                }
-                gdk::Key::Return if modifier.contains(gdk::ModifierType::SHIFT_MASK) => {
-                    term_for_key.search_find_previous();
-                    glib::Propagation::Stop
-                }
-                _ => glib::Propagation::Proceed,
+        key_controller.connect_key_pressed(move |_, keyval, _, modifier| match keyval {
+            gdk::Key::Escape => {
+                close_search(&container_for_key, &term_for_key, &terminal_for_focus);
+                glib::Propagation::Stop
             }
+            gdk::Key::Return if modifier.contains(gdk::ModifierType::SHIFT_MASK) => {
+                term_for_key.search_find_previous();
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
         });
         entry.add_controller(key_controller);
 
@@ -155,12 +153,7 @@ impl SearchBar {
     }
 }
 
-fn apply_search(
-    terminal: &vte4::Terminal,
-    text: &str,
-    case_sensitive: bool,
-    label: &gtk4::Label,
-) {
+fn apply_search(terminal: &vte4::Terminal, text: &str, case_sensitive: bool, label: &gtk4::Label) {
     if text.is_empty() {
         terminal.search_set_regex(None::<&vte4::Regex>, 0);
         label.set_text("");
@@ -187,11 +180,7 @@ fn apply_search(
     }
 }
 
-fn close_search(
-    container: &gtk4::Box,
-    terminal: &vte4::Terminal,
-    focus_target: &vte4::Terminal,
-) {
+fn close_search(container: &gtk4::Box, terminal: &vte4::Terminal, focus_target: &vte4::Terminal) {
     container.set_visible(false);
     terminal.search_set_regex(None::<&vte4::Regex>, 0);
     focus_target.grab_focus();

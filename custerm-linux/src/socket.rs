@@ -147,15 +147,13 @@ pub fn start_server(socket_path: &str, event_bus: EventBus) -> mpsc::Receiver<So
 
 /// Dispatch consumes the SocketCommand so async handlers (webview.execute_js) can
 /// capture the reply sender and respond from a callback.
-pub fn dispatch(
-    cmd: SocketCommand,
-    mgr: &Rc<TabManager>,
-    window: &ApplicationWindow,
-) {
+pub fn dispatch(cmd: SocketCommand, mgr: &Rc<TabManager>, window: &ApplicationWindow) {
     let req = &cmd.request;
     match req.method.as_str() {
         "system.ping" => {
-            let _ = cmd.reply.send(Response::success(req.id.clone(), json!({ "status": "ok" })));
+            let _ = cmd
+                .reply
+                .send(Response::success(req.id.clone(), json!({ "status": "ok" })));
         }
 
         "background.set" => {
@@ -185,12 +183,16 @@ pub fn dispatch(
 
         "tab.new" => {
             mgr.add_tab(window);
-            let _ = cmd.reply.send(Response::success(req.id.clone(), json!({ "status": "ok" })));
+            let _ = cmd
+                .reply
+                .send(Response::success(req.id.clone(), json!({ "status": "ok" })));
         }
 
         "tab.close" => {
             mgr.close_focused(window);
-            let _ = cmd.reply.send(Response::success(req.id.clone(), json!({ "status": "ok" })));
+            let _ = cmd
+                .reply
+                .send(Response::success(req.id.clone(), json!({ "status": "ok" })));
         }
 
         "tab.list" => {
@@ -203,38 +205,48 @@ pub fn dispatch(
         }
 
         "tab.info" => {
-            let _ = cmd.reply.send(Response::success(req.id.clone(), mgr.tab_info()));
+            let _ = cmd
+                .reply
+                .send(Response::success(req.id.clone(), mgr.tab_info()));
         }
 
         "split.horizontal" => {
             mgr.split_focused(gtk4::Orientation::Horizontal, window);
-            let _ = cmd.reply.send(Response::success(req.id.clone(), json!({ "status": "ok" })));
+            let _ = cmd
+                .reply
+                .send(Response::success(req.id.clone(), json!({ "status": "ok" })));
         }
 
         "split.vertical" => {
             mgr.split_focused(gtk4::Orientation::Vertical, window);
-            let _ = cmd.reply.send(Response::success(req.id.clone(), json!({ "status": "ok" })));
+            let _ = cmd
+                .reply
+                .send(Response::success(req.id.clone(), json!({ "status": "ok" })));
         }
 
         "session.list" => {
-            let _ = cmd.reply.send(Response::success(req.id.clone(), json!(mgr.all_panels_info())));
+            let _ = cmd.reply.send(Response::success(
+                req.id.clone(),
+                json!(mgr.all_panels_info()),
+            ));
         }
 
         "session.info" => {
             let resp = match req.params.get("id").and_then(|v| v.as_str()) {
-                Some(id) => {
-                    match mgr.panel_info_by_id(id) {
-                        Some(info) => Response::success(req.id.clone(), info),
-                        None => Response::error(req.id.clone(), "not_found", &format!("Panel not found: {id}")),
-                    }
-                }
+                Some(id) => match mgr.panel_info_by_id(id) {
+                    Some(info) => Response::success(req.id.clone(), info),
+                    None => Response::error(
+                        req.id.clone(),
+                        "not_found",
+                        &format!("Panel not found: {id}"),
+                    ),
+                },
                 None => Response::error(req.id.clone(), "invalid_params", "Missing 'id' param"),
             };
             let _ = cmd.reply.send(resp);
         }
 
         // -- WebView commands --
-
         "webview.open" => {
             let resp = handle_webview_open(req, mgr, window);
             let _ = cmd.reply.send(resp);
@@ -336,16 +348,27 @@ pub fn dispatch(
 
 // -- Background helpers (with terminal panel type check) --
 
-fn active_terminal_panel(req: &Request, mgr: &Rc<TabManager>) -> Result<Rc<crate::panel::PanelVariant>, Response> {
+fn active_terminal_panel(
+    req: &Request,
+    mgr: &Rc<TabManager>,
+) -> Result<Rc<crate::panel::PanelVariant>, Response> {
     match mgr.active_panel() {
         Some(panel) => {
             if panel.as_terminal().is_some() {
                 Ok(panel)
             } else {
-                Err(Response::error(req.id.clone(), "wrong_panel_type", "Active panel is not a terminal"))
+                Err(Response::error(
+                    req.id.clone(),
+                    "wrong_panel_type",
+                    "Active panel is not a terminal",
+                ))
             }
         }
-        None => Err(Response::error(req.id.clone(), "no_panel", "No active panel")),
+        None => Err(Response::error(
+            req.id.clone(),
+            "no_panel",
+            "No active panel",
+        )),
     }
 }
 
@@ -385,13 +408,20 @@ fn handle_bg_clear(req: &Request, mgr: &Rc<TabManager>) -> Response {
 
 fn handle_bg_next(req: &Request, mgr: &Rc<TabManager>) -> Response {
     if !is_bg_active() {
-        return Response::success(req.id.clone(), json!({ "status": "ok", "mode": "deactive" }));
+        return Response::success(
+            req.id.clone(),
+            json!({ "status": "ok", "mode": "deactive" }),
+        );
     }
     match select_random_image() {
         Some(img) => {
             let path = Path::new(&img);
             if !path.exists() {
-                return Response::error(req.id.clone(), "not_found", &format!("File not found: {img}"));
+                return Response::error(
+                    req.id.clone(),
+                    "not_found",
+                    &format!("File not found: {img}"),
+                );
             }
             match active_terminal_panel(req, mgr) {
                 Ok(panel) => {
@@ -425,43 +455,47 @@ fn handle_bg_toggle(req: &Request, mgr: &Rc<TabManager>) -> Response {
 fn handle_bg_set_tint(req: &Request, mgr: &Rc<TabManager>) -> Response {
     let opacity = req.params.get("opacity").and_then(|v| v.as_f64());
     match opacity {
-        Some(o) => {
-            match active_terminal_panel(req, mgr) {
-                Ok(panel) => {
-                    panel.as_terminal().unwrap().set_tint(o);
-                    Response::success(req.id.clone(), json!({ "status": "ok" }))
-                }
-                Err(e) => e,
+        Some(o) => match active_terminal_panel(req, mgr) {
+            Ok(panel) => {
+                panel.as_terminal().unwrap().set_tint(o);
+                Response::success(req.id.clone(), json!({ "status": "ok" }))
             }
-        }
-        None => {
-            Response::error(req.id.clone(), "invalid_params", "Missing 'opacity' param")
-        }
+            Err(e) => e,
+        },
+        None => Response::error(req.id.clone(), "invalid_params", "Missing 'opacity' param"),
     }
 }
 
 // -- WebView command helpers --
 
-fn handle_webview_open(req: &Request, mgr: &Rc<TabManager>, window: &ApplicationWindow) -> Response {
+fn handle_webview_open(
+    req: &Request,
+    mgr: &Rc<TabManager>,
+    window: &ApplicationWindow,
+) -> Response {
     let url = match req.params.get("url").and_then(|v| v.as_str()) {
         Some(u) => u,
         None => return Response::error(req.id.clone(), "invalid_params", "Missing 'url' param"),
     };
-    let mode = req.params.get("mode").and_then(|v| v.as_str()).unwrap_or("tab");
+    let mode = req
+        .params
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("tab");
 
     let panel_id = match mode {
-        "split_h" => {
-            match mgr.split_focused_webview(url, gtk4::Orientation::Horizontal, window) {
-                Some(id) => id,
-                None => return Response::error(req.id.clone(), "no_panel", "No focused panel to split"),
+        "split_h" => match mgr.split_focused_webview(url, gtk4::Orientation::Horizontal, window) {
+            Some(id) => id,
+            None => {
+                return Response::error(req.id.clone(), "no_panel", "No focused panel to split");
             }
-        }
-        "split_v" => {
-            match mgr.split_focused_webview(url, gtk4::Orientation::Vertical, window) {
-                Some(id) => id,
-                None => return Response::error(req.id.clone(), "no_panel", "No focused panel to split"),
+        },
+        "split_v" => match mgr.split_focused_webview(url, gtk4::Orientation::Vertical, window) {
+            Some(id) => id,
+            None => {
+                return Response::error(req.id.clone(), "no_panel", "No focused panel to split");
             }
-        }
+        },
         _ => mgr.add_webview_tab(url, window),
     };
 
@@ -486,7 +520,11 @@ fn handle_webview_navigate(req: &Request, mgr: &Rc<TabManager>) -> Response {
             }
             None => Response::error(req.id.clone(), "wrong_panel_type", "Panel is not a webview"),
         },
-        None => Response::error(req.id.clone(), "not_found", &format!("Panel not found: {id}")),
+        None => Response::error(
+            req.id.clone(),
+            "not_found",
+            &format!("Panel not found: {id}"),
+        ),
     }
 }
 
@@ -504,7 +542,11 @@ fn with_webview_panel(
             Some(wv) => f(wv),
             None => Response::error(req.id.clone(), "wrong_panel_type", "Panel is not a webview"),
         },
-        None => Response::error(req.id.clone(), "not_found", &format!("Panel not found: {id}")),
+        None => Response::error(
+            req.id.clone(),
+            "not_found",
+            &format!("Panel not found: {id}"),
+        ),
     }
 }
 
@@ -513,14 +555,22 @@ fn handle_webview_execute_js(cmd: SocketCommand, mgr: &Rc<TabManager>) {
     let id = match req.params.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "invalid_params", "Missing 'id' param"));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "invalid_params",
+                "Missing 'id' param",
+            ));
             return;
         }
     };
     let code = match req.params.get("code").and_then(|v| v.as_str()) {
         Some(c) => c.to_string(),
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "invalid_params", "Missing 'code' param"));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "invalid_params",
+                "Missing 'code' param",
+            ));
             return;
         }
     };
@@ -528,14 +578,22 @@ fn handle_webview_execute_js(cmd: SocketCommand, mgr: &Rc<TabManager>) {
     let panel = match mgr.find_panel_by_id(&id) {
         Some(p) => p,
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "not_found", &format!("Panel not found: {id}")));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "not_found",
+                &format!("Panel not found: {id}"),
+            ));
             return;
         }
     };
     let wv = match panel.as_webview() {
         Some(wv) => wv,
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "wrong_panel_type", "Panel is not a webview"));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "wrong_panel_type",
+                "Panel is not a webview",
+            ));
             return;
         }
     };
@@ -556,11 +614,19 @@ fn handle_webview_get_content(cmd: SocketCommand, mgr: &Rc<TabManager>) {
     let id = match req.params.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "invalid_params", "Missing 'id' param"));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "invalid_params",
+                "Missing 'id' param",
+            ));
             return;
         }
     };
-    let format = req.params.get("format").and_then(|v| v.as_str()).unwrap_or("text");
+    let format = req
+        .params
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("text");
     let js_code = match format {
         "html" => "document.documentElement.outerHTML".to_string(),
         _ => "document.body.innerText".to_string(),
@@ -569,14 +635,22 @@ fn handle_webview_get_content(cmd: SocketCommand, mgr: &Rc<TabManager>) {
     let panel = match mgr.find_panel_by_id(&id) {
         Some(p) => p,
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "not_found", &format!("Panel not found: {id}")));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "not_found",
+                &format!("Panel not found: {id}"),
+            ));
             return;
         }
     };
     let wv = match panel.as_webview() {
         Some(wv) => wv,
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "wrong_panel_type", "Panel is not a webview"));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "wrong_panel_type",
+                "Panel is not a webview",
+            ));
             return;
         }
     };
@@ -597,7 +671,11 @@ fn handle_webview_screenshot(cmd: SocketCommand, mgr: &Rc<TabManager>) {
     let id = match req.params.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "invalid_params", "Missing 'id' param"));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "invalid_params",
+                "Missing 'id' param",
+            ));
             return;
         }
     };
@@ -605,21 +683,33 @@ fn handle_webview_screenshot(cmd: SocketCommand, mgr: &Rc<TabManager>) {
     let panel = match mgr.find_panel_by_id(&id) {
         Some(p) => p,
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "not_found", &format!("Panel not found: {id}")));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "not_found",
+                &format!("Panel not found: {id}"),
+            ));
             return;
         }
     };
     let wv = match panel.as_webview() {
         Some(wv) => wv,
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "wrong_panel_type", "Panel is not a webview"));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "wrong_panel_type",
+                "Panel is not a webview",
+            ));
             return;
         }
     };
 
     let req_id = req.id.clone();
     let reply = cmd.reply;
-    let path = req.params.get("path").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let path = req
+        .params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     wv.snapshot(move |result| {
         let resp = match result {
@@ -627,12 +717,10 @@ fn handle_webview_screenshot(cmd: SocketCommand, mgr: &Rc<TabManager>) {
                 if let Some(path) = path {
                     // Decode and save to file
                     match gtk4::glib::base64_decode(&base64_png) {
-                        data if !data.is_empty() => {
-                            match std::fs::write(&path, &data) {
-                                Ok(_) => Response::success(req_id, json!({ "path": path })),
-                                Err(e) => Response::error(req_id, "io_error", &e.to_string()),
-                            }
-                        }
+                        data if !data.is_empty() => match std::fs::write(&path, &data) {
+                            Ok(_) => Response::success(req_id, json!({ "path": path })),
+                            Err(e) => Response::error(req_id, "io_error", &e.to_string()),
+                        },
                         _ => Response::error(req_id, "decode_error", "Failed to decode PNG"),
                     }
                 } else {
@@ -651,7 +739,11 @@ fn run_js_command(cmd: SocketCommand, mgr: &Rc<TabManager>, js_code: String) {
     let id = match req.params.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "invalid_params", "Missing 'id' param"));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "invalid_params",
+                "Missing 'id' param",
+            ));
             return;
         }
     };
@@ -659,14 +751,22 @@ fn run_js_command(cmd: SocketCommand, mgr: &Rc<TabManager>, js_code: String) {
     let panel = match mgr.find_panel_by_id(&id) {
         Some(p) => p,
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "not_found", &format!("Panel not found: {id}")));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "not_found",
+                &format!("Panel not found: {id}"),
+            ));
             return;
         }
     };
     let wv = match panel.as_webview() {
         Some(wv) => wv,
         None => {
-            let _ = cmd.reply.send(Response::error(req.id.clone(), "wrong_panel_type", "Panel is not a webview"));
+            let _ = cmd.reply.send(Response::error(
+                req.id.clone(),
+                "wrong_panel_type",
+                "Panel is not a webview",
+            ));
             return;
         }
     };
@@ -692,7 +792,11 @@ fn handle_webview_query(cmd: SocketCommand, mgr: &Rc<TabManager>) {
     let selector = match cmd.request.params.get("selector").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            let _ = cmd.reply.send(Response::error(cmd.request.id.clone(), "invalid_params", "Missing 'selector' param"));
+            let _ = cmd.reply.send(Response::error(
+                cmd.request.id.clone(),
+                "invalid_params",
+                "Missing 'selector' param",
+            ));
             return;
         }
     };
@@ -704,11 +808,20 @@ fn handle_webview_query_all(cmd: SocketCommand, mgr: &Rc<TabManager>) {
     let selector = match cmd.request.params.get("selector").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            let _ = cmd.reply.send(Response::error(cmd.request.id.clone(), "invalid_params", "Missing 'selector' param"));
+            let _ = cmd.reply.send(Response::error(
+                cmd.request.id.clone(),
+                "invalid_params",
+                "Missing 'selector' param",
+            ));
             return;
         }
     };
-    let limit = cmd.request.params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
+    let limit = cmd
+        .request
+        .params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as u32;
     let js = crate::webview::js::query_selector_all(&selector, limit);
     run_js_command(cmd, mgr, js);
 }
@@ -717,11 +830,18 @@ fn handle_webview_get_styles(cmd: SocketCommand, mgr: &Rc<TabManager>) {
     let selector = match cmd.request.params.get("selector").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            let _ = cmd.reply.send(Response::error(cmd.request.id.clone(), "invalid_params", "Missing 'selector' param"));
+            let _ = cmd.reply.send(Response::error(
+                cmd.request.id.clone(),
+                "invalid_params",
+                "Missing 'selector' param",
+            ));
             return;
         }
     };
-    let properties: Vec<&str> = cmd.request.params.get("properties")
+    let properties: Vec<&str> = cmd
+        .request
+        .params
+        .get("properties")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
@@ -733,7 +853,11 @@ fn handle_webview_click(cmd: SocketCommand, mgr: &Rc<TabManager>) {
     let selector = match cmd.request.params.get("selector").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            let _ = cmd.reply.send(Response::error(cmd.request.id.clone(), "invalid_params", "Missing 'selector' param"));
+            let _ = cmd.reply.send(Response::error(
+                cmd.request.id.clone(),
+                "invalid_params",
+                "Missing 'selector' param",
+            ));
             return;
         }
     };
@@ -745,14 +869,22 @@ fn handle_webview_fill(cmd: SocketCommand, mgr: &Rc<TabManager>) {
     let selector = match cmd.request.params.get("selector").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            let _ = cmd.reply.send(Response::error(cmd.request.id.clone(), "invalid_params", "Missing 'selector' param"));
+            let _ = cmd.reply.send(Response::error(
+                cmd.request.id.clone(),
+                "invalid_params",
+                "Missing 'selector' param",
+            ));
             return;
         }
     };
     let value = match cmd.request.params.get("value").and_then(|v| v.as_str()) {
         Some(v) => v.to_string(),
         None => {
-            let _ = cmd.reply.send(Response::error(cmd.request.id.clone(), "invalid_params", "Missing 'value' param"));
+            let _ = cmd.reply.send(Response::error(
+                cmd.request.id.clone(),
+                "invalid_params",
+                "Missing 'value' param",
+            ));
             return;
         }
     };
@@ -761,9 +893,24 @@ fn handle_webview_fill(cmd: SocketCommand, mgr: &Rc<TabManager>) {
 }
 
 fn handle_webview_scroll(cmd: SocketCommand, mgr: &Rc<TabManager>) {
-    let selector = cmd.request.params.get("selector").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let x = cmd.request.params.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-    let y = cmd.request.params.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let selector = cmd
+        .request
+        .params
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let x = cmd
+        .request
+        .params
+        .get("x")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+    let y = cmd
+        .request
+        .params
+        .get("y")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
     let js = crate::webview::js::scroll(selector.as_deref(), x, y);
     run_js_command(cmd, mgr, js);
 }
@@ -775,7 +922,11 @@ fn handle_webview_page_info(cmd: SocketCommand, mgr: &Rc<TabManager>) {
 
 fn handle_webview_devtools(req: &Request, mgr: &Rc<TabManager>) -> Response {
     use webkit6::prelude::WebViewExt;
-    let action = req.params.get("action").and_then(|v| v.as_str()).unwrap_or("show");
+    let action = req
+        .params
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("show");
     with_webview_panel(req, mgr, |wv| {
         if let Some(inspector) = wv.webview.inspector() {
             match action {

@@ -341,14 +341,28 @@ impl Cli {
                 WebviewCommand::GetContent { id, format } => json!({ "id": id, "format": format }),
                 WebviewCommand::Screenshot { id, path } => json!({ "id": id, "path": path }),
                 WebviewCommand::Query { id, selector } => json!({ "id": id, "selector": selector }),
-                WebviewCommand::QueryAll { id, selector, limit } => json!({ "id": id, "selector": selector, "limit": limit }),
-                WebviewCommand::GetStyles { id, selector, properties } => {
+                WebviewCommand::QueryAll {
+                    id,
+                    selector,
+                    limit,
+                } => json!({ "id": id, "selector": selector, "limit": limit }),
+                WebviewCommand::GetStyles {
+                    id,
+                    selector,
+                    properties,
+                } => {
                     let props: Vec<&str> = properties.split(',').map(|s| s.trim()).collect();
                     json!({ "id": id, "selector": selector, "properties": props })
                 }
                 WebviewCommand::Click { id, selector } => json!({ "id": id, "selector": selector }),
-                WebviewCommand::Fill { id, selector, value } => json!({ "id": id, "selector": selector, "value": value }),
-                WebviewCommand::Scroll { id, selector, x, y } => json!({ "id": id, "selector": selector, "x": x, "y": y }),
+                WebviewCommand::Fill {
+                    id,
+                    selector,
+                    value,
+                } => json!({ "id": id, "selector": selector, "value": value }),
+                WebviewCommand::Scroll { id, selector, x, y } => {
+                    json!({ "id": id, "selector": selector, "x": x, "y": y })
+                }
                 WebviewCommand::PageInfo { id } => json!({ "id": id }),
                 WebviewCommand::Devtools { id, action } => json!({ "id": id, "action": action }),
             },

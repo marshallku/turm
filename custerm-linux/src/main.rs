@@ -31,7 +31,10 @@ fn main() {
     }
 
     if args.iter().any(|a| a == "--config-path") {
-        println!("{}", custerm_core::config::CustermConfig::config_path().display());
+        println!(
+            "{}",
+            custerm_core::config::CustermConfig::config_path().display()
+        );
         return;
     }
 

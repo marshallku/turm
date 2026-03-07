@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::sync::mpsc;
 
-use portable_pty::{native_pty_system, CommandBuilder, Child, MasterPty, PtySize};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::error::{CustermError, Result};
 

@@ -152,8 +152,8 @@ impl CustermConfig {
         }
 
         let contents = std::fs::read_to_string(&config_path)?;
-        let config: CustermConfig =
-            toml::from_str(&contents).map_err(|e| crate::error::CustermError::Config(e.to_string()))?;
+        let config: CustermConfig = toml::from_str(&contents)
+            .map_err(|e| crate::error::CustermError::Config(e.to_string()))?;
 
         Ok(config)
     }

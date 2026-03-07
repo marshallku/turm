@@ -102,14 +102,16 @@ impl TestServer {
 
         let rx = start_test_server(&socket_path);
 
-        let handle = thread::spawn(move || loop {
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok((req, reply_tx)) => {
-                    let resp = dispatch(&req);
-                    let _ = reply_tx.send(resp);
+        let handle = thread::spawn(move || {
+            loop {
+                match rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok((req, reply_tx)) => {
+                        let resp = dispatch(&req);
+                        let _ = reply_tx.send(resp);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         });
 

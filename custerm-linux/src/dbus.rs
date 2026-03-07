@@ -93,7 +93,10 @@ fn handle_method(
             invocation.return_value(None);
         }
         _ => {
-            invocation.return_error(gio::IOErrorEnum::Failed, &format!("Unknown method: {method}"));
+            invocation.return_error(
+                gio::IOErrorEnum::Failed,
+                &format!("Unknown method: {method}"),
+            );
         }
     }
 }
