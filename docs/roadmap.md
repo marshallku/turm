@@ -67,8 +67,8 @@ Embed browser as a panel type alongside terminals.
 - [x] **AI agent DOM inspection**: screenshot, query/query-all, get-styles, click, fill, scroll, page-info
 - [x] **Pre-built JS snippets**: `webview::js` module with structured JSON-returning DOM helpers
 - [x] **Configurable vertical tab width**: `[tabs] width` in config with dynamic CSS hot-reload
-- [ ] **URL bar / navigation** within panel (UI)
-- [ ] **DevTools toggle** (UI)
+- [x] **URL bar / navigation** within panel (UI)
+- [x] **DevTools toggle** (UI + socket command `webview.devtools`)
 - [ ] **JS ↔ custerm bridge**: page scripts can call custerm API
 
 ### Phase 6: AI Agent Integration

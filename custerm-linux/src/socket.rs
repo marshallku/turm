@@ -319,6 +319,11 @@ pub fn dispatch(
             // Response sent from callback
         }
 
+        "webview.devtools" => {
+            let resp = handle_webview_devtools(req, mgr);
+            let _ = cmd.reply.send(resp);
+        }
+
         _ => {
             let _ = cmd.reply.send(Response::error(
                 req.id.clone(),
@@ -766,6 +771,31 @@ fn handle_webview_scroll(cmd: SocketCommand, mgr: &Rc<TabManager>) {
 fn handle_webview_page_info(cmd: SocketCommand, mgr: &Rc<TabManager>) {
     let js = crate::webview::js::page_info();
     run_js_command(cmd, mgr, js);
+}
+
+fn handle_webview_devtools(req: &Request, mgr: &Rc<TabManager>) -> Response {
+    use webkit6::prelude::WebViewExt;
+    let action = req.params.get("action").and_then(|v| v.as_str()).unwrap_or("show");
+    with_webview_panel(req, mgr, |wv| {
+        if let Some(inspector) = wv.webview.inspector() {
+            match action {
+                "show" => inspector.show(),
+                "close" => inspector.close(),
+                "attach" => inspector.attach(),
+                "detach" => inspector.detach(),
+                other => {
+                    return Response::error(
+                        req.id.clone(),
+                        "invalid_params",
+                        &format!("Unknown action: {other}. Use show/close/attach/detach"),
+                    );
+                }
+            }
+            Response::success(req.id.clone(), json!({ "status": "ok" }))
+        } else {
+            Response::error(req.id.clone(), "no_inspector", "Inspector not available")
+        }
+    })
 }
 
 // -- Utility functions --

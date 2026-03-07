@@ -698,6 +698,7 @@ impl TabManager {
         let tabs = self.tabs.clone();
         let focused = self.focused.clone();
         let container = page_container.clone();
+        let bus = self.event_bus.clone();
         close_btn.connect_clicked(move |_| {
             let Some(idx) = nb.page_num(&container) else {
                 eprintln!("[custerm] close: page not found");
@@ -706,9 +707,37 @@ impl TabManager {
             let idx = idx as usize;
             eprintln!("[custerm] close: removing tab {idx}");
 
+            // Collect panel id before removing
+            let panel_id = {
+                let tabs_ref = tabs.borrow();
+                if let Some(tab) = tabs_ref.get(idx) {
+                    let mut panels = Vec::new();
+                    tab.root.borrow().collect_panels(&mut panels);
+                    panels.first().map(|p| p.id().to_string())
+                } else {
+                    None
+                }
+            };
+
             tabs.borrow_mut().remove(idx);
             nb.remove_page(Some(idx as u32));
             nb.set_show_tabs(tabs.borrow().len() > 1);
+
+            broadcast(&bus, &Event::new("tab.closed", json!({
+                "panel_id": panel_id.as_deref().unwrap_or(""),
+                "tab": idx,
+            })));
+
+            // Handle last-tab-close: spawn new default tab is not possible here
+            // (no window ref), so close the window via the notebook's toplevel
+            if tabs.borrow().is_empty() {
+                if let Some(root) = nb.root()
+                    && let Some(window) = root.downcast_ref::<gtk4::Window>()
+                {
+                    window.close();
+                }
+                return;
+            }
 
             // Update focus
             if let Some(new_page) = nb.current_page() {

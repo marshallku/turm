@@ -3,6 +3,34 @@ use webkit6::prelude::*;
 
 use crate::panel::Panel;
 
+const WEBVIEW_CSS: &str = r#"
+.custerm-url-bar {
+    background-color: #313244;
+    padding: 4px 8px;
+}
+.custerm-url-entry {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+.custerm-url-entry:focus {
+    border-color: #89b4fa;
+}
+.custerm-nav-btn {
+    min-width: 24px;
+    min-height: 24px;
+    padding: 2px;
+    border-radius: 4px;
+    color: #cdd6f4;
+}
+.custerm-nav-btn:hover {
+    background-color: #45475a;
+}
+"#;
+
 pub struct WebViewPanel {
     pub id: String,
     pub container: gtk4::Box,
@@ -25,10 +53,149 @@ impl WebViewPanel {
         webview.set_vexpand(true);
         webview.load_uri(url);
 
+        // -- Toolbar --
+        let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+        toolbar.add_css_class("custerm-url-bar");
+
+        let back_btn = gtk4::Button::from_icon_name("go-previous-symbolic");
+        back_btn.add_css_class("flat");
+        back_btn.add_css_class("custerm-nav-btn");
+        back_btn.set_tooltip_text(Some("Back"));
+        back_btn.set_sensitive(false);
+
+        let forward_btn = gtk4::Button::from_icon_name("go-next-symbolic");
+        forward_btn.add_css_class("flat");
+        forward_btn.add_css_class("custerm-nav-btn");
+        forward_btn.set_tooltip_text(Some("Forward"));
+        forward_btn.set_sensitive(false);
+
+        let reload_btn = gtk4::Button::from_icon_name("view-refresh-symbolic");
+        reload_btn.add_css_class("flat");
+        reload_btn.add_css_class("custerm-nav-btn");
+        reload_btn.set_tooltip_text(Some("Reload"));
+
+        let url_entry = gtk4::Entry::new();
+        url_entry.set_hexpand(true);
+        url_entry.add_css_class("custerm-url-entry");
+        url_entry.set_text(url);
+
+        let devtools_btn = gtk4::Button::from_icon_name("preferences-system-symbolic");
+        devtools_btn.add_css_class("flat");
+        devtools_btn.add_css_class("custerm-nav-btn");
+        devtools_btn.set_tooltip_text(Some("DevTools"));
+
+        toolbar.append(&back_btn);
+        toolbar.append(&forward_btn);
+        toolbar.append(&reload_btn);
+        toolbar.append(&url_entry);
+        toolbar.append(&devtools_btn);
+
+        // -- Container --
         let container = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         container.set_hexpand(true);
         container.set_vexpand(true);
+        container.append(&toolbar);
         container.append(&webview);
+
+        // -- CSS --
+        let css = gtk4::CssProvider::new();
+        css.load_from_string(WEBVIEW_CSS);
+        gtk4::style_context_add_provider_for_display(
+            &gtk4::gdk::Display::default().unwrap(),
+            &css,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 2,
+        );
+
+        // -- Signal wiring --
+
+        // URL entry → navigate on Enter
+        {
+            let wv = webview.clone();
+            url_entry.connect_activate(move |entry| {
+                let text = entry.text();
+                let url = if text.contains("://") || text.starts_with("about:") {
+                    text.to_string()
+                } else if text.contains('.') && !text.contains(' ') {
+                    format!("https://{text}")
+                } else {
+                    text.to_string()
+                };
+                wv.load_uri(&url);
+            });
+        }
+
+        // Back button
+        {
+            let wv = webview.clone();
+            back_btn.connect_clicked(move |_| {
+                wv.go_back();
+            });
+        }
+
+        // Forward button
+        {
+            let wv = webview.clone();
+            forward_btn.connect_clicked(move |_| {
+                wv.go_forward();
+            });
+        }
+
+        // Reload/Stop button
+        {
+            let wv = webview.clone();
+            reload_btn.connect_clicked(move |btn| {
+                if wv.is_loading() {
+                    wv.stop_loading();
+                    btn.set_icon_name("view-refresh-symbolic");
+                    btn.set_tooltip_text(Some("Reload"));
+                } else {
+                    wv.reload();
+                }
+            });
+        }
+
+        // DevTools button
+        {
+            let wv = webview.clone();
+            devtools_btn.connect_clicked(move |_| {
+                if let Some(inspector) = wv.inspector() {
+                    inspector.show();
+                }
+            });
+        }
+
+        // Update URL entry when URI changes
+        {
+            let entry = url_entry.clone();
+            webview.connect_notify_local(Some("uri"), move |wv, _| {
+                if let Some(uri) = wv.uri() {
+                    entry.set_text(&uri);
+                }
+            });
+        }
+
+        // Update back/forward sensitivity + reload/stop icon on load-changed
+        {
+            let back = back_btn.clone();
+            let fwd = forward_btn.clone();
+            let reload = reload_btn.clone();
+            webview.connect_load_changed(move |wv, event| {
+                back.set_sensitive(wv.can_go_back());
+                fwd.set_sensitive(wv.can_go_forward());
+
+                match event {
+                    webkit6::LoadEvent::Started | webkit6::LoadEvent::Redirected => {
+                        reload.set_icon_name("process-stop-symbolic");
+                        reload.set_tooltip_text(Some("Stop"));
+                    }
+                    webkit6::LoadEvent::Committed | webkit6::LoadEvent::Finished => {
+                        reload.set_icon_name("view-refresh-symbolic");
+                        reload.set_tooltip_text(Some("Reload"));
+                    }
+                    _ => {}
+                }
+            });
+        }
 
         Self {
             id: uuid::Uuid::new_v4().to_string(),

@@ -243,6 +243,15 @@ pub enum WebviewCommand {
         #[arg(long)]
         id: String,
     },
+    /// Toggle DevTools inspector
+    Devtools {
+        /// Panel ID
+        #[arg(long)]
+        id: String,
+        /// Action: show, close, attach, detach
+        #[arg(default_value = "show")]
+        action: String,
+    },
 }
 
 impl Cli {
@@ -294,6 +303,7 @@ impl Cli {
                 WebviewCommand::Fill { .. } => "webview.fill",
                 WebviewCommand::Scroll { .. } => "webview.scroll",
                 WebviewCommand::PageInfo { .. } => "webview.page_info",
+                WebviewCommand::Devtools { .. } => "webview.devtools",
             }
             .to_string(),
             Command::Update(_) => unreachable!("update commands are handled locally"),
@@ -340,6 +350,7 @@ impl Cli {
                 WebviewCommand::Fill { id, selector, value } => json!({ "id": id, "selector": selector, "value": value }),
                 WebviewCommand::Scroll { id, selector, x, y } => json!({ "id": id, "selector": selector, "x": x, "y": y }),
                 WebviewCommand::PageInfo { id } => json!({ "id": id }),
+                WebviewCommand::Devtools { id, action } => json!({ "id": id, "action": action }),
             },
         }
     }

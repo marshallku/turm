@@ -99,7 +99,7 @@ custermctl ──Unix socket──► socket server (per-client thread)
                           oneshot response ──► socket thread ──► client
 ```
 
-**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`, `webview.open`, `webview.navigate`, `webview.back`, `webview.forward`, `webview.reload`, `webview.execute_js`, `webview.get_content`, `webview.screenshot`, `webview.query`, `webview.query_all`, `webview.get_styles`, `webview.click`, `webview.fill`, `webview.scroll`, `webview.page_info`
+**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`, `webview.open`, `webview.navigate`, `webview.back`, `webview.forward`, `webview.reload`, `webview.execute_js`, `webview.get_content`, `webview.screenshot`, `webview.query`, `webview.query_all`, `webview.get_styles`, `webview.click`, `webview.fill`, `webview.scroll`, `webview.page_info`, `webview.devtools`
 
 **Cleanup**: Socket file removed on window destroy.
 
@@ -139,7 +139,7 @@ Clients can subscribe to real-time events via `event.subscribe`. The socket stay
 custerm supports multiple panel types via the `PanelVariant` enum:
 
 - **Terminal** (`TerminalPanel`): VTE4 terminal with shell, background images, search
-- **WebView** (`WebViewPanel`): WebKitGTK 6.0 browser panel with JS execution
+- **WebView** (`WebViewPanel`): WebKitGTK 6.0 browser panel with JS execution, URL toolbar (back/forward/reload/URL entry/DevTools toggle)
 
 The `Panel` trait provides a common interface (`widget()`, `title()`, `panel_type()`, `grab_focus()`, `id()`). `PanelVariant` delegates to the inner type and provides `as_terminal()` / `as_webview()` accessors.
 
@@ -162,6 +162,7 @@ The `Panel` trait provides a common interface (`widget()`, `title()`, `panel_typ
 | `webview.fill` | `id`, `selector`, `value` | Type text into an input element |
 | `webview.scroll` | `id`, `selector?`, `x?`, `y?` | Scroll to position or element |
 | `webview.page_info` | `id` | Page metadata (title, dimensions, element counts) |
+| `webview.devtools` | `id`, `action?` (show/close/attach/detach) | Control WebKit DevTools inspector |
 
 `webview.execute_js`, `webview.get_content`, `webview.screenshot`, and all DOM query/interaction commands use async dispatch — the reply sender is captured by the WebKit callback and sent when execution completes. DOM commands use pre-built JS snippets from `webview::js` module.
 
