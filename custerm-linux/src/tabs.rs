@@ -1039,11 +1039,6 @@ fn setup_shortcuts(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow) {
         // -- Ctrl-only shortcuts --
         if ctrl_only {
             match keyval {
-                // Ctrl+B: toggle tab bar visibility
-                gdk::Key::b => {
-                    mgr.toggle_tab_bar();
-                    return glib::Propagation::Stop;
-                }
                 // Ctrl+F: toggle search (terminal only)
                 gdk::Key::f if is_terminal => {
                     if let Some(term) = panel.as_ref().and_then(|p| p.as_terminal()) {
@@ -1063,6 +1058,11 @@ fn setup_shortcuts(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow) {
         }
 
         match keyval {
+            // Ctrl+Shift+B: toggle tab bar visibility
+            gdk::Key::B => {
+                mgr.toggle_tab_bar();
+                glib::Propagation::Stop
+            }
             // Ctrl+Shift+C: copy (terminal)
             gdk::Key::C if is_terminal => {
                 if let Some(term) = panel.as_ref().and_then(|p| p.as_terminal()) {
@@ -1159,7 +1159,7 @@ fn setup_tab_actions(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow)
     let toggle_btn = gtk4::Button::from_icon_name("sidebar-show-symbolic");
     toggle_btn.add_css_class("flat");
     toggle_btn.add_css_class("custerm-action-btn");
-    toggle_btn.set_tooltip_text(Some("Toggle tab bar (Ctrl+B)"));
+    toggle_btn.set_tooltip_text(Some("Toggle tab bar (Ctrl+Shift+B)"));
 
     let mgr = manager.clone();
     toggle_btn.connect_clicked(move |_| {
