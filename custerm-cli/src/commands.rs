@@ -44,6 +44,10 @@ pub enum Command {
     /// Split pane management
     #[command(subcommand)]
     Split(SplitCommand),
+
+    /// Event stream
+    #[command(subcommand)]
+    Event(EventCommand),
 }
 
 #[derive(Subcommand)]
@@ -77,15 +81,20 @@ pub enum WorkspaceCommand {
 
 #[derive(Subcommand)]
 pub enum SessionCommand {
-    /// List sessions
+    /// List all panels
     List,
+    /// Get detailed info for a panel
+    Info {
+        /// Panel ID
+        id: String,
+    },
     /// Send text to a session
     Send {
         #[arg(long)]
         id: String,
         text: String,
     },
-    /// Read screen content
+    /// Read screen content (not yet implemented)
     Read {
         #[arg(long)]
         id: Option<String>,
@@ -118,6 +127,8 @@ pub enum TabCommand {
     Close,
     /// List tabs
     List,
+    /// Extended tab info with panel counts
+    Info,
 }
 
 #[derive(Subcommand)]
@@ -126,6 +137,12 @@ pub enum SplitCommand {
     Horizontal,
     /// Split vertically
     Vertical,
+}
+
+#[derive(Subcommand)]
+pub enum EventCommand {
+    /// Subscribe to terminal events (streams JSON lines)
+    Subscribe,
 }
 
 impl Cli {
@@ -149,6 +166,7 @@ impl Cli {
             .to_string(),
             Command::Session(cmd) => match cmd {
                 SessionCommand::List => "session.list",
+                SessionCommand::Info { .. } => "session.info",
                 SessionCommand::Send { .. } => "session.send_text",
                 SessionCommand::Read { .. } => "session.read_text",
                 SessionCommand::Close { .. } => "session.close",
@@ -166,11 +184,16 @@ impl Cli {
                 TabCommand::New => "tab.new",
                 TabCommand::Close => "tab.close",
                 TabCommand::List => "tab.list",
+                TabCommand::Info => "tab.info",
             }
             .to_string(),
             Command::Split(cmd) => match cmd {
                 SplitCommand::Horizontal => "split.horizontal",
                 SplitCommand::Vertical => "split.vertical",
+            }
+            .to_string(),
+            Command::Event(cmd) => match cmd {
+                EventCommand::Subscribe => "event.subscribe",
             }
             .to_string(),
         }
@@ -195,6 +218,7 @@ impl Cli {
             },
             Command::Session(cmd) => match cmd {
                 SessionCommand::List => json!({}),
+                SessionCommand::Info { id } => json!({ "id": id }),
                 SessionCommand::Send { id, text } => json!({ "session_id": id, "text": text }),
                 SessionCommand::Read { id, lines } => json!({ "session_id": id, "lines": lines }),
                 SessionCommand::Close { id } => json!({ "session_id": id }),
@@ -210,7 +234,7 @@ impl Cli {
                 BackgroundCommand::SetTint { opacity } => json!({ "opacity": opacity }),
                 BackgroundCommand::Next | BackgroundCommand::Toggle => json!({}),
             },
-            Command::Tab(_) | Command::Split(_) => json!({}),
+            Command::Tab(_) | Command::Split(_) | Command::Event(_) => json!({}),
         }
     }
 }

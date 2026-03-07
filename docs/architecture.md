@@ -97,9 +97,37 @@ custermctl ──Unix socket──► socket server (per-client thread)
                           oneshot response ──► socket thread ──► client
 ```
 
-**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `split.horizontal`, `split.vertical`
+**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`
 
 **Cleanup**: Socket file removed on window destroy.
+
+## Event Stream
+
+Clients can subscribe to real-time events via `event.subscribe`. The socket stays open and streams newline-delimited JSON events.
+
+**Protocol**: Send `{"id":"...","method":"event.subscribe","params":{}}`, receive `{"id":"...","ok":true,"result":{"status":"subscribed"}}`, then receive event lines indefinitely.
+
+**Event format**: `{"type":"<event_type>","data":{...}}`
+
+**Event types**:
+| Event | Data | Trigger |
+|-------|------|---------|
+| `panel.focused` | `{panel_id}` | Panel gains focus |
+| `panel.title_changed` | `{panel_id, title}` | Terminal window title changes |
+| `panel.exited` | `{panel_id, tab}` | Shell process exits |
+| `tab.created` | `{panel_id, tab}` | New tab opened |
+| `tab.closed` | `{panel_id, tab}` | Tab closed |
+| `terminal.output` | `{panel_id, text}` | Terminal receives output (high frequency) |
+
+**Usage**: `custermctl event subscribe` — prints events as JSON lines to stdout.
+
+## Query API
+
+**`session.list`**: Returns all panels across all tabs with `[{id, title, tab, focused}]`.
+
+**`session.info`** (`{id}`): Returns detailed panel info: `{id, title, tab, focused, cols, rows, cursor: [row, col]}`.
+
+**`tab.info`**: Returns extended tab info: `{count, current, tabs: [{index, panel_count, title}]}`.
 
 ## System Prerequisites
 

@@ -31,7 +31,8 @@ impl CustermWindow {
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
 
-        let tab_manager = TabManager::new(config, &window);
+        let event_bus = socket::new_event_bus();
+        let tab_manager = TabManager::new(config, &window, event_bus.clone());
 
         window.set_child(Some(&tab_manager.notebook));
 
@@ -62,7 +63,7 @@ impl CustermWindow {
 
         // Socket server
         let socket_path = "/tmp/custerm.sock".to_string();
-        let socket_rx = socket::start_server(&socket_path);
+        let socket_rx = socket::start_server(&socket_path, event_bus);
         let mgr = tab_manager.clone();
         let win = window.clone();
         glib::timeout_add_local(Duration::from_millis(50), move || {

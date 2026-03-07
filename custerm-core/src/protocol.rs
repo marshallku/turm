@@ -24,6 +24,22 @@ pub struct ResponseError {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub data: serde_json::Value,
+}
+
+impl Event {
+    pub fn new(event_type: impl Into<String>, data: serde_json::Value) -> Self {
+        Self {
+            event_type: event_type.into(),
+            data,
+        }
+    }
+}
+
 impl Request {
     pub fn new(id: impl Into<String>, method: impl Into<String>, params: serde_json::Value) -> Self {
         Self {

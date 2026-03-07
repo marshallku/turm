@@ -199,6 +199,7 @@ dependencies = [
  "dirs",
  "gtk4",
  "serde_json",
+ "uuid",
  "vte4",
 ]
 

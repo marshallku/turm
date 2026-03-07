@@ -2,7 +2,7 @@ mod client;
 mod commands;
 
 use clap::Parser;
-use commands::Cli;
+use commands::{Cli, Command, EventCommand};
 
 fn main() {
     let cli = Cli::parse();
@@ -10,6 +10,18 @@ fn main() {
     let socket_path = cli.socket.clone().unwrap_or_else(|| {
         std::env::var("CUSTERM_SOCKET").unwrap_or_else(|_| "/tmp/custerm.sock".to_string())
     });
+
+    // Event subscribe is a long-lived streaming connection
+    if matches!(&cli.command, Command::Event(EventCommand::Subscribe)) {
+        match client::subscribe(&socket_path) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Failed to subscribe: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     let result = client::send_command(&socket_path, &cli.method(), cli.params());
 

@@ -4,12 +4,15 @@ use std::rc::Rc;
 use gtk4::prelude::*;
 use gtk4::gdk;
 use gtk4::glib;
+use serde_json::json;
 
 use custerm_core::config::CustermConfig;
+use custerm_core::protocol::Event;
 
 use vte4::prelude::*;
 
 use crate::panel::Panel;
+use crate::socket::{EventBus, broadcast};
 use crate::split::{CloseResult, TabContent};
 use crate::terminal::TerminalPanel;
 
@@ -18,10 +21,11 @@ pub struct TabManager {
     tabs: Rc<RefCell<Vec<TabContent>>>,
     focused: Rc<RefCell<Option<Rc<TerminalPanel>>>>,
     config: Rc<RefCell<CustermConfig>>,
+    event_bus: EventBus,
 }
 
 impl TabManager {
-    pub fn new(config: &CustermConfig, window: &gtk4::ApplicationWindow) -> Rc<Self> {
+    pub fn new(config: &CustermConfig, window: &gtk4::ApplicationWindow, event_bus: EventBus) -> Rc<Self> {
         let notebook = gtk4::Notebook::new();
         notebook.set_scrollable(true);
         notebook.set_show_border(false);
@@ -42,6 +46,7 @@ impl TabManager {
             tabs: Rc::new(RefCell::new(Vec::new())),
             focused: Rc::new(RefCell::new(None)),
             config: Rc::new(RefCell::new(config.clone())),
+            event_bus,
         });
 
         // Tab bar CSS
@@ -107,6 +112,11 @@ impl TabManager {
         self.notebook.set_current_page(Some(page_num));
         *self.focused.borrow_mut() = Some(panel.clone());
         panel.grab_focus();
+
+        broadcast(&self.event_bus, &Event::new("tab.created", json!({
+            "panel_id": panel.id,
+            "tab": page_num,
+        })));
     }
 
     pub fn split_focused(
@@ -146,9 +156,15 @@ impl TabManager {
 
         match result {
             CloseResult::CloseTab => {
+                let panel_id = focused_panel.id.clone();
                 self.tabs.borrow_mut().remove(tab_idx);
                 self.notebook.remove_page(Some(tab_idx as u32));
                 self.update_tab_visibility();
+
+                broadcast(&self.event_bus, &Event::new("tab.closed", json!({
+                    "panel_id": panel_id,
+                    "tab": tab_idx,
+                })));
 
                 if self.tabs.borrow().is_empty() {
                     window.close();
@@ -244,6 +260,81 @@ impl TabManager {
         next_panel.grab_focus();
     }
 
+    /// Return info for all panels across all tabs
+    pub fn all_panels_info(&self) -> Vec<serde_json::Value> {
+        let tabs = self.tabs.borrow();
+        let focused = self.focused.borrow().clone();
+        let mut result = Vec::new();
+
+        for (tab_idx, tab) in tabs.iter().enumerate() {
+            let mut panels = Vec::new();
+            tab.root.borrow().collect_panels(&mut panels);
+            for panel in panels {
+                let is_focused = focused.as_ref().is_some_and(|f| Rc::ptr_eq(f, &panel));
+                result.push(json!({
+                    "id": panel.id,
+                    "title": panel.title(),
+                    "tab": tab_idx,
+                    "focused": is_focused,
+                }));
+            }
+        }
+
+        result
+    }
+
+    /// Return detailed info for a panel by ID
+    pub fn panel_info_by_id(&self, id: &str) -> Option<serde_json::Value> {
+        let tabs = self.tabs.borrow();
+        let focused = self.focused.borrow().clone();
+
+        for (tab_idx, tab) in tabs.iter().enumerate() {
+            let mut panels = Vec::new();
+            tab.root.borrow().collect_panels(&mut panels);
+            for panel in panels {
+                if panel.id == id {
+                    let is_focused = focused.as_ref().is_some_and(|f| Rc::ptr_eq(f, &panel));
+                    let (cursor_row, cursor_col) = panel.terminal.cursor_position();
+                    return Some(json!({
+                        "id": panel.id,
+                        "title": panel.title(),
+                        "tab": tab_idx,
+                        "focused": is_focused,
+                        "cols": panel.terminal.column_count(),
+                        "rows": panel.terminal.row_count(),
+                        "cursor": [cursor_row, cursor_col],
+                    }));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Return extended tab info
+    pub fn tab_info(&self) -> serde_json::Value {
+        let tabs = self.tabs.borrow();
+        let current = self.notebook.current_page();
+        let mut tab_list = Vec::new();
+
+        for (i, tab) in tabs.iter().enumerate() {
+            let mut panels = Vec::new();
+            tab.root.borrow().collect_panels(&mut panels);
+            let title = panels.first().map(|p| p.title()).unwrap_or_default();
+            tab_list.push(json!({
+                "index": i,
+                "panel_count": panels.len(),
+                "title": title,
+            }));
+        }
+
+        json!({
+            "count": tabs.len(),
+            "current": current,
+            "tabs": tab_list,
+        })
+    }
+
     // -- Private helpers --
 
     fn create_panel(
@@ -255,15 +346,17 @@ impl TabManager {
         let win = window.clone();
         let widget_holder: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
         let widget_for_exit = widget_holder.clone();
+        let event_bus_exit = self.event_bus.clone();
 
         let panel = Rc::new(TerminalPanel::new(config, move || {
             let widget = widget_for_exit.borrow().clone();
             let mgr = mgr.clone();
             let win = win.clone();
+            let bus = event_bus_exit.clone();
             glib::idle_add_local_once(move || {
                 let Some(mgr) = mgr.upgrade() else { return };
                 if let Some(ref w) = widget {
-                    mgr.handle_panel_exit(w, &win);
+                    mgr.handle_panel_exit(w, &win, &bus);
                 }
             });
         }));
@@ -278,6 +371,27 @@ impl TabManager {
             }
         }
 
+        // Hook terminal output events
+        let bus = self.event_bus.clone();
+        let panel_id = panel.id.clone();
+        panel.terminal.connect_commit(move |_term, text, _size| {
+            broadcast(&bus, &Event::new("terminal.output", json!({
+                "panel_id": panel_id,
+                "text": text,
+            })));
+        });
+
+        // Hook title change events
+        let bus = self.event_bus.clone();
+        let panel_id = panel.id.clone();
+        panel.terminal.connect_window_title_changed(move |term| {
+            let title = term.window_title().map(|t| t.to_string()).unwrap_or_default();
+            broadcast(&bus, &Event::new("panel.title_changed", json!({
+                "panel_id": panel_id,
+                "title": title,
+            })));
+        });
+
         self.track_focus(&panel);
         panel
     }
@@ -285,28 +399,45 @@ impl TabManager {
     fn track_focus(&self, panel: &Rc<TerminalPanel>) {
         let focused = self.focused.clone();
         let panel_weak = Rc::downgrade(panel);
+        let bus = self.event_bus.clone();
         let controller = gtk4::EventControllerFocus::new();
         controller.connect_enter(move |_| {
             if let Some(panel) = panel_weak.upgrade() {
+                let panel_id = panel.id.clone();
                 *focused.borrow_mut() = Some(panel);
+                broadcast(&bus, &Event::new("panel.focused", json!({
+                    "panel_id": panel_id,
+                })));
             }
         });
         panel.terminal.add_controller(controller);
     }
 
-    fn handle_panel_exit(&self, panel_widget: &gtk4::Widget, window: &gtk4::ApplicationWindow) {
+    fn handle_panel_exit(&self, panel_widget: &gtk4::Widget, window: &gtk4::ApplicationWindow, bus: &EventBus) {
         let tabs = self.tabs.borrow();
         for (tab_idx, tab) in tabs.iter().enumerate() {
             let mut panels = Vec::new();
             tab.root.borrow().collect_panels(&mut panels);
             if let Some(panel) = panels.iter().find(|p| p.widget() == panel_widget) {
+                let panel_id = panel.id.clone();
                 let result = tab.close_panel(panel);
+
+                broadcast(bus, &Event::new("panel.exited", json!({
+                    "panel_id": panel_id,
+                    "tab": tab_idx,
+                })));
+
                 match result {
                     CloseResult::CloseTab => {
                         drop(tabs);
                         self.tabs.borrow_mut().remove(tab_idx);
                         self.notebook.remove_page(Some(tab_idx as u32));
                         self.update_tab_visibility();
+
+                        broadcast(bus, &Event::new("tab.closed", json!({
+                            "panel_id": panel_id,
+                            "tab": tab_idx,
+                        })));
 
                         if self.tabs.borrow().is_empty() {
                             window.close();

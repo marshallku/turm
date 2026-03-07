@@ -51,8 +51,8 @@ Single programmable interface for both human CLI and AI agents.
 - [x] **Socket server** in custerm-linux (Unix socket, per-PID path)
 - [x] **Command dispatch**: system.ping, background.set/clear/set_tint/next/toggle, tab.new/close/list, split.horizontal/vertical
 - [x] **Env var injection**: CUSTERM_SOCKET per terminal session
-- [ ] **Event stream**: subscribe to terminal output, focus changes, panel lifecycle
-- [ ] **Query API**: read terminal screen content, list panels/tabs, get state
+- [x] **Event stream**: subscribe to terminal output, focus changes, panel lifecycle via `event.subscribe`
+- [x] **Query API**: `session.list`, `session.info` (panel details + cursor/dimensions), `tab.info` (extended tab info)
 
 ### Phase 5: WebView Panel
 Embed browser as a panel type alongside terminals.

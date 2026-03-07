@@ -26,6 +26,7 @@ const MIN_FONT_SCALE: f64 = 0.3;
 const MAX_FONT_SCALE: f64 = 3.0;
 
 pub struct TerminalPanel {
+    pub id: String,
     pub overlay: gtk4::Overlay,
     pub terminal: Terminal,
     pub bg_picture: gtk4::Picture,
@@ -157,6 +158,7 @@ impl TerminalPanel {
         overlay.set_vexpand(true);
 
         Self {
+            id: uuid::Uuid::new_v4().to_string(),
             overlay,
             terminal,
             bg_picture,

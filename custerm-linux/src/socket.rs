@@ -3,23 +3,39 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use gtk4::ApplicationWindow;
 use serde_json::json;
 
-use custerm_core::protocol::{Request, Response};
+use custerm_core::protocol::{Event, Request, Response};
 
 use crate::tabs::TabManager;
 
 const WALLPAPER_CACHE: &str = ".cache/terminal-wallpapers.txt";
 const BG_MODE_FILE: &str = ".cache/custerm-bg-mode";
 
+pub type EventBus = Arc<Mutex<Vec<mpsc::Sender<String>>>>;
+
 pub struct SocketCommand {
     pub request: Request,
     pub reply: std::sync::mpsc::Sender<Response>,
 }
 
-pub fn start_server(socket_path: &str) -> mpsc::Receiver<SocketCommand> {
+pub fn new_event_bus() -> EventBus {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+pub fn broadcast(bus: &EventBus, event: &Event) {
+    let json = match serde_json::to_string(event) {
+        Ok(j) => j,
+        Err(_) => return,
+    };
+    let mut senders = bus.lock().unwrap();
+    senders.retain(|tx| tx.send(json.clone()).is_ok());
+}
+
+pub fn start_server(socket_path: &str, event_bus: EventBus) -> mpsc::Receiver<SocketCommand> {
     let (tx, rx) = mpsc::channel();
 
     // Remove stale socket
@@ -46,6 +62,7 @@ pub fn start_server(socket_path: &str) -> mpsc::Receiver<SocketCommand> {
             };
 
             let tx = tx.clone();
+            let event_bus = event_bus.clone();
             std::thread::spawn(move || {
                 let reader = match stream.try_clone() {
                     Ok(s) => BufReader::new(s),
@@ -78,6 +95,29 @@ pub fn start_server(socket_path: &str) -> mpsc::Receiver<SocketCommand> {
                             continue;
                         }
                     };
+
+                    // Handle event.subscribe in the socket thread (long-lived connection)
+                    if request.method == "event.subscribe" {
+                        let resp = Response::success(
+                            request.id.clone(),
+                            json!({ "status": "subscribed" }),
+                        );
+                        let _ = writeln!(writer, "{}", serde_json::to_string(&resp).unwrap());
+                        let _ = writer.flush();
+
+                        let (etx, erx) = mpsc::channel();
+                        event_bus.lock().unwrap().push(etx);
+
+                        for event_json in erx.iter() {
+                            if writeln!(writer, "{event_json}").is_err() {
+                                break;
+                            }
+                            if writer.flush().is_err() {
+                                break;
+                            }
+                        }
+                        return;
+                    }
 
                     let (reply_tx, reply_rx) = mpsc::channel();
                     let cmd = SocketCommand {
@@ -217,6 +257,10 @@ pub fn dispatch(
             )
         }
 
+        "tab.info" => {
+            Response::success(req.id.clone(), mgr.tab_info())
+        }
+
         "split.horizontal" => {
             mgr.split_focused(gtk4::Orientation::Horizontal, window);
             Response::success(req.id.clone(), json!({ "status": "ok" }))
@@ -225,6 +269,23 @@ pub fn dispatch(
         "split.vertical" => {
             mgr.split_focused(gtk4::Orientation::Vertical, window);
             Response::success(req.id.clone(), json!({ "status": "ok" }))
+        }
+
+        "session.list" => {
+            Response::success(req.id.clone(), json!(mgr.all_panels_info()))
+        }
+
+        "session.info" => {
+            let id = req.params.get("id").and_then(|v| v.as_str());
+            match id {
+                Some(id) => {
+                    match mgr.panel_info_by_id(id) {
+                        Some(info) => Response::success(req.id.clone(), info),
+                        None => Response::error(req.id.clone(), "not_found", &format!("Panel not found: {id}")),
+                    }
+                }
+                None => Response::error(req.id.clone(), "invalid_params", "Missing 'id' param"),
+            }
         }
 
         _ => Response::error(
