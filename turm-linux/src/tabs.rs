@@ -622,6 +622,21 @@ impl TabManager {
         None
     }
 
+    /// Find the first terminal panel across all tabs.
+    pub fn find_first_terminal(&self) -> Option<Rc<PanelVariant>> {
+        let tabs = self.tabs.borrow();
+        for tab in tabs.iter() {
+            let mut panels = Vec::new();
+            tab.root.borrow().collect_panels(&mut panels);
+            for panel in panels {
+                if panel.as_terminal().is_some() {
+                    return Some(panel);
+                }
+            }
+        }
+        None
+    }
+
     /// Return extended tab info
     pub fn tab_info(&self) -> serde_json::Value {
         let tabs = self.tabs.borrow();
@@ -1413,6 +1428,45 @@ fn setup_tab_actions(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow)
 
     pop_box.append(&term_row);
     pop_box.append(&browser_row);
+
+    // Plugin entries — one "tab" button per plugin panel
+    for plugin in manager.plugins.iter() {
+        for panel_def in &plugin.manifest.panels {
+            let icon_name = panel_def
+                .icon
+                .as_deref()
+                .unwrap_or("application-x-addon-symbolic");
+            let label_text = &panel_def.title;
+
+            let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+            row.add_css_class("turm-add-row");
+
+            let type_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+            type_box.append(&gtk4::Image::from_icon_name(icon_name));
+            type_box.append(&gtk4::Label::new(Some(label_text)));
+            type_box.set_hexpand(true);
+
+            let tab_btn = gtk4::Button::from_icon_name("tab-new-symbolic");
+            tab_btn.add_css_class("flat");
+            tab_btn.add_css_class("turm-placement-btn");
+            tab_btn.set_tooltip_text(Some("New tab"));
+
+            row.append(&type_box);
+            row.append(&tab_btn);
+
+            pop_box.append(&row);
+
+            let mgr = manager.clone();
+            let pop = popover.clone();
+            let p = plugin.clone();
+            let pname = panel_def.name.clone();
+            tab_btn.connect_clicked(move |_| {
+                pop.popdown();
+                mgr.add_plugin_tab(&p, &pname);
+            });
+        }
+    }
+
     popover.set_child(Some(&pop_box));
     add_btn.set_popover(Some(&popover));
 

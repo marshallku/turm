@@ -1119,28 +1119,35 @@ fn resolve_terminal(
     req: &Request,
     mgr: &Rc<TabManager>,
 ) -> Result<Rc<crate::panel::PanelVariant>, Response> {
-    // If id is provided, find that specific panel; otherwise use active panel
-    let panel = if let Some(id) = req.params.get("id").and_then(|v| v.as_str()) {
-        mgr.find_panel_by_id(id).ok_or_else(|| {
+    // If id is provided, find that specific panel
+    if let Some(id) = req.params.get("id").and_then(|v| v.as_str()) {
+        let panel = mgr.find_panel_by_id(id).ok_or_else(|| {
             Response::error(
                 req.id.clone(),
                 "not_found",
                 &format!("Panel not found: {id}"),
             )
-        })?
-    } else {
-        mgr.active_panel()
-            .ok_or_else(|| Response::error(req.id.clone(), "no_panel", "No active panel"))?
-    };
-
-    if panel.as_terminal().is_none() {
-        return Err(Response::error(
-            req.id.clone(),
-            "wrong_panel_type",
-            "Panel is not a terminal",
-        ));
+        })?;
+        if panel.as_terminal().is_none() {
+            return Err(Response::error(
+                req.id.clone(),
+                "wrong_panel_type",
+                "Panel is not a terminal",
+            ));
+        }
+        return Ok(panel);
     }
-    Ok(panel)
+
+    // No id: try active panel first, then fall back to any terminal panel
+    if let Some(panel) = mgr.active_panel()
+        && panel.as_terminal().is_some()
+    {
+        return Ok(panel);
+    }
+
+    // Active panel is not a terminal (e.g. plugin/webview) — find any terminal
+    mgr.find_first_terminal()
+        .ok_or_else(|| Response::error(req.id.clone(), "no_terminal", "No terminal panel found"))
 }
 
 fn handle_terminal_read(req: &Request, mgr: &Rc<TabManager>) -> Response {
