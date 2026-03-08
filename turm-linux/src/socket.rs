@@ -456,7 +456,7 @@ pub fn dispatch(
 
         _ if req.method.starts_with("plugin.") && req.method.matches('.').count() == 2 => {
             // plugin.<name>.<command>
-            handle_plugin_command(cmd, mgr, &socket_path);
+            handle_plugin_command(cmd, mgr, socket_path);
         }
 
         _ => {
