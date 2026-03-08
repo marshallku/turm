@@ -208,25 +208,8 @@ impl TabManager {
         plugin: &LoadedPlugin,
         panel_name: &str,
     ) -> Option<String> {
-        let panel_def = plugin
-            .manifest
-            .panels
-            .iter()
-            .find(|p| p.name == panel_name)?;
-
-        let config = self.config.borrow();
-        let theme = turm_core::theme::Theme::by_name(&config.theme.name).unwrap_or_default();
-        drop(config);
-
-        let plugin_panel = PluginPanel::new(
-            plugin,
-            panel_def,
-            &theme,
-            self.dispatch_tx.clone(),
-            self.event_bus.clone(),
-        );
-        let panel_id = plugin_panel.id.clone();
-        let panel = Rc::new(PanelVariant::Plugin(plugin_panel));
+        let panel = self.create_plugin_panel(plugin, panel_name)?;
+        let panel_id = panel.id().to_string();
 
         let tab_content = TabContent::new(panel.clone());
         let tab_label = self.make_tab_label(&panel, &tab_content.container);
@@ -254,6 +237,30 @@ impl TabManager {
                 }),
             ),
         );
+
+        Some(panel_id)
+    }
+
+    pub fn split_focused_plugin(
+        self: &Rc<Self>,
+        plugin: &LoadedPlugin,
+        panel_name: &str,
+        orientation: gtk4::Orientation,
+    ) -> Option<String> {
+        let focused = self.focused.borrow().clone();
+        let focused_panel = focused?;
+        let tab_idx = self.tab_index_of(&focused_panel)?;
+
+        let new_panel = self.create_plugin_panel(plugin, panel_name)?;
+        let panel_id = new_panel.id().to_string();
+
+        {
+            let tabs = self.tabs.borrow();
+            tabs[tab_idx].split(&focused_panel, &new_panel, orientation);
+        }
+
+        *self.focused.borrow_mut() = Some(new_panel.clone());
+        new_panel.grab_focus();
 
         Some(panel_id)
     }
@@ -866,6 +873,33 @@ impl TabManager {
         panel
     }
 
+    fn create_plugin_panel(
+        self: &Rc<Self>,
+        plugin: &LoadedPlugin,
+        panel_name: &str,
+    ) -> Option<Rc<PanelVariant>> {
+        let panel_def = plugin
+            .manifest
+            .panels
+            .iter()
+            .find(|p| p.name == panel_name)?;
+
+        let config = self.config.borrow();
+        let theme = turm_core::theme::Theme::by_name(&config.theme.name).unwrap_or_default();
+        drop(config);
+
+        let plugin_panel = PluginPanel::new(
+            plugin,
+            panel_def,
+            &theme,
+            self.dispatch_tx.clone(),
+            self.event_bus.clone(),
+        );
+        let panel = Rc::new(PanelVariant::Plugin(plugin_panel));
+        self.track_focus(&panel);
+        Some(panel)
+    }
+
     fn track_focus(&self, panel: &Rc<PanelVariant>) {
         let focused = self.focused.clone();
         let panel_weak = Rc::downgrade(panel);
@@ -1429,40 +1463,43 @@ fn setup_tab_actions(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow)
     pop_box.append(&term_row);
     pop_box.append(&browser_row);
 
-    // Plugin entries — one "tab" button per plugin panel
+    // Plugin entries
     for plugin in manager.plugins.iter() {
         for panel_def in &plugin.manifest.panels {
             let icon_name = panel_def
                 .icon
                 .as_deref()
                 .unwrap_or("application-x-addon-symbolic");
-            let label_text = &panel_def.title;
 
-            let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-            row.add_css_class("turm-add-row");
-
-            let type_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
-            type_box.append(&gtk4::Image::from_icon_name(icon_name));
-            type_box.append(&gtk4::Label::new(Some(label_text)));
-            type_box.set_hexpand(true);
-
-            let tab_btn = gtk4::Button::from_icon_name("tab-new-symbolic");
-            tab_btn.add_css_class("flat");
-            tab_btn.add_css_class("turm-placement-btn");
-            tab_btn.set_tooltip_text(Some("New tab"));
-
-            row.append(&type_box);
-            row.append(&tab_btn);
-
-            pop_box.append(&row);
+            let (plugin_row, plugin_tab, plugin_h, plugin_v) =
+                make_row(icon_name, &panel_def.title);
+            pop_box.append(&plugin_row);
 
             let mgr = manager.clone();
             let pop = popover.clone();
             let p = plugin.clone();
             let pname = panel_def.name.clone();
-            tab_btn.connect_clicked(move |_| {
+            plugin_tab.connect_clicked(move |_| {
                 pop.popdown();
                 mgr.add_plugin_tab(&p, &pname);
+            });
+
+            let mgr = manager.clone();
+            let pop = popover.clone();
+            let p = plugin.clone();
+            let pname = panel_def.name.clone();
+            plugin_h.connect_clicked(move |_| {
+                pop.popdown();
+                mgr.split_focused_plugin(&p, &pname, gtk4::Orientation::Horizontal);
+            });
+
+            let mgr = manager.clone();
+            let pop = popover.clone();
+            let p = plugin.clone();
+            let pname = panel_def.name.clone();
+            plugin_v.connect_clicked(move |_| {
+                pop.popdown();
+                mgr.split_focused_plugin(&p, &pname, gtk4::Orientation::Vertical);
             });
         }
     }

@@ -72,6 +72,4 @@ impl PanelVariant {
             _ => None,
         }
     }
-
-
 }
