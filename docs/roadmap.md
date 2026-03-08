@@ -114,7 +114,7 @@ Collapsible tab bar and renamable tabs.
 
 ### Phase 7: Polish + Ecosystem
 
-- [ ] Theme system (parse theme files, multiple palettes)
+- [x] Theme system (10 built-in themes, hot-reload, all UI components themed)
 - [ ] Clipboard integration (OSC 52)
 - [ ] URL detection + click-to-open
 - [ ] Session persistence / restore

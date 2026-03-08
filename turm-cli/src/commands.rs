@@ -53,6 +53,10 @@ pub enum Command {
     #[command(subcommand)]
     Agent(AgentCommand),
 
+    /// Theme management
+    #[command(subcommand)]
+    Theme(ThemeCommand),
+
     /// Check for updates or update turm
     #[command(subcommand)]
     Update(UpdateCommand),
@@ -206,6 +210,12 @@ pub enum AgentCommand {
         #[arg(long)]
         actions: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ThemeCommand {
+    /// List available themes
+    List,
 }
 
 #[derive(Subcommand)]
@@ -416,6 +426,10 @@ impl Cli {
                 AgentCommand::Approve { .. } => "agent.approve",
             }
             .to_string(),
+            Command::Theme(cmd) => match cmd {
+                ThemeCommand::List => "theme.list",
+            }
+            .to_string(),
             Command::Update(_) => unreachable!("update commands are handled locally"),
         }
     }
@@ -503,7 +517,7 @@ impl Cli {
                     p
                 }
             },
-            Command::Split(_) | Command::Event(_) | Command::Update(_) => {
+            Command::Theme(_) | Command::Split(_) | Command::Event(_) | Command::Update(_) => {
                 json!({})
             }
             Command::Webview(cmd) => match cmd {

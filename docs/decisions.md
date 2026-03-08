@@ -48,11 +48,13 @@ Without step 1, VTE covers the entire overlay with its own background color.
 
 **Decision:** CLI binary renamed to `turmctl` (follows kubectl, sysctl naming convention).
 
-## 6. Catppuccin Mocha Hardcoded
+## 6. Theme System
 
-**Current state:** Theme colors are hardcoded in `terminal.rs`. The config `[theme] name = "catppuccin-mocha"` exists but theme switching is not yet implemented.
+**Design:** Themes are defined as `Theme` structs in `turm-core/theme.rs` with semantic color slots (foreground, background, 16-color palette, surface/overlay/accent UI colors). 10 built-in themes are embedded. All UI components (terminal, tab bar, search bar, webview URL bar, window background) use theme colors via CSS generation functions.
 
-**Future:** Parse theme files or embed multiple palettes.
+**Config:** `[theme] name = "catppuccin-mocha"` selects the active theme. Hot-reloads on config change.
+
+**Built-in themes:** catppuccin-mocha (default), catppuccin-latte, catppuccin-frappe, catppuccin-macchiato, dracula, nord, tokyo-night, gruvbox-dark, one-dark, solarized-dark.
 
 ## 7. cmux V2 Protocol for Socket Communication
 

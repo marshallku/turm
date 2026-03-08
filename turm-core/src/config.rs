@@ -189,6 +189,8 @@ font_size = 14
 # collapsed = true  # start with tab bar collapsed (icon-only)
 
 [theme]
+# Available: catppuccin-mocha, catppuccin-latte, catppuccin-frappe, catppuccin-macchiato,
+#            dracula, nord, tokyo-night, gruvbox-dark, one-dark, solarized-dark
 name = "catppuccin-mocha"
 "##;
         std::fs::write(&path, default_config)?;

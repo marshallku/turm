@@ -80,6 +80,10 @@ turmctl [--socket <path>] [--json] <command>
 
 - `turmctl agent approve <message> [--title <title>] [--actions "Approve,Deny"]` — show approval dialog, block until user responds
 
+### Theme
+
+- `turmctl theme list` — list available themes and current theme
+
 ### Update
 
 - `turmctl update check` — check for newer version

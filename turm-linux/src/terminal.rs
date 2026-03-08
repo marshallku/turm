@@ -9,14 +9,10 @@ use vte4::Terminal;
 use vte4::prelude::*;
 
 use turm_core::config::TurmConfig;
+use turm_core::theme::Theme;
 
 use crate::panel::Panel;
 use crate::search::SearchBar;
-
-const PALETTE: &[&str] = &[
-    "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
-    "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8",
-];
 
 const DEFAULT_FONT_SCALE: f64 = 1.0;
 const FONT_SCALE_STEP: f64 = 0.1;
@@ -35,6 +31,7 @@ pub struct TerminalPanel {
     pub image_opacity: Rc<Cell<f64>>,
     pub has_background: Rc<Cell<bool>>,
     pub search_bar: SearchBar,
+    pub theme: Box<Theme>,
 }
 
 impl TerminalPanel {
@@ -49,10 +46,11 @@ impl TerminalPanel {
         terminal.set_font(Some(&font_desc));
         terminal.set_font_scale(DEFAULT_FONT_SCALE);
 
-        // Colors
-        let fg = parse_color("#cdd6f4");
-        let bg = parse_color("#1e1e2e");
-        let palette = make_palette();
+        // Colors from theme
+        let theme = Theme::by_name(&config.theme.name).unwrap_or_default();
+        let fg = parse_color(&theme.foreground);
+        let bg = parse_color(&theme.background);
+        let palette: Vec<gdk::RGBA> = theme.palette.iter().map(|c| parse_color(c)).collect();
         let palette_refs: Vec<&gdk::RGBA> = palette.iter().collect();
         terminal.set_colors(Some(&fg), Some(&bg), &palette_refs);
 
@@ -148,7 +146,7 @@ impl TerminalPanel {
         );
 
         // Search bar
-        let search_bar = SearchBar::new(&terminal);
+        let search_bar = SearchBar::new(&terminal, &theme);
 
         // Stack: bg_picture → tint → terminal → search bar
         let overlay = gtk4::Overlay::new();
@@ -172,6 +170,7 @@ impl TerminalPanel {
             image_opacity,
             has_background: Rc::new(Cell::new(false)),
             search_bar,
+            theme: Box::new(theme),
         }
     }
 
@@ -205,9 +204,9 @@ impl TerminalPanel {
         self.has_background.set(true);
 
         self.terminal.set_clear_background(false);
-        let fg = parse_color("#cdd6f4");
+        let fg = parse_color(&self.theme.foreground);
         let bg = gdk::RGBA::new(0.0, 0.0, 0.0, 0.0);
-        let palette = make_palette();
+        let palette: Vec<gdk::RGBA> = self.theme.palette.iter().map(|c| parse_color(c)).collect();
         let palette_refs: Vec<&gdk::RGBA> = palette.iter().collect();
         self.terminal
             .set_colors(Some(&fg), Some(&bg), &palette_refs);
@@ -222,9 +221,9 @@ impl TerminalPanel {
 
         self.terminal.set_clear_background(true);
 
-        let fg = parse_color("#cdd6f4");
-        let bg = parse_color("#1e1e2e");
-        let palette = make_palette();
+        let fg = parse_color(&self.theme.foreground);
+        let bg = parse_color(&self.theme.background);
+        let palette: Vec<gdk::RGBA> = self.theme.palette.iter().map(|c| parse_color(c)).collect();
         let palette_refs: Vec<&gdk::RGBA> = palette.iter().collect();
         self.terminal
             .set_colors(Some(&fg), Some(&bg), &palette_refs);
@@ -362,11 +361,7 @@ fn update_tint_css(provider: &gtk4::CssProvider, hex_color: &str, opacity: f64) 
     provider.load_from_string(&css);
 }
 
-fn make_palette() -> Vec<gdk::RGBA> {
-    PALETTE.iter().map(|c| parse_color(c)).collect()
-}
-
-fn parse_color(hex: &str) -> gdk::RGBA {
+pub fn parse_color(hex: &str) -> gdk::RGBA {
     let hex = hex.trim_start_matches('#');
     if hex.len() < 6 {
         return gdk::RGBA::new(0.0, 0.0, 0.0, 1.0);

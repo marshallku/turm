@@ -79,6 +79,10 @@ name = "catppuccin-mocha"
 | ------ | ------------------ | ----------- |
 | `name` | `catppuccin-mocha` | Theme name  |
 
+**Available themes**: `catppuccin-mocha`, `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `dracula`, `nord`, `tokyo-night`, `gruvbox-dark`, `one-dark`, `solarized-dark`
+
+Theme changes hot-reload on config save. The theme applies to the terminal palette, tab bar, search bar, webview URL bar, and window background.
+
 ## Notes
 
 - All fields have defaults; config file is optional

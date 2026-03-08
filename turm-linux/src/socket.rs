@@ -407,6 +407,15 @@ pub fn dispatch(cmd: SocketCommand, mgr: &Rc<TabManager>, window: &ApplicationWi
             handle_agent_approve(cmd, window);
         }
 
+        "theme.list" => {
+            let themes: Vec<&str> = turm_core::theme::Theme::list().to_vec();
+            let current = mgr.current_theme_name();
+            let _ = cmd.reply.send(Response::success(
+                req.id.clone(),
+                json!({ "themes": themes, "current": current }),
+            ));
+        }
+
         _ => {
             let _ = cmd.reply.send(Response::error(
                 req.id.clone(),

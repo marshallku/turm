@@ -103,7 +103,7 @@ turmctl ──Unix socket──► socket server (per-client thread)
                           oneshot response ──► socket thread ──► client
 ```
 
-**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `tab.rename`, `tabs.toggle_bar`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`, `terminal.read`, `terminal.state`, `terminal.exec`, `terminal.feed`, `terminal.history`, `terminal.context`, `agent.approve`, `webview.open`, `webview.navigate`, `webview.back`, `webview.forward`, `webview.reload`, `webview.execute_js`, `webview.get_content`, `webview.screenshot`, `webview.query`, `webview.query_all`, `webview.get_styles`, `webview.click`, `webview.fill`, `webview.scroll`, `webview.page_info`, `webview.devtools`
+**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `tab.rename`, `tabs.toggle_bar`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`, `terminal.read`, `terminal.state`, `terminal.exec`, `terminal.feed`, `terminal.history`, `terminal.context`, `agent.approve`, `theme.list`, `webview.open`, `webview.navigate`, `webview.back`, `webview.forward`, `webview.reload`, `webview.execute_js`, `webview.get_content`, `webview.screenshot`, `webview.query`, `webview.query_all`, `webview.get_styles`, `webview.click`, `webview.fill`, `webview.scroll`, `webview.page_info`, `webview.devtools`
 
 **Cleanup**: Socket file removed on window destroy.
 

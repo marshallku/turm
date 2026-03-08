@@ -12,7 +12,7 @@ pub struct SearchBar {
 }
 
 impl SearchBar {
-    pub fn new(terminal: &vte4::Terminal) -> Self {
+    pub fn new(terminal: &vte4::Terminal, theme: &turm_core::theme::Theme) -> Self {
         let container = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
         container.set_halign(gtk4::Align::Fill);
         container.set_valign(gtk4::Align::End);
@@ -117,7 +117,7 @@ impl SearchBar {
 
         // Load CSS
         let css = gtk4::CssProvider::new();
-        css.load_from_string(SEARCH_CSS);
+        css.load_from_string(&build_search_css(theme));
         gtk4::style_context_add_provider_for_display(
             &gdk::Display::default().unwrap(),
             &css,
@@ -186,42 +186,52 @@ fn close_search(container: &gtk4::Box, terminal: &vte4::Terminal, focus_target: 
     focus_target.grab_focus();
 }
 
-const SEARCH_CSS: &str = r#"
-.turm-search-bar {
-    background-color: #313244;
+pub fn build_search_css(theme: &turm_core::theme::Theme) -> String {
+    format!(
+        r#"
+.turm-search-bar {{
+    background-color: {surface2};
     border-radius: 8px;
     padding: 4px 8px;
     margin: 8px;
-}
+}}
 
-.turm-search-entry {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
+.turm-search-entry {{
+    background-color: {bg};
+    color: {text};
+    border: 1px solid {overlay0};
     border-radius: 4px;
     padding: 4px 8px;
     min-height: 24px;
-}
+}}
 
-.turm-search-entry:focus {
-    border-color: #89b4fa;
-}
+.turm-search-entry:focus {{
+    border-color: {accent};
+}}
 
-.turm-search-count {
-    color: #6c7086;
+.turm-search-count {{
+    color: {subtext0};
     font-size: 12px;
     margin: 0 4px;
-}
+}}
 
-.turm-search-btn {
+.turm-search-btn {{
     min-width: 24px;
     min-height: 24px;
     padding: 2px;
     border-radius: 4px;
-    color: #cdd6f4;
-}
+    color: {text};
+}}
 
-.turm-search-btn:hover {
-    background-color: #45475a;
+.turm-search-btn:hover {{
+    background-color: {overlay0};
+}}
+"#,
+        surface2 = theme.surface2,
+        bg = theme.background,
+        text = theme.text,
+        overlay0 = theme.overlay0,
+        accent = theme.accent,
+        subtext0 = theme.subtext0,
+    )
 }
-"#;

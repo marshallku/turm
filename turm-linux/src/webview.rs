@@ -3,33 +3,42 @@ use webkit6::prelude::*;
 
 use crate::panel::Panel;
 
-const WEBVIEW_CSS: &str = r#"
-.turm-url-bar {
-    background-color: #313244;
+fn build_webview_css(theme: &turm_core::theme::Theme) -> String {
+    format!(
+        r#"
+.turm-url-bar {{
+    background-color: {surface2};
     padding: 4px 8px;
-}
-.turm-url-entry {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
+}}
+.turm-url-entry {{
+    background-color: {bg};
+    color: {text};
+    border: 1px solid {overlay0};
     border-radius: 4px;
     padding: 4px 8px;
     font-size: 12px;
-}
-.turm-url-entry:focus {
-    border-color: #89b4fa;
-}
-.turm-nav-btn {
+}}
+.turm-url-entry:focus {{
+    border-color: {accent};
+}}
+.turm-nav-btn {{
     min-width: 24px;
     min-height: 24px;
     padding: 2px;
     border-radius: 4px;
-    color: #cdd6f4;
+    color: {text};
+}}
+.turm-nav-btn:hover {{
+    background-color: {overlay0};
+}}
+"#,
+        surface2 = theme.surface2,
+        bg = theme.background,
+        text = theme.text,
+        overlay0 = theme.overlay0,
+        accent = theme.accent,
+    )
 }
-.turm-nav-btn:hover {
-    background-color: #45475a;
-}
-"#;
 
 pub struct WebViewPanel {
     pub id: String,
@@ -38,7 +47,7 @@ pub struct WebViewPanel {
 }
 
 impl WebViewPanel {
-    pub fn new(url: &str) -> Self {
+    pub fn new(url: &str, theme: &turm_core::theme::Theme) -> Self {
         let webview = webkit6::WebView::new();
 
         // Sane defaults
@@ -99,7 +108,7 @@ impl WebViewPanel {
 
         // -- CSS --
         let css = gtk4::CssProvider::new();
-        css.load_from_string(WEBVIEW_CSS);
+        css.load_from_string(&build_webview_css(theme));
         gtk4::style_context_add_provider_for_display(
             &gtk4::gdk::Display::default().unwrap(),
             &css,

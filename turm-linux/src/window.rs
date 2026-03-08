@@ -25,8 +25,12 @@ impl TurmWindow {
             .default_height(800)
             .build();
 
+        let theme = turm_core::theme::Theme::by_name(&config.theme.name).unwrap_or_default();
         let css_provider = gtk4::CssProvider::new();
-        css_provider.load_from_string("window { background-color: #1e1e2e; }");
+        css_provider.load_from_string(&format!(
+            "window {{ background-color: {}; }}",
+            theme.background
+        ));
         gtk4::style_context_add_provider_for_display(
             &gtk4::gdk::Display::default().unwrap(),
             &css_provider,

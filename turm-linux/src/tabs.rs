@@ -56,7 +56,8 @@ impl TabManager {
 
         // Tab bar CSS
         let tab_css = gtk4::CssProvider::new();
-        tab_css.load_from_string(&build_tab_css(config.tabs.width));
+        let theme = turm_core::theme::Theme::by_name(&config.theme.name).unwrap_or_default();
+        tab_css.load_from_string(&build_tab_css(config.tabs.width, &theme));
         gtk4::style_context_add_provider_for_display(
             &gdk::Display::default().unwrap(),
             &tab_css,
@@ -394,6 +395,10 @@ impl TabManager {
         self.notebook.current_page()
     }
 
+    pub fn current_theme_name(&self) -> String {
+        self.config.borrow().theme.name.clone()
+    }
+
     pub fn update_config(&self, config: &TurmConfig) {
         *self.config.borrow_mut() = config.clone();
 
@@ -404,8 +409,9 @@ impl TabManager {
             _ => gtk4::PositionType::Top,
         };
         self.notebook.set_tab_pos(tab_pos);
+        let theme = turm_core::theme::Theme::by_name(&config.theme.name).unwrap_or_default();
         self.tab_css
-            .load_from_string(&build_tab_css(config.tabs.width));
+            .load_from_string(&build_tab_css(config.tabs.width, &theme));
 
         // Apply collapsed config if user hasn't manually toggled
         if !*self.user_toggled.borrow() {
@@ -708,7 +714,10 @@ impl TabManager {
     }
 
     fn create_webview_panel(self: &Rc<Self>, url: &str) -> Rc<PanelVariant> {
-        let webview_panel = WebViewPanel::new(url);
+        let config = self.config.borrow();
+        let theme = turm_core::theme::Theme::by_name(&config.theme.name).unwrap_or_default();
+        drop(config);
+        let webview_panel = WebViewPanel::new(url, &theme);
         let panel = Rc::new(PanelVariant::WebView(webview_panel));
 
         // Hook webview events
@@ -1378,7 +1387,16 @@ fn setup_tab_actions(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow)
         .set_action_widget(&action_box, gtk4::PackType::End);
 }
 
-fn build_tab_css(tab_width: u32) -> String {
+fn build_tab_css(tab_width: u32, theme: &turm_core::theme::Theme) -> String {
+    let bg = &theme.background;
+    let surface0 = &theme.surface0;
+    let surface1 = &theme.surface1;
+    let surface2 = &theme.surface2;
+    let overlay0 = &theme.overlay0;
+    let text = &theme.text;
+    let subtext0 = &theme.subtext0;
+    let subtext1 = &theme.subtext1;
+    let red = &theme.red;
     format!(
         r#"
 notebook {{
@@ -1390,7 +1408,7 @@ notebook > stack {{
 }}
 
 notebook header {{
-    background-color: #181825;
+    background-color: {surface0};
     padding: 0;
 }}
 
@@ -1399,8 +1417,8 @@ notebook header tabs {{
 }}
 
 notebook header tab {{
-    background-color: #1e1e2e;
-    color: #6c7086;
+    background-color: {bg};
+    color: {subtext0};
     padding: 6px 8px;
     margin: 2px 1px 0;
     border-radius: 6px 6px 0 0;
@@ -1408,13 +1426,13 @@ notebook header tab {{
 }}
 
 notebook header tab:checked {{
-    background-color: #313244;
-    color: #cdd6f4;
+    background-color: {surface2};
+    color: {text};
 }}
 
 notebook header tab:hover:not(:checked) {{
-    background-color: #262637;
-    color: #bac2de;
+    background-color: {surface1};
+    color: {subtext1};
 }}
 
 /* Vertical tabs (left) */
@@ -1467,12 +1485,12 @@ notebook.turm-collapsed header.bottom tab {{
     padding: 0;
     margin: 0;
     border-radius: 4px;
-    color: #6c7086;
+    color: {subtext0};
 }}
 
 .turm-tab-close:hover {{
-    background-color: #45475a;
-    color: #f38ba8;
+    background-color: {overlay0};
+    color: {red};
 }}
 
 .turm-tab-actions {{
@@ -1489,13 +1507,13 @@ notebook.turm-collapsed header.bottom tab {{
     padding: 0;
     margin: 0;
     border-radius: 4px;
-    color: #6c7086;
+    color: {subtext0};
 }}
 
 .turm-action-btn:hover,
 .turm-action-btn > button:hover {{
-    background-color: #313244;
-    color: #cdd6f4;
+    background-color: {surface2};
+    color: {text};
 }}
 
 .turm-add-menu {{
@@ -1505,11 +1523,11 @@ notebook.turm-collapsed header.bottom tab {{
 .turm-add-row {{
     padding: 4px 6px;
     border-radius: 4px;
-    color: #cdd6f4;
+    color: {text};
 }}
 
 .turm-add-row:hover {{
-    background-color: #262637;
+    background-color: {surface1};
 }}
 
 .turm-placement-btn {{
@@ -1517,7 +1535,7 @@ notebook.turm-collapsed header.bottom tab {{
     min-height: 24px;
     padding: 2px;
     border-radius: 4px;
-    color: #6c7086;
+    color: {subtext0};
     opacity: 0;
 }}
 
@@ -1526,8 +1544,8 @@ notebook.turm-collapsed header.bottom tab {{
 }}
 
 .turm-placement-btn:hover {{
-    background-color: #313244;
-    color: #cdd6f4;
+    background-color: {surface2};
+    color: {text};
 }}
 "#
     )
