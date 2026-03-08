@@ -73,10 +73,5 @@ impl PanelVariant {
         }
     }
 
-    pub fn as_plugin(&self) -> Option<&PluginPanel> {
-        match self {
-            PanelVariant::Plugin(p) => Some(p),
-            _ => None,
-        }
-    }
+
 }
