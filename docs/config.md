@@ -30,6 +30,8 @@ opacity = 0.95      # Terminal opacity
 
 [tabs]
 position = "left"   # top, bottom, left, right
+# collapsed = true  # start with tab bar collapsed (icon-only)
+# width = 200       # tab bar width in pixels (vertical tabs)
 
 [socket]
 path = "/tmp/turm.sock"
@@ -59,9 +61,11 @@ name = "catppuccin-mocha"
 
 ### [tabs]
 
-| Key        | Default | Description                                        |
-| ---------- | ------- | -------------------------------------------------- |
-| `position` | `top`   | Tab bar position: `top`, `bottom`, `left`, `right` |
+| Key         | Default | Description                                        |
+| ----------- | ------- | -------------------------------------------------- |
+| `position`  | `top`   | Tab bar position: `top`, `bottom`, `left`, `right` |
+| `collapsed` | `true`  | Start with tab bar in collapsed (icon-only) mode   |
+| `width`     | `200`   | Tab bar width in pixels (vertical tabs only)       |
 
 ### [socket]
 

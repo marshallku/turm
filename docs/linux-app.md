@@ -105,8 +105,8 @@ On child exit, the window closes automatically via `connect_child_exited`.
 Manages `gtk4::Notebook` with `TabContent` entries (split pane trees).
 
 - Tab position configurable via `[tabs] position` in config (`top`, `bottom`, `left`, `right`)
-- Tab bar auto-hides when only one tab exists
-- Tab position hot-reloads on config change
+- Tab bar has collapsed (icon-only) and expanded modes, toggled via Ctrl+Shift+B
+- Tab position and collapsed state hot-reload on config change
 
 ### Keyboard Shortcuts
 

@@ -59,7 +59,7 @@ Without step 1, VTE covers the entire overlay with its own background color.
 **Format:** Newline-delimited JSON with UUID request IDs.
 **Reference:** ~/dev/cmux/ (Marshall's macOS terminal multiplexer)
 
-This protocol is used by turmctl but the socket server is not yet implemented in turm-linux (D-Bus is used instead for now).
+This protocol is used by both turmctl and the turm-linux socket server. D-Bus remains for system integration (background control), while the socket API handles all rich control (tabs, splits, webview, terminal agent, approval workflow).
 
 ## 8. Forced Dark Theme
 

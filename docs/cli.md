@@ -36,6 +36,8 @@ turmctl [--socket <path>] [--json] <command>
 - `turmctl tab close` — close the focused tab/panel
 - `turmctl tab list` — list tabs
 - `turmctl tab info` — extended tab info with panel counts
+- `turmctl tab toggle-bar` — toggle tab bar collapsed/expanded
+- `turmctl tab rename --id <id> <title>` — rename a tab by panel ID
 
 ### Split
 
@@ -63,6 +65,25 @@ turmctl [--socket <path>] [--json] <command>
 - `turmctl webview fill --id <id> <selector> <value>` — type text into an input
 - `turmctl webview scroll --id <id> [--selector <sel>] [--x 0] [--y 0]` — scroll to position or element
 - `turmctl webview page-info --id <id>` — get page metadata (title, dimensions, element counts)
+- `turmctl webview devtools --id <id> [action]` — toggle DevTools inspector (show/close/attach/detach)
+
+### Terminal
+
+- `turmctl terminal read [--id <id>] [--start-row N --end-row N ...]` — read visible screen text (or range)
+- `turmctl terminal state [--id <id>]` — get terminal state (cursor, dimensions, CWD, title)
+- `turmctl terminal exec [--id <id>] <command>` — execute command (sends text + newline)
+- `turmctl terminal feed [--id <id>] <text>` — send raw text to terminal (no newline)
+- `turmctl terminal history [--id <id>] [--lines 100]` — read scrollback history
+- `turmctl terminal context [--id <id>] [--history-lines 50]` — get combined context (state + screen + scrollback)
+
+### Agent
+
+- `turmctl agent approve <message> [--title <title>] [--actions "Approve,Deny"]` — show approval dialog, block until user responds
+
+### Update
+
+- `turmctl update check` — check for newer version
+- `turmctl update apply [--version <tag>]` — download and install latest version
 
 ## Protocol
 
