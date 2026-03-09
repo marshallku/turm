@@ -9,11 +9,14 @@ use turm_core::config::TurmConfig;
 use crate::dbus::{self, DbusCommand};
 use crate::panel::Panel;
 use crate::socket;
+use crate::statusbar::StatusBar;
 use crate::tabs::TabManager;
 
 pub struct TurmWindow {
     pub window: ApplicationWindow,
     pub tab_manager: Rc<TabManager>,
+    #[allow(dead_code)]
+    statusbar: Rc<StatusBar>,
 }
 
 impl TurmWindow {
@@ -54,13 +57,38 @@ impl TurmWindow {
 
         // Create a dispatch sender for the plugin JS bridge to reuse
         let (dispatch_tx, plugin_dispatch_rx) = std::sync::mpsc::channel();
+        // Separate sender for the statusbar JS bridge
+        let (statusbar_dispatch_tx, statusbar_dispatch_rx) = std::sync::mpsc::channel();
 
-        let tab_manager = TabManager::new(config, &window, event_bus.clone(), plugins, dispatch_tx);
+        let tab_manager = TabManager::new(
+            config,
+            &window,
+            event_bus.clone(),
+            plugins.clone(),
+            dispatch_tx,
+        );
 
-        window.set_child(Some(&tab_manager.notebook));
+        // Status bar
+        let statusbar = Rc::new(StatusBar::new(
+            config,
+            &plugins,
+            statusbar_dispatch_tx,
+            event_bus.clone(),
+        ));
+
+        // Layout: vertical box with notebook + statusbar
+        let layout = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        if config.statusbar.position == "top" {
+            layout.append(&statusbar.container);
+            layout.append(&tab_manager.notebook);
+        } else {
+            layout.append(&tab_manager.notebook);
+            layout.append(&statusbar.container);
+        }
+        window.set_child(Some(&layout));
 
         // Config hot-reload
-        watch_config(&tab_manager);
+        watch_config(&tab_manager, &statusbar, &plugins);
 
         // D-Bus: apply to active terminal panel (only if it's a terminal)
         let rx = dbus::register();
@@ -89,14 +117,19 @@ impl TurmWindow {
         let mgr = tab_manager.clone();
         let win = window.clone();
         let sp = socket_path.clone();
+        let sb = statusbar.clone();
         glib::timeout_add_local(Duration::from_millis(50), move || {
             // Process commands from socket server
             while let Ok(cmd) = socket_rx.try_recv() {
-                socket::dispatch(cmd, &mgr, &win, &sp);
+                socket::dispatch(cmd, &mgr, &win, &sp, &sb);
             }
             // Process commands from plugin JS bridges
             while let Ok(cmd) = plugin_dispatch_rx.try_recv() {
-                socket::dispatch(cmd, &mgr, &win, &sp);
+                socket::dispatch(cmd, &mgr, &win, &sp, &sb);
+            }
+            // Process commands from statusbar JS bridge
+            while let Ok(cmd) = statusbar_dispatch_rx.try_recv() {
+                socket::dispatch(cmd, &mgr, &win, &sp, &sb);
             }
             glib::ControlFlow::Continue
         });
@@ -110,6 +143,7 @@ impl TurmWindow {
         Self {
             window,
             tab_manager,
+            statusbar,
         }
     }
 
@@ -125,7 +159,11 @@ impl TurmWindow {
     }
 }
 
-fn watch_config(tab_manager: &Rc<TabManager>) {
+fn watch_config(
+    tab_manager: &Rc<TabManager>,
+    statusbar: &Rc<StatusBar>,
+    plugins: &[turm_core::plugin::LoadedPlugin],
+) {
     let config_path = TurmConfig::config_path();
     let file = gio::File::for_path(&config_path);
 
@@ -138,6 +176,8 @@ fn watch_config(tab_manager: &Rc<TabManager>) {
     };
 
     let mgr = tab_manager.clone();
+    let sb = statusbar.clone();
+    let pl = plugins.to_vec();
     monitor.connect_changed(move |_, _, _, event| {
         if !matches!(
             event,
@@ -156,6 +196,7 @@ fn watch_config(tab_manager: &Rc<TabManager>) {
 
         eprintln!("[turm] config reloaded");
         mgr.update_config(&config);
+        sb.reload(&config, &pl);
     });
 
     std::mem::forget(monitor);

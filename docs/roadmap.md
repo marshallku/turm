@@ -119,6 +119,7 @@ Collapsible tab bar and renamable tabs.
 - [ ] URL detection + click-to-open
 - [ ] Session persistence / restore
 - [x] Plugin system (HTML/JS panels + shell commands via plugin.toml manifest)
+- [x] Status bar (Waybar-style bar with plugin modules, left/center/right sections)
 - [ ] macOS native app (Swift/AppKit)
 
 ## Pending Cleanup

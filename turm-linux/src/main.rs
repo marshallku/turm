@@ -6,6 +6,7 @@ mod search;
 
 mod socket;
 mod split;
+mod statusbar;
 mod tabs;
 mod terminal;
 mod webview;

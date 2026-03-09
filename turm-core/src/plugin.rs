@@ -9,6 +9,8 @@ pub struct PluginManifest {
     pub panels: Vec<PluginPanelDef>,
     #[serde(default)]
     pub commands: Vec<PluginCommandDef>,
+    #[serde(default)]
+    pub modules: Vec<PluginModuleDef>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,6 +34,27 @@ pub struct PluginCommandDef {
     pub name: String,
     pub exec: String,
     pub description: Option<String>,
+}
+
+fn default_module_position() -> String {
+    "right".to_string()
+}
+
+fn default_module_order() -> i32 {
+    50
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PluginModuleDef {
+    pub name: String,
+    pub title: String,
+    pub file: String,
+    /// Position in the status bar: "left", "center", "right"
+    #[serde(default = "default_module_position")]
+    pub position: String,
+    /// Sort order within position section (lower = first)
+    #[serde(default = "default_module_order")]
+    pub order: i32,
 }
 
 #[derive(Debug, Clone)]

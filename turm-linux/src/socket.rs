@@ -154,6 +154,7 @@ pub fn dispatch(
     mgr: &Rc<TabManager>,
     window: &ApplicationWindow,
     socket_path: &str,
+    statusbar: &Rc<crate::statusbar::StatusBar>,
 ) {
     let req = &cmd.request;
     match req.method.as_str() {
@@ -440,6 +441,11 @@ pub fn dispatch(
                             "name": cd.name,
                             "description": cd.description,
                         })).collect::<Vec<_>>(),
+                        "modules": m.modules.iter().map(|md| json!({
+                            "name": md.name,
+                            "title": md.title,
+                            "position": md.position,
+                        })).collect::<Vec<_>>(),
                     })
                 })
                 .collect();
@@ -457,6 +463,30 @@ pub fn dispatch(
         _ if req.method.starts_with("plugin.") && req.method.matches('.').count() == 2 => {
             // plugin.<name>.<command>
             handle_plugin_command(cmd, mgr, socket_path);
+        }
+
+        "statusbar.show" => {
+            statusbar.set_visible(true);
+            let _ = cmd.reply.send(Response::success(
+                req.id.clone(),
+                json!({ "visible": true }),
+            ));
+        }
+
+        "statusbar.hide" => {
+            statusbar.set_visible(false);
+            let _ = cmd.reply.send(Response::success(
+                req.id.clone(),
+                json!({ "visible": false }),
+            ));
+        }
+
+        "statusbar.toggle" => {
+            let visible = statusbar.toggle();
+            let _ = cmd.reply.send(Response::success(
+                req.id.clone(),
+                json!({ "visible": visible }),
+            ));
         }
 
         _ => {

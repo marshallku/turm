@@ -31,6 +31,7 @@ turm/
 │   │   ├── panel.rs         # Panel trait + PanelVariant enum
 │   │   ├── webview.rs       # WebView panel (WebKitGTK 6.0)
 │   │   ├── plugin_panel.rs  # Plugin panel (WebView + JS bridge)
+│   │   ├── statusbar.rs     # Waybar-style status bar (WebView + plugin modules)
 │   │   ├── socket.rs        # Unix socket server + command dispatcher
 │   │   └── dbus.rs          # D-Bus service (com.marshall.turm)
 │   ├── turm.desktop      # Desktop entry for system integration
@@ -105,7 +106,7 @@ turmctl ──Unix socket──► socket server (per-client thread)
                           oneshot response ──► socket thread ──► client
 ```
 
-**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `tab.rename`, `tabs.toggle_bar`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`, `terminal.read`, `terminal.state`, `terminal.exec`, `terminal.feed`, `terminal.history`, `terminal.context`, `agent.approve`, `theme.list`, `plugin.list`, `plugin.open`, `plugin.<name>.<cmd>`, `webview.open`, `webview.navigate`, `webview.back`, `webview.forward`, `webview.reload`, `webview.execute_js`, `webview.get_content`, `webview.screenshot`, `webview.query`, `webview.query_all`, `webview.get_styles`, `webview.click`, `webview.fill`, `webview.scroll`, `webview.page_info`, `webview.devtools`
+**Supported commands**: `system.ping`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `tab.rename`, `tabs.toggle_bar`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`, `terminal.read`, `terminal.state`, `terminal.exec`, `terminal.feed`, `terminal.history`, `terminal.context`, `agent.approve`, `theme.list`, `plugin.list`, `plugin.open`, `plugin.<name>.<cmd>`, `webview.open`, `webview.navigate`, `webview.back`, `webview.forward`, `webview.reload`, `webview.execute_js`, `webview.get_content`, `webview.screenshot`, `webview.query`, `webview.query_all`, `webview.get_styles`, `webview.click`, `webview.fill`, `webview.scroll`, `webview.page_info`, `webview.devtools`, `statusbar.show`, `statusbar.hide`, `statusbar.toggle`
 
 **Cleanup**: Socket file removed on window destroy.
 
@@ -272,6 +273,8 @@ window.turm = {
 ```
 
 **Theme CSS variables** are injected via `UserStyleSheet`: `--turm-bg`, `--turm-fg`, `--turm-surface0/1/2`, `--turm-overlay0`, `--turm-text`, `--turm-subtext0/1`, `--turm-accent`, `--turm-red`.
+
+**Plugin modules** are small HTML widgets rendered in the status bar. Plugins declare `[[modules]]` in their manifest with `name`, `file`, `position` (left/center/right), and `order`. All modules are aggregated into a single WebView bar with its own `turm` JS bridge.
 
 **Plugin commands** run shell scripts in a thread with `TURM_SOCKET` and `TURM_PLUGIN_DIR` env vars. Params are piped as JSON to stdin, stdout is parsed as JSON for the response.
 

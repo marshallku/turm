@@ -37,6 +37,14 @@ icon = "applications-system-symbolic"      # GTK icon name (optional)
 name = "do-thing"                          # Command identifier
 exec = "bash scripts/do-thing.sh"          # Shell command to run
 description = "Does a thing"               # Optional description
+
+# Modules are small widgets rendered in the status bar
+[[modules]]
+name = "clock"                             # Module identifier
+title = "Clock"                            # Display name
+file = "clock.html"                        # HTML file to load
+position = "right"                         # left, center, right
+order = 100                                # Sort order within section (lower = first)
 ```
 
 ### Multiple Panels
@@ -267,6 +275,92 @@ Common icons for the `icon` field in panel definitions:
 | `application-x-addon-symbolic` | Generic plugin (default) |
 
 Use `gtk4-icon-browser` to explore all available icons on your system.
+
+## Status Bar Modules
+
+Plugins can contribute modules to the Waybar-style status bar at the top or bottom of the terminal window. Each module is a self-contained HTML snippet rendered in a shared WebView bar.
+
+### Module Manifest
+
+```toml
+[[modules]]
+name = "clock"
+title = "Clock"
+file = "clock.html"
+position = "right"      # left, center, right
+order = 100             # sort order (lower = first)
+```
+
+### Module HTML
+
+Modules are small HTML snippets (not full pages). They share the bar's layout and have access to the `turm` JS bridge and theme CSS variables.
+
+```html
+<!-- clock.html -->
+<style>
+    .clock { font-size: 11px; font-family: monospace; color: var(--turm-subtext0); }
+</style>
+<span class="clock" id="clock"></span>
+<script>
+    setInterval(() => {
+        document.getElementById('clock').textContent =
+            new Date().toLocaleTimeString('en-US', { hour12: false });
+    }, 1000);
+</script>
+```
+
+### Module with turm API
+
+Modules can call `turm.call()` and listen to events with `turm.on()`:
+
+```html
+<!-- cwd.html — shows current working directory -->
+<style>.cwd { font-size: 11px; color: var(--turm-accent); }</style>
+<span class="cwd" id="cwd">~</span>
+<script>
+    async function updateCwd() {
+        try {
+            const state = await turm.call('terminal.state');
+            if (state.cwd) {
+                document.getElementById('cwd').textContent =
+                    state.cwd.replace(/^\/home\/[^/]+/, '~');
+            }
+        } catch (e) {}
+    }
+    turm.on('panel.focused', updateCwd);
+    turm.on('terminal.cwd_changed', updateCwd);
+    updateCwd();
+</script>
+```
+
+### Config
+
+```toml
+[statusbar]
+enabled = true          # Show/hide the status bar (default: true)
+position = "bottom"     # "top" or "bottom" (default: "bottom")
+height = 28             # Height in pixels (default: 28)
+```
+
+### CLI
+
+```bash
+turmctl statusbar show
+turmctl statusbar hide
+turmctl statusbar toggle
+```
+
+### Socket API
+
+| Command | Response |
+|---------|----------|
+| `statusbar.show` | `{visible: true}` |
+| `statusbar.hide` | `{visible: false}` |
+| `statusbar.toggle` | `{visible: bool}` |
+
+### Architecture
+
+The status bar is a single WebView that aggregates all plugin modules into one HTML page. Modules are placed in left/center/right flexbox containers. The bar has its own `turm` JS bridge instance, so all modules can call turm APIs and listen to events.
 
 ## Tips
 

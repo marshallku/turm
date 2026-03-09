@@ -129,6 +129,37 @@ impl Default for TabsConfig {
     }
 }
 
+fn default_statusbar_height() -> u32 {
+    28
+}
+
+fn default_statusbar_position() -> String {
+    "bottom".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusBarConfig {
+    /// Whether the status bar is enabled. Default: true
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Position: "top" or "bottom". Default: "bottom"
+    #[serde(default = "default_statusbar_position")]
+    pub position: String,
+    /// Height in pixels. Default: 28
+    #[serde(default = "default_statusbar_height")]
+    pub height: u32,
+}
+
+impl Default for StatusBarConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            position: default_statusbar_position(),
+            height: default_statusbar_height(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TurmConfig {
     #[serde(default)]
@@ -142,6 +173,9 @@ pub struct TurmConfig {
 
     #[serde(default)]
     pub theme: ThemeConfig,
+
+    #[serde(default)]
+    pub statusbar: StatusBarConfig,
 }
 
 impl TurmConfig {
@@ -192,6 +226,11 @@ font_size = 14
 # Available: catppuccin-mocha, catppuccin-latte, catppuccin-frappe, catppuccin-macchiato,
 #            dracula, nord, tokyo-night, gruvbox-dark, one-dark, solarized-dark
 name = "catppuccin-mocha"
+
+[statusbar]
+# enabled = true       # Show/hide the status bar
+# position = "bottom"  # "top" or "bottom"
+# height = 28          # Height in pixels
 "##;
         std::fs::write(&path, default_config)?;
         Ok(path)

@@ -61,6 +61,10 @@ pub enum Command {
     #[command(subcommand)]
     Plugin(PluginCommand),
 
+    /// Status bar management
+    #[command(subcommand)]
+    Statusbar(StatusBarCommand),
+
     /// Check for updates or update turm
     #[command(subcommand)]
     Update(UpdateCommand),
@@ -242,6 +246,16 @@ pub enum PluginCommand {
         #[arg(long, default_value = "{}")]
         params: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum StatusBarCommand {
+    /// Show the status bar
+    Show,
+    /// Hide the status bar
+    Hide,
+    /// Toggle status bar visibility
+    Toggle,
 }
 
 #[derive(Subcommand)]
@@ -461,6 +475,12 @@ impl Cli {
                 PluginCommand::Open { .. } => "plugin.open".to_string(),
                 PluginCommand::Run { command, .. } => format!("plugin.{command}"),
             },
+            Command::Statusbar(cmd) => match cmd {
+                StatusBarCommand::Show => "statusbar.show",
+                StatusBarCommand::Hide => "statusbar.hide",
+                StatusBarCommand::Toggle => "statusbar.toggle",
+            }
+            .to_string(),
             Command::Update(_) => unreachable!("update commands are handled locally"),
         }
     }
@@ -557,7 +577,11 @@ impl Cli {
                     serde_json::from_str(params).unwrap_or_else(|_| json!({}))
                 }
             },
-            Command::Theme(_) | Command::Split(_) | Command::Event(_) | Command::Update(_) => {
+            Command::Theme(_)
+            | Command::Split(_)
+            | Command::Event(_)
+            | Command::Update(_)
+            | Command::Statusbar(_) => {
                 json!({})
             }
             Command::Webview(cmd) => match cmd {
