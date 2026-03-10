@@ -6,6 +6,7 @@
 | ------------------------------------------ | ------------------------------------------- | ----------------------------------------- |
 | [architecture.md](./architecture.md)       | Project structure, crate layout, tech stack | Starting work, understanding the codebase |
 | [linux-app.md](./linux-app.md)             | GTK4 + VTE4 Linux app internals             | Working on turm-linux                     |
+| [macos-app.md](./macos-app.md)             | Swift/AppKit + SwiftTerm macOS app          | Working on turm-macos                     |
 | [core-lib.md](./core-lib.md)               | Shared Rust core library modules            | Working on turm-core                      |
 | [cli.md](./cli.md)                         | CLI tool (turmctl) and D-Bus interface      | Working on remote control features        |
 | [config.md](./config.md)                   | Configuration format and defaults           | Adding config options                     |
