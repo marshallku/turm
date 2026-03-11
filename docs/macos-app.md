@@ -174,9 +174,14 @@ turmctl ──Unix socket──► SocketServer (Swift, background thread)
 - [x] `SocketServer.swift` — POSIX Unix socket + Thread-per-client + DispatchQueue.main.sync
 - [x] `system.ping`, `terminal.exec`, `terminal.feed`, `terminal.read`, `terminal.state`
 
-### Phase 3: 탭
-- `NSTabViewController` 또는 커스텀 탭바
-- 탭 추가/닫기/전환 (Cmd+T / Cmd+W / Cmd+1-9)
+### Phase 3: 탭 ✅
+- [x] `TabBarView.swift` — 커스텀 탭바 (테마 색상, hover 효과, 닫기 버튼)
+- [x] `TabViewController.swift` — 다중 TerminalViewController 관리
+- [x] Cmd+T (새 탭), Cmd+W (탭 닫기), Cmd+1~9 (탭 전환) 단축키 (메뉴바)
+- [x] 마지막 탭 닫으면 윈도우 종료
+- [x] 터미널 타이틀 변경 시 탭 레이블 자동 업데이트
+- [x] 소켓 커맨드: `tab.new`, `tab.close`, `tab.list`
+- [x] `TurmTheme`에 UI 시맨틱 색상 추가 (surface0~2, overlay0, text, subtext0~1, accent, red)
 
 ### Phase 4: 분할 창
 - 수평/수직 분할 (`NSSplitView` 기반)

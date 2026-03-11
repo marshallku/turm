@@ -44,4 +44,8 @@ cat > "$CONTENTS/Info.plist" << 'EOF'
 </plist>
 EOF
 
-open "$APP_DIR"
+# Kill any running instance first so the rebuilt binary is used
+pkill -x Turm 2>/dev/null || true
+sleep 0.3
+
+open -n "$APP_DIR"

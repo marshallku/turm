@@ -1,12 +1,20 @@
 import AppKit
 import SwiftTerm
 
+extension Notification.Name {
+    static let terminalTitleChanged = Notification.Name("TurmTerminalTitleChanged")
+}
+
 @MainActor
 class TerminalViewController: NSViewController {
     private let config: TurmConfig
     private let theme: TurmTheme
     private var terminalView: LocalProcessTerminalView?
     private var currentFontSize: CGFloat
+
+    private(set) var currentTitle: String = "Terminal"
+    private var shellStarted = false
+    var onProcessTerminated: (() -> Void)?
 
     init(config: TurmConfig, theme: TurmTheme) {
         self.config = config
@@ -31,6 +39,15 @@ class TerminalViewController: NSViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        // Shell is started explicitly by TabViewController via startShellIfNeeded(),
+        // after contentArea.layoutSubtreeIfNeeded() ensures the correct frame.
+    }
+
+    /// Called by TabViewController after the view has been added to the hierarchy
+    /// and Auto Layout has been forced to resolve (layoutSubtreeIfNeeded).
+    func startShellIfNeeded() {
+        guard !shellStarted else { return }
+        shellStarted = true
         startShell()
     }
 
@@ -153,13 +170,18 @@ extension TerminalViewController: LocalProcessTerminalViewDelegate {
 
     nonisolated func setTerminalTitle(source _: LocalProcessTerminalView, title: String) {
         Task { @MainActor in
-            self.view.window?.title = title.isEmpty ? "turm" : title
+            self.currentTitle = title.isEmpty ? "Terminal" : title
+            NotificationCenter.default.post(name: .terminalTitleChanged, object: self)
         }
     }
 
     nonisolated func processTerminated(source _: TerminalView, exitCode _: Int32?) {
         Task { @MainActor in
-            self.view.window?.close()
+            if let cb = self.onProcessTerminated {
+                cb()
+            } else {
+                self.view.window?.close()
+            }
         }
     }
 
