@@ -7,31 +7,39 @@ enum SplitOrientation {
     case vertical
 }
 
-/// Recursive split tree for a single tab.
-/// Does NOT store NSSplitView/NSSplitViewController references — the view
-/// hierarchy is rebuilt from scratch on every split/close operation.
+/// N-ary recursive split tree for a single tab.
+/// Does NOT store NSSplitView references — the view hierarchy is rebuilt from
+/// scratch on every split/close operation.
 indirect enum SplitNode {
     case leaf(TerminalViewController)
-    case branch(SplitOrientation, SplitNode, SplitNode)
+    case branch(SplitOrientation, [SplitNode])
 
     // MARK: - Leaf enumeration
 
     func allLeaves() -> [TerminalViewController] {
         switch self {
         case let .leaf(vc): [vc]
-        case let .branch(_, a, b): a.allLeaves() + b.allLeaves()
+        case let .branch(_, children): children.flatMap { $0.allLeaves() }
         }
     }
 
     // MARK: - Tree mutations
 
-    /// Returns a new tree with `terminal`'s leaf replaced by `node`.
-    func replacing(_ terminal: TerminalViewController, with node: SplitNode) -> SplitNode {
+    /// Replaces `terminal`'s leaf with a new two-child branch containing the
+    /// original leaf and `newNode`. This always splits the focused pane's own
+    /// space in half, leaving every other pane completely unchanged.
+    func splitting(
+        _ terminal: TerminalViewController,
+        with newNode: SplitNode,
+        orientation: SplitOrientation,
+    ) -> SplitNode {
         switch self {
         case let .leaf(vc):
-            vc === terminal ? node : self
-        case let .branch(orientation, first, second):
-            .branch(orientation, first.replacing(terminal, with: node), second.replacing(terminal, with: node))
+            guard vc === terminal else { return self }
+            return .branch(orientation, [.leaf(vc), newNode])
+
+        case let .branch(o, children):
+            return .branch(o, children.map { $0.splitting(terminal, with: newNode, orientation: orientation) })
         }
     }
 
@@ -40,12 +48,12 @@ indirect enum SplitNode {
         switch self {
         case let .leaf(vc):
             return vc === terminal ? nil : self
-        case let .branch(orientation, first, second):
-            if case let .leaf(vc) = first, vc === terminal { return second }
-            if case let .leaf(vc) = second, vc === terminal { return first }
-            if let newFirst = first.removing(terminal) { return .branch(orientation, newFirst, second) }
-            if let newSecond = second.removing(terminal) { return .branch(orientation, first, newSecond) }
-            return self
+
+        case let .branch(o, children):
+            let remaining = children.compactMap { $0.removing(terminal) }
+            if remaining.isEmpty { return nil }
+            if remaining.count == 1 { return remaining[0] } // collapse single-child branch
+            return .branch(o, remaining)
         }
     }
 }

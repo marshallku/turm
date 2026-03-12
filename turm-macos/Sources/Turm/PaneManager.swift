@@ -1,5 +1,58 @@
 import AppKit
 
+/// NSSplitView subclass that distributes all subviews equally on the first resize pass.
+/// Works for any number of subviews (N panes → each gets 1/N of available space).
+/// After the initial layout the user can freely drag dividers to any position.
+///
+/// Using NSSplitViewDelegate.splitView(_:resizeSubviewsWithOldSize:) rather than
+/// layout() because NSSplitView sets subview frames via resizeSubviews, which runs
+/// *before* layout(). By the time layout() fires, the (wrong) frames are already
+/// committed. The delegate method intercepts at exactly the right moment.
+private class EqualSplitView: NSSplitView, NSSplitViewDelegate {
+    private var initialSizeSet = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        delegate = self
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError()
+    }
+
+    func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize _: NSSize) {
+        let total = isVertical ? splitView.frame.width : splitView.frame.height
+        guard total > 0, splitView.subviews.count >= 2 else {
+            splitView.adjustSubviews()
+            return
+        }
+
+        if initialSizeSet {
+            // After initial sizing: let NSSplitView handle normal proportional resize.
+            splitView.adjustSubviews()
+            return
+        }
+        initialSizeSet = true
+
+        let n = splitView.subviews.count
+        let eachSize = (total - dividerThickness * CGFloat(n - 1)) / CGFloat(n)
+        if isVertical {
+            var x: CGFloat = 0
+            for sub in splitView.subviews {
+                sub.frame = NSRect(x: x, y: 0, width: eachSize, height: splitView.frame.height)
+                x += eachSize + dividerThickness
+            }
+        } else {
+            var y: CGFloat = 0
+            for sub in splitView.subviews {
+                sub.frame = NSRect(x: 0, y: y, width: splitView.frame.width, height: eachSize)
+                y += eachSize + dividerThickness
+            }
+        }
+    }
+}
+
 /// Manages the split-pane tree for a single tab.
 /// TabViewController embeds `containerView` once; PaneManager rebuilds its
 /// contents on every split/close using fresh NSSplitView instances.
@@ -50,8 +103,7 @@ final class PaneManager {
         let newTermVC = TerminalViewController(config: config, theme: theme)
         wireTerminal(newTermVC)
 
-        let newBranch = SplitNode.branch(orientation, .leaf(activePane), .leaf(newTermVC))
-        root = root.replacing(activePane, with: newBranch)
+        root = root.splitting(activePane, with: .leaf(newTermVC), orientation: orientation)
 
         rebuildViewHierarchy()
 
@@ -95,15 +147,13 @@ final class PaneManager {
     // MARK: - View Hierarchy
 
     /// Rebuilds the entire view hierarchy from the SplitNode tree.
-    /// This is called on every split/close, creating fresh NSSplitViews each time.
+    /// This is called on every split/close, creating fresh EqualSplitViews each time.
     private func rebuildViewHierarchy() {
         NSLayoutConstraint.deactivate(rootConstraints)
         rootConstraints = []
         containerView.subviews.forEach { $0.removeFromSuperview() }
 
-        var splitViews: [NSSplitView] = []
-        let rootView = buildView(from: root, splitViews: &splitViews)
-        // Root view uses Auto Layout to fill containerView
+        let rootView = buildView(from: root)
         rootView.translatesAutoresizingMaskIntoConstraints = false
         containerView.addSubview(rootView)
 
@@ -115,35 +165,24 @@ final class PaneManager {
         ]
         NSLayoutConstraint.activate(constraints)
         rootConstraints = constraints
-
-        // Set equal 50/50 split after layout resolves
-        if !splitViews.isEmpty {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                for sv in splitViews {
-                    let size = sv.isVertical ? sv.frame.width : sv.frame.height
-                    guard size > 0 else { continue }
-                    sv.setPosition(size / 2, ofDividerAt: 0)
-                }
-            }
-        }
     }
 
     /// Recursively builds the view tree. NSSplitView manages subview sizing,
     /// so direct children use translatesAutoresizingMaskIntoConstraints = true.
-    private func buildView(from node: SplitNode, splitViews: inout [NSSplitView]) -> NSView {
+    private func buildView(from node: SplitNode) -> NSView {
         switch node {
         case let .leaf(vc):
             vc.view.translatesAutoresizingMaskIntoConstraints = true
             vc.view.autoresizingMask = [.width, .height]
             return vc.view
 
-        case let .branch(orientation, first, second):
-            let sv = NSSplitView()
+        case let .branch(orientation, children):
+            let sv = EqualSplitView()
             sv.isVertical = (orientation == .horizontal)
             sv.dividerStyle = .thin
-            sv.addSubview(buildView(from: first, splitViews: &splitViews))
-            sv.addSubview(buildView(from: second, splitViews: &splitViews))
-            splitViews.append(sv)
+            for child in children {
+                sv.addSubview(buildView(from: child))
+            }
             return sv
         }
     }
