@@ -11,6 +11,10 @@ final class TabViewController: NSViewController {
     private var paneManagers: [PaneManager] = []
     private(set) var activeIndex: Int = -1
 
+    // Retained so new tabs inherit the current background state
+    private var currentBackgroundPath: String?
+    private var currentBackgroundTint: Double = 0.6
+
     var activePaneManager: PaneManager? {
         paneManagers.indices.contains(activeIndex) ? paneManagers[activeIndex] : nil
     }
@@ -96,6 +100,10 @@ final class TabViewController: NSViewController {
 
         paneManagers.append(manager)
         switchTab(to: paneManagers.count - 1)
+        // Inherit current background state
+        if let path = currentBackgroundPath {
+            manager.applyBackground(path: path, tint: currentBackgroundTint)
+        }
     }
 
     func closeTab(at index: Int) {
@@ -175,6 +183,24 @@ final class TabViewController: NSViewController {
     private func refreshTabBar() {
         let titles = paneManagers.map(\.activePane.currentTitle)
         tabBar.setTabs(titles: titles, activeIndex: activeIndex)
+    }
+
+    // MARK: - Background
+
+    func applyBackground(path: String, tint: Double) {
+        currentBackgroundPath = path
+        currentBackgroundTint = tint
+        paneManagers.forEach { $0.applyBackground(path: path, tint: tint) }
+    }
+
+    func clearBackground() {
+        currentBackgroundPath = nil
+        paneManagers.forEach { $0.clearBackground() }
+    }
+
+    func setTint(_ alpha: Double) {
+        currentBackgroundTint = alpha
+        paneManagers.forEach { $0.setTint(alpha) }
     }
 
     // MARK: - Socket Commands

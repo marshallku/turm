@@ -137,7 +137,7 @@ Collapsible tab bar and renamable tabs.
 - [x] Unix socket server (IPC with turmctl — same protocol as Linux)
 - [x] Full socket API: terminal.exec/feed/state/read/history/context, tab.new/close/switch/list/info/rename, split.horizontal/vertical, session.list/info
 - [x] In-terminal search (Cmd+F / Cmd+G / Cmd+Shift+G — SwiftTerm built-in find bar with case/regex/whole-word)
-- [ ] Background images
+- [x] Background images (NSImageView + tint overlay per pane, config `[background] path/tint`, socket `background.set/clear/set_tint`)
 
 ## Pending Cleanup
 

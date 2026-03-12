@@ -37,6 +37,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         tabVC = vc
         startSocketServer()
         vc.openInitialTab()
+
+        // Apply background from config if set
+        if let path = config.backgroundPath {
+            vc.applyBackground(path: path, tint: config.backgroundTint)
+        }
     }
 
     func applicationWillTerminate(_: Notification) {
@@ -255,6 +260,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case "session.info":
             let index = params["index"] as? Int ?? vc.activeIndex
             return vc.sessionInfo(index: index)
+
+        case "background.set":
+            guard let path = params["path"] as? String else { return nil }
+            let tint = params["tint"] as? Double ?? 0.6
+            vc.applyBackground(path: path, tint: tint)
+            return ["ok": true]
+
+        case "background.set_tint":
+            guard let tint = params["tint"] as? Double else { return nil }
+            vc.setTint(tint)
+            return ["ok": true]
+
+        case "background.clear":
+            vc.clearBackground()
+            return ["ok": true]
 
         default:
             return nil

@@ -144,6 +144,18 @@ final class PaneManager {
         activePane.setCustomTitle(title)
     }
 
+    func applyBackground(path: String, tint: Double) {
+        allTerminals().forEach { $0.applyBackground(path: path, tint: tint) }
+    }
+
+    func clearBackground() {
+        allTerminals().forEach { $0.clearBackground() }
+    }
+
+    func setTint(_ alpha: Double) {
+        allTerminals().forEach { $0.setTint(alpha) }
+    }
+
     // MARK: - View Hierarchy
 
     /// Rebuilds the entire view hierarchy from the SplitNode tree.

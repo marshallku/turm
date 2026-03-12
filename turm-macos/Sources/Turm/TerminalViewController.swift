@@ -42,6 +42,8 @@ class TerminalViewController: NSViewController {
     private let config: TurmConfig
     private let theme: TurmTheme
     private var terminalView: TurmTerminalView?
+    private var backgroundView: NSImageView?
+    private var tintView: NSView?
     private var currentFontSize: CGFloat
 
     private(set) var currentTitle: String = "Terminal"
@@ -62,12 +64,49 @@ class TerminalViewController: NSViewController {
     }
 
     override func loadView() {
-        let tv = TurmTerminalView(frame: NSRect(x: 0, y: 0, width: 1200, height: 800))
+        let frame = NSRect(x: 0, y: 0, width: 1200, height: 800)
+
+        // Container — layer-backed so all subviews composite with alpha blending.
+        let container = NSView(frame: frame)
+        container.wantsLayer = true
+
+        // Background image view — hidden until a background is set.
+        // wantsLayer = true so it participates in the layer compositing chain.
+        let bg = NSImageView(frame: container.bounds)
+        bg.autoresizingMask = [.width, .height]
+        bg.imageScaling = .scaleAxesIndependently
+        bg.wantsLayer = true
+        bg.isHidden = true
+        container.addSubview(bg)
+        backgroundView = bg
+
+        // Tint overlay — dark semi-transparent view between image and terminal.
+        let tint = NSView(frame: container.bounds)
+        tint.autoresizingMask = [.width, .height]
+        tint.wantsLayer = true
+        tint.isHidden = true
+        container.addSubview(tint)
+        tintView = tint
+
+        // Terminal view on top.
+        // wantsLayer + isOpaque=false lets nativeBackgroundColor=.clear show
+        // the layers behind it when a background image is active.
+        let tv = TurmTerminalView(frame: frame)
+        tv.autoresizingMask = [.width, .height]
+        tv.wantsLayer = true
+        tv.layer?.isOpaque = false
         configureColors(tv)
         configureFont(tv, size: currentFontSize)
         tv.processDelegate = self
         terminalView = tv
-        view = tv
+        container.addSubview(tv)
+
+        view = container
+
+        // Apply background from config if set
+        if let path = config.backgroundPath {
+            applyBackground(path: path, tint: config.backgroundTint)
+        }
     }
 
     override func viewDidLoad() {
@@ -76,12 +115,55 @@ class TerminalViewController: NSViewController {
         // after contentArea.layoutSubtreeIfNeeded() ensures the correct frame.
     }
 
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        // Layer is guaranteed to exist once the view is in the window.
+        // Re-apply background if it was set before the view appeared.
+        if backgroundView?.isHidden == false, let image = backgroundView?.image {
+            let path = (image.name() ?? "") // fallback: re-apply via stored state
+            _ = path // The tint/layer settings are what matter here
+            terminalView?.layer?.isOpaque = false
+            terminalView?.layer?.backgroundColor = NSColor.clear.cgColor
+            terminalView?.needsDisplay = true
+        }
+    }
+
     /// Called by TabViewController after the view has been added to the hierarchy
     /// and Auto Layout has been forced to resolve (layoutSubtreeIfNeeded).
     func startShellIfNeeded() {
         guard !shellStarted else { return }
         shellStarted = true
         startShell()
+    }
+
+    // MARK: - Background
+
+    func applyBackground(path: String, tint: Double) {
+        guard let image = NSImage(contentsOfFile: path) else { return }
+        backgroundView?.image = image
+        backgroundView?.isHidden = false
+        tintView?.layer?.backgroundColor = NSColor.black.withAlphaComponent(CGFloat(tint)).cgColor
+        tintView?.isHidden = false
+        // Make terminal layer non-opaque so the image layers composite through.
+        // nativeBackgroundColor = .clear tells SwiftTerm not to fill the bg rect.
+        terminalView?.layer?.isOpaque = false
+        terminalView?.layer?.backgroundColor = NSColor.clear.cgColor
+        terminalView?.nativeBackgroundColor = .clear
+        terminalView?.needsDisplay = true
+    }
+
+    func clearBackground() {
+        backgroundView?.image = nil
+        backgroundView?.isHidden = true
+        tintView?.isHidden = true
+        terminalView?.layer?.isOpaque = false // keep layer-backed, just restore color
+        terminalView?.layer?.backgroundColor = theme.background.nsColor.cgColor
+        terminalView?.nativeBackgroundColor = theme.background.nsColor
+        terminalView?.needsDisplay = true
+    }
+
+    func setTint(_ alpha: Double) {
+        tintView?.layer?.backgroundColor = NSColor.black.withAlphaComponent(CGFloat(alpha)).cgColor
     }
 
     // MARK: - Configuration
