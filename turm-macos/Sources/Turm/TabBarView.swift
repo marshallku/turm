@@ -1,5 +1,18 @@
 import AppKit
 
+// MARK: - Add Panel Enums
+
+enum AddPanelType {
+    case terminal
+    case webview
+}
+
+enum AddPanelMode {
+    case tab
+    case splitH
+    case splitV
+}
+
 // MARK: - TabButton
 
 private final class TabButton: NSView {
@@ -34,13 +47,11 @@ private final class TabButton: NSView {
         wantsLayer = true
         layer?.cornerRadius = 4
 
-        // Title label
         titleLabel.font = NSFont.systemFont(ofSize: 12)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(titleLabel)
 
-        // Close button
         closeBtn.title = "×"
         closeBtn.isBordered = false
         closeBtn.font = NSFont.systemFont(ofSize: 14, weight: .light)
@@ -128,6 +139,163 @@ private final class TabButton: NSView {
     }
 }
 
+// MARK: - AddPanelPopover
+
+/// Popover content: a grid of panel types × placement modes (Tab / Split→ / Split↓).
+/// Linux equivalent: the GTK Popover shown when clicking the "+" MenuButton.
+private final class AddPanelPopoverController: NSViewController {
+    var onSelect: ((AddPanelType, AddPanelMode) -> Void)?
+    private let theme: TurmTheme
+
+    init(theme: TurmTheme) {
+        self.theme = theme
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError()
+    }
+
+    override func loadView() {
+        let container = NSView()
+        container.wantsLayer = true
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
+        ])
+
+        // Header row
+        let header = makeHeaderRow()
+        stack.addArrangedSubview(header)
+
+        let divider = NSBox()
+        divider.boxType = .separator
+        stack.addArrangedSubview(divider)
+
+        // Panel rows
+        stack.addArrangedSubview(makeRow(type: .terminal, icon: "terminal", label: "Terminal"))
+        stack.addArrangedSubview(makeRow(type: .webview, icon: "globe", label: "Browser"))
+
+        view = container
+    }
+
+    /// Column header: blank | Tab | Split→ | Split↓
+    private func makeHeaderRow() -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.spacing = 6
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        row.addArrangedSubview(spacer)
+
+        for (sfName, tip) in [
+            ("plus.square", "New Tab"),
+            ("rectangle.split.2x1", "Split Right"),
+            ("rectangle.split.1x2", "Split Down"),
+        ] {
+            let img = NSImageView(image: symbol(sfName, size: 12))
+            img.toolTip = tip
+            img.translatesAutoresizingMaskIntoConstraints = false
+            img.widthAnchor.constraint(equalToConstant: 28).isActive = true
+            img.contentTintColor = theme.subtext0.nsColor
+            row.addArrangedSubview(img)
+        }
+
+        return row
+    }
+
+    /// Panel row: [icon label] [tab btn] [split→ btn] [split↓ btn]
+    private func makeRow(type: AddPanelType, icon: String, label: String) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.spacing = 6
+
+        // Left: icon + label
+        let labelStack = NSStackView()
+        labelStack.orientation = .horizontal
+        labelStack.spacing = 6
+        let iconView = NSImageView(image: symbol(icon, size: 14))
+        iconView.contentTintColor = theme.text.nsColor
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        let labelField = NSTextField(labelWithString: label)
+        labelField.font = NSFont.systemFont(ofSize: 13)
+        labelField.textColor = theme.text.nsColor
+        labelStack.addArrangedSubview(iconView)
+        labelStack.addArrangedSubview(labelField)
+        labelStack.translatesAutoresizingMaskIntoConstraints = false
+        labelStack.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        row.addArrangedSubview(labelStack)
+
+        // Right: three action buttons
+        for (btnSymbol, mode) in [
+            ("plus.square", AddPanelMode.tab),
+            ("rectangle.split.2x1", .splitH),
+            ("rectangle.split.1x2", .splitV),
+        ] as [(String, AddPanelMode)] {
+            let btn = NSButton()
+            btn.image = symbol(btnSymbol, size: 13)
+            btn.isBordered = false
+            btn.contentTintColor = theme.subtext1.nsColor
+            btn.translatesAutoresizingMaskIntoConstraints = false
+            btn.widthAnchor.constraint(equalToConstant: 28).isActive = true
+            btn.heightAnchor.constraint(equalToConstant: 24).isActive = true
+            let t = type, m = mode
+            btn.target = self
+            // Store type/mode in the button's tag and handle via closure via objc block
+            btn.action = #selector(dummyAction)
+            // Use mouseDown tracking instead — simpler: just add click gesture
+            let gr = NSClickGestureRecognizer(target: self, action: #selector(dummyAction))
+            gr.numberOfClicksRequired = 1
+            btn.addGestureRecognizer(gr)
+            // Wire up with a closure via subclass workaround: store in action closures dict
+            addAction(btn, type: t, mode: m)
+            row.addArrangedSubview(btn)
+        }
+
+        return row
+    }
+
+    // Maps each button to its (type, mode) via tag
+    private var actionMap: [Int: (AddPanelType, AddPanelMode)] = [:]
+    private var tagCounter = 0
+
+    private func addAction(_ btn: NSButton, type: AddPanelType, mode: AddPanelMode) {
+        tagCounter += 1
+        btn.tag = tagCounter
+        actionMap[tagCounter] = (type, mode)
+        btn.target = self
+        btn.action = #selector(panelButtonTapped(_:))
+        // Remove the gesture recognizer we added above — use target/action instead
+        btn.gestureRecognizers.forEach { btn.removeGestureRecognizer($0) }
+    }
+
+    @objc private func dummyAction() {}
+
+    @objc private func panelButtonTapped(_ sender: NSButton) {
+        guard let (type, mode) = actionMap[sender.tag] else { return }
+        onSelect?(type, mode)
+    }
+
+    private func symbol(_ name: String, size: CGFloat) -> NSImage {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: size, weight: .regular))
+            ?? NSImage()
+    }
+}
+
 // MARK: - TabBarView
 
 final class TabBarView: NSView {
@@ -135,13 +303,15 @@ final class TabBarView: NSView {
 
     var onSelectTab: ((Int) -> Void)?
     var onCloseTab: ((Int) -> Void)?
-    var onNewTab: (() -> Void)?
+    /// Replaces the old onNewTab. Called when user picks a panel type and placement.
+    var onNewPanel: ((AddPanelType, AddPanelMode) -> Void)?
 
     private let stackView = NSStackView()
     private let scrollView = NSScrollView()
     private let addButton = NSButton()
     private var tabButtons: [TabButton] = []
     private let theme: TurmTheme
+    private var popover: NSPopover?
 
     init(theme: TurmTheme) {
         self.theme = theme
@@ -177,7 +347,6 @@ final class TabBarView: NSView {
         stackView.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
         stackView.translatesAutoresizingMaskIntoConstraints = false
 
-        // Scroll view wraps the stack (horizontal scroll if many tabs)
         scrollView.documentView = stackView
         scrollView.hasHorizontalScroller = false
         scrollView.hasVerticalScroller = false
@@ -185,10 +354,14 @@ final class TabBarView: NSView {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scrollView)
 
-        // "+" add button
-        addButton.title = "+"
+        // "+" button — opens panel-type popover
+        if let img = NSImage(systemSymbolName: "plus", accessibilityDescription: "New panel") {
+            addButton.image = img
+            addButton.title = ""
+        } else {
+            addButton.title = "+"
+        }
         addButton.isBordered = false
-        addButton.font = NSFont.systemFont(ofSize: 16, weight: .light)
         addButton.contentTintColor = theme.subtext0.nsColor
         addButton.target = self
         addButton.action = #selector(addTabTapped)
@@ -206,14 +379,12 @@ final class TabBarView: NSView {
             addButton.widthAnchor.constraint(equalToConstant: 28),
         ])
 
-        // Stack width tracks scroll view
         stackView.widthAnchor.constraint(greaterThanOrEqualTo: scrollView.widthAnchor).isActive = true
     }
 
     // MARK: - Public API
 
     func setTabs(titles: [String], activeIndex: Int) {
-        // Remove old buttons
         tabButtons.forEach { $0.removeFromSuperview() }
         tabButtons.removeAll()
         stackView.arrangedSubviews.forEach { stackView.removeArrangedSubview($0); $0.removeFromSuperview() }
@@ -248,6 +419,23 @@ final class TabBarView: NSView {
     }
 
     @objc private func addTabTapped() {
-        onNewTab?()
+        if let existing = popover, existing.isShown {
+            existing.close()
+            return
+        }
+
+        let popoverVC = AddPanelPopoverController(theme: theme)
+        popoverVC.onSelect = { [weak self] type, mode in
+            self?.popover?.close()
+            self?.onNewPanel?(type, mode)
+        }
+
+        let pop = NSPopover()
+        pop.contentViewController = popoverVC
+        pop.behavior = .transient
+        pop.appearance = NSAppearance(named: .darkAqua)
+        popover = pop
+
+        pop.show(relativeTo: addButton.bounds, of: addButton, preferredEdge: .maxY)
     }
 }

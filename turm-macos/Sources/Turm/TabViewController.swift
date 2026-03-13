@@ -50,7 +50,17 @@ final class TabViewController: NSViewController {
         tabBar.translatesAutoresizingMaskIntoConstraints = false
         tabBar.onSelectTab = { [weak self] i in self?.switchTab(to: i) }
         tabBar.onCloseTab = { [weak self] i in self?.closeTabByButton(at: i) }
-        tabBar.onNewTab = { [weak self] in self?.newTab() }
+        tabBar.onNewPanel = { [weak self] type, mode in
+            guard let self else { return }
+            switch (type, mode) {
+            case (.terminal, .tab): newTab()
+            case (.terminal, .splitH): splitActivePane(orientation: .horizontal)
+            case (.terminal, .splitV): splitActivePane(orientation: .vertical)
+            case (.webview, .tab): newWebViewTab()
+            case (.webview, .splitH): splitActivePaneWithWebView(orientation: .horizontal)
+            case (.webview, .splitV): splitActivePaneWithWebView(orientation: .vertical)
+            }
+        }
         root.addSubview(tabBar)
 
         contentArea = NSView()
