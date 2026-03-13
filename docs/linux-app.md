@@ -110,7 +110,7 @@ Manages `gtk4::Notebook` with `TabContent` entries (split pane trees).
 
 ### Keyboard Shortcuts
 
-All shortcuts use `Ctrl+Shift` — Ctrl-only keys pass through to terminal/webview.
+All built-in shortcuts use `Ctrl+Shift` — Ctrl-only keys pass through to terminal/webview.
 
 | Shortcut                            | Action                              |
 | ----------------------------------- | ----------------------------------- |
@@ -126,6 +126,10 @@ All shortcuts use `Ctrl+Shift` — Ctrl-only keys pass through to terminal/webvi
 | `Ctrl+Shift+P` / `Ctrl+Shift+Left`  | Focus previous pane                 |
 | `Ctrl+Shift+Tab`                    | Next tab                            |
 | `Ctrl+Shift+1-9`                    | Switch to tab N                     |
+
+### Custom Keybindings
+
+Custom keybindings can be configured in `[keybindings]` section of `config.toml`. They are checked before built-in shortcuts, so they can override defaults. Spawned commands receive `TURM_DBUS` and `TURM_SOCKET` environment variables. See [config.md](./config.md#keybindings) for details.
 
 ## Search (`search.rs`)
 

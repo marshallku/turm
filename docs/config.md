@@ -83,8 +83,24 @@ name = "catppuccin-mocha"
 
 Theme changes hot-reload on config save. The theme applies to the terminal palette, tab bar, search bar, webview URL bar, and window background.
 
+### [keybindings]
+
+Map key combinations to shell commands. Commands prefixed with `spawn:` run in the background. Custom keybindings take priority over built-in shortcuts.
+
+```toml
+[keybindings]
+"ctrl+shift+g" = "spawn:~/my-script.sh --next"
+"ctrl+shift+m" = "spawn:~/my-script.sh --toggle"
+```
+
+**Key format:** `modifier+modifier+key` — modifiers: `ctrl`, `shift`, `alt`. Key names follow GDK naming (e.g. `a`, `b`, `bracketright`, `f1`).
+
+**Environment:** Spawned commands inherit `TURM_DBUS` and `TURM_SOCKET` so scripts can communicate back to the running turm instance via D-Bus or socket.
+
+**Note:** Custom bindings override built-in shortcuts. For example, binding `ctrl+shift+b` replaces the default tab bar toggle.
+
 ## Notes
 
 - All fields have defaults; config file is optional
 - Missing sections are filled with defaults via `#[serde(default)]`
-- Config hot-reloads automatically via file watcher (font, background, tint, tab position)
+- Config hot-reloads automatically via file watcher (font, background, tint, tab position, keybindings)
