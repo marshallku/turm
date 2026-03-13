@@ -152,12 +152,18 @@ Goal: full Linux feature parity. Phase 1 MVP complete; porting remaining Linux f
 - [x] SocketServer upgraded to async handler — execute_js/get_content return after WKWebView callback
 - [x] Cmd+Shift+T opens new web tab from menu
 
-**Phase 3 — AI Agent & Shell Integration**
-- [ ] Event stream (socket `event.subscribe` — terminal output, focus, lifecycle events)
-- [ ] CWD tracking (OSC 7 → `terminal.cwd_changed` event)
-- [ ] Shell integration signals (`terminal.shell_precmd` / `terminal.shell_preexec` via OSC 133)
-- [ ] Notification channel (OSC 9/777 → `terminal.notification` event)
-- [ ] Approval workflow (`agent.approve` modal dialog)
+**Phase 3 — AI Agent & Shell Integration ✅**
+- [x] Event stream (`event.subscribe` — long-lived socket connection streams newline-delimited JSON events)
+- [x] EventBus — broadcast hub with per-subscriber buffered channels (EventChannel)
+- [x] CWD tracking (OSC 7 → `terminal.cwd_changed` via `hostCurrentDirectoryUpdate` delegate; uses `URL.path` to strip `file://hostname` prefix)
+- [x] Shell integration signals (`terminal.shell_precmd` / `terminal.shell_preexec` via socket commands)
+- [x] `panel.focused` — emitted on click-to-focus in PaneManager
+- [x] `panel.exited` — emitted on process termination
+- [x] `panel.title_changed` — emitted on title update (terminal + webview)
+- [x] `tab.opened` / `tab.closed` — emitted in TabViewController
+- [x] `webview.loaded` / `webview.title_changed` / `webview.navigated` — WKNavigationDelegate
+- [x] `agent.approve` — NSAlert sheet modal, returns chosen action async
+- [ ] `terminal.output` — PTY output interception not possible via SwiftTerm public API (`feed(byteArray:)` is non-overridable extension method)
 
 **Phase 4 — Tab Bar & UX Polish**
 - [ ] Tab bar toggle (collapsed icon-only mode, Cmd+Shift+B, socket `tabs.toggle_bar`)

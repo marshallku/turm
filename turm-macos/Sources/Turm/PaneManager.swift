@@ -75,6 +75,11 @@ final class PaneManager {
     var onLastPaneClosed: (() -> Void)?
     var onActivePaneChanged: (() -> Void)?
 
+    /// Propagated from AppDelegate so all panels can emit events.
+    weak var eventBus: EventBus? {
+        didSet { propagateEventBus() }
+    }
+
     private nonisolated(unsafe) var clickMonitor: Any?
     /// Tracks the fill constraints added to containerView so they can be
     /// deactivated before the next rebuild.
@@ -112,6 +117,7 @@ final class PaneManager {
 
     func splitActive(orientation: SplitOrientation) {
         let newTermVC = TerminalViewController(config: config, theme: theme)
+        assignEventBus(to: newTermVC)
         wirePanel(newTermVC)
 
         root = root.splitting(activePane, with: .leaf(newTermVC), orientation: orientation)
@@ -125,6 +131,7 @@ final class PaneManager {
 
     func splitActiveWithWebView(url: URL? = nil, orientation: SplitOrientation = .horizontal) {
         let webVC = WebViewController(url: url)
+        assignEventBus(to: webVC)
         wirePanel(webVC)
 
         root = root.splitting(activePane, with: .leaf(webVC), orientation: orientation)
@@ -158,6 +165,16 @@ final class PaneManager {
     func setActive(_ panel: any TurmPanel) {
         activePane = panel
         onActivePaneChanged?()
+        eventBus?.broadcast(event: "panel.focused", data: ["panel_id": panel.panelID])
+    }
+
+    private func propagateEventBus() {
+        allPanels().forEach { assignEventBus(to: $0) }
+    }
+
+    private func assignEventBus(to panel: any TurmPanel) {
+        if let t = panel as? TerminalViewController { t.eventBus = eventBus }
+        if let w = panel as? WebViewController { w.eventBus = eventBus }
     }
 
     func allPanels() -> [any TurmPanel] {

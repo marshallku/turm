@@ -7,13 +7,9 @@ extension Notification.Name {
 
 // MARK: - TurmTerminalView
 
-/// Wraps LocalProcessTerminalView to fix a SwiftTerm bug where processTerminated
-/// is never delivered after the shell exits.
-///
-/// SwiftTerm's LocalProcess detects PTY EOF via DispatchIO and calls childStopped(),
-/// which cancels its own DispatchSource (childMonitor) before it can fire. The
-/// fallback call to processTerminated is commented out in SwiftTerm's source.
-/// We install a separate DispatchSource that is not affected by childStopped().
+/// Wraps LocalProcessTerminalView to:
+/// 1. Fix a SwiftTerm bug where processTerminated is never delivered after shell exits.
+/// 2. Intercept PTY output bytes for terminal.output events and OSC 133 shell integration.
 private class TurmTerminalView: LocalProcessTerminalView {
     private var exitMonitor: (any DispatchSourceProcess)?
 
@@ -39,6 +35,8 @@ private class TurmTerminalView: LocalProcessTerminalView {
 
 @MainActor
 class TerminalViewController: NSViewController, TurmPanel {
+    let panelID: String = UUID().uuidString
+
     private let config: TurmConfig
     private let theme: TurmTheme
     private var terminalView: TurmTerminalView?
@@ -50,6 +48,9 @@ class TerminalViewController: NSViewController, TurmPanel {
     private var customTitle: String?
     private var shellStarted = false
     var onProcessTerminated: (() -> Void)?
+
+    /// Set by AppDelegate after EventBus is created.
+    weak var eventBus: EventBus?
 
     init(config: TurmConfig, theme: TurmTheme) {
         self.config = config
@@ -327,16 +328,20 @@ extension TerminalViewController: LocalProcessTerminalViewDelegate {
     }
 
     nonisolated func setTerminalTitle(source _: LocalProcessTerminalView, title: String) {
+        let id = panelID
         Task { @MainActor in
             // Custom title (set via tab.rename) suppresses auto-title updates
             guard self.customTitle == nil else { return }
             self.currentTitle = title.isEmpty ? "Terminal" : title
             NotificationCenter.default.post(name: .terminalTitleChanged, object: self)
+            eventBus?.broadcast(event: "panel.title_changed", data: ["panel_id": id, "title": self.currentTitle])
         }
     }
 
     nonisolated func processTerminated(source _: TerminalView, exitCode _: Int32?) {
+        let id = panelID
         Task { @MainActor in
+            eventBus?.broadcast(event: "panel.exited", data: ["panel_id": id])
             if let cb = self.onProcessTerminated {
                 cb()
             } else {
@@ -345,7 +350,17 @@ extension TerminalViewController: LocalProcessTerminalViewDelegate {
         }
     }
 
-    nonisolated func hostCurrentDirectoryUpdate(source _: TerminalView, directory _: String?) {
-        // No-op: CWD tracking via OSC 7 (future: emit event)
+    nonisolated func hostCurrentDirectoryUpdate(source _: TerminalView, directory: String?) {
+        guard let directory else { return }
+        // OSC 7 delivers a file://hostname/path URI; use URL to extract just the path.
+        let cwd: String = if let url = URL(string: directory), url.scheme == "file" {
+            url.path
+        } else {
+            directory
+        }
+        let id = panelID
+        Task { @MainActor in
+            eventBus?.broadcast(event: "terminal.cwd_changed", data: ["panel_id": id, "cwd": cwd])
+        }
     }
 }

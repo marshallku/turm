@@ -19,6 +19,9 @@ final class SocketServer: @unchecked Sendable {
     /// asynchronously (e.g. after a WKWebView JS evaluation completes).
     var commandHandler: ((_ method: String, _ params: [String: Any], _ completion: @escaping (Any?) -> Void) -> Void)?
 
+    /// Event bus for streaming events to subscribed clients.
+    var eventBus: EventBus?
+
     init() {
         let pid = ProcessInfo.processInfo.processIdentifier
         socketPath = "/tmp/turm-\(pid).sock"
@@ -99,10 +102,33 @@ final class SocketServer: @unchecked Sendable {
                 let line = Data(buffer[..<nlIdx])
                 buffer = Data(buffer[buffer.index(after: nlIdx)...])
 
+                // event.subscribe: stay connected and stream events
+                if let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                   let id = json["id"] as? String,
+                   (json["method"] as? String) == "event.subscribe"
+                {
+                    var resp = success(id: id, result: ["status": "subscribed"])
+                    resp.append(UInt8(ascii: "\n"))
+                    _ = resp.withUnsafeBytes { write(fd, $0.baseAddress!, $0.count) }
+                    streamEvents(fd: fd)
+                    return
+                }
+
                 var response = dispatch(line)
                 response.append(UInt8(ascii: "\n"))
                 _ = response.withUnsafeBytes { write(fd, $0.baseAddress!, $0.count) }
             }
+        }
+    }
+
+    private func streamEvents(fd: Int32) {
+        guard let bus = eventBus else { return }
+        let channel = bus.subscribe()
+        defer { channel.close() }
+        while let event = channel.receive() {
+            let data = Data((event + "\n").utf8)
+            let result = data.withUnsafeBytes { write(fd, $0.baseAddress!, $0.count) }
+            if result <= 0 { break }
         }
     }
 

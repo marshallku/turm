@@ -5,10 +5,15 @@ import WebKit
 
 @MainActor
 final class WebViewController: NSViewController, TurmPanel {
+    let panelID: String = UUID().uuidString
+
     private(set) var webView: WKWebView!
     private(set) var currentTitle: String = "Web"
     private var startURL: URL?
     private var started = false
+
+    /// Set by AppDelegate after EventBus is created.
+    weak var eventBus: EventBus?
 
     init(url: URL? = nil) {
         startURL = url
@@ -130,8 +135,21 @@ extension WebViewController: WKNavigationDelegate {
         Task { @MainActor in
             let title = webView.title
             let host = webView.url?.host
+            let urlStr = webView.url?.absoluteString ?? ""
             self.currentTitle = (title?.isEmpty == false ? title! : host) ?? "Web"
             NotificationCenter.default.post(name: .terminalTitleChanged, object: self)
+            let id = self.panelID
+            eventBus?.broadcast(event: "webview.loaded", data: ["panel_id": id])
+            eventBus?.broadcast(event: "webview.title_changed", data: ["panel_id": id, "title": self.currentTitle])
+            eventBus?.broadcast(event: "panel.title_changed", data: ["panel_id": id, "title": self.currentTitle])
+        }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didCommit _: WKNavigation!) {
+        Task { @MainActor in
+            let urlStr = webView.url?.absoluteString ?? ""
+            let id = self.panelID
+            eventBus?.broadcast(event: "webview.navigated", data: ["panel_id": id, "url": urlStr])
         }
     }
 }

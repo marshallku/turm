@@ -4,6 +4,9 @@ import AppKit
 /// Both TerminalViewController and WebViewController conform to this.
 @MainActor
 protocol TurmPanel: AnyObject {
+    /// Stable identifier for this panel (UUID string). Used in event payloads.
+    var panelID: String { get }
+
     /// The root NSView managed by this panel (from NSViewController).
     var view: NSView { get }
 

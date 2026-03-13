@@ -16,6 +16,11 @@ final class TabViewController: NSViewController {
     private var currentBackgroundPath: String?
     private var currentBackgroundTint: Double = 0.6
 
+    /// Set by AppDelegate; propagated to all PaneManagers.
+    weak var eventBus: EventBus? {
+        didSet { paneManagers.forEach { $0.eventBus = eventBus } }
+    }
+
     var activePaneManager: PaneManager? {
         paneManagers.indices.contains(activeIndex) ? paneManagers[activeIndex] : nil
     }
@@ -124,8 +129,14 @@ final class TabViewController: NSViewController {
             Task { @MainActor in self?.refreshTabBar() }
         }
 
+        manager.eventBus = eventBus
         paneManagers.append(manager)
-        switchTab(to: paneManagers.count - 1)
+        let tabIndex = paneManagers.count - 1
+        switchTab(to: tabIndex)
+        eventBus?.broadcast(event: "tab.opened", data: [
+            "index": tabIndex,
+            "panel_id": manager.activePane.panelID,
+        ])
         if let path = currentBackgroundPath {
             manager.applyBackground(path: path, tint: currentBackgroundTint)
         }
@@ -137,6 +148,7 @@ final class TabViewController: NSViewController {
         let manager = paneManagers[index]
         manager.containerView.removeFromSuperview()
         paneManagers.remove(at: index)
+        eventBus?.broadcast(event: "tab.closed", data: ["index": index])
 
         if paneManagers.isEmpty {
             view.window?.close()

@@ -5,6 +5,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow?
     var tabVC: TabViewController?
     private let socketServer = SocketServer()
+    private let eventBus = EventBus()
 
     func applicationDidFinishLaunching(_: Notification) {
         let config = TurmConfig.load()
@@ -33,6 +34,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         self.window = window
         tabVC = vc
+        vc.eventBus = eventBus
         startSocketServer()
         vc.openInitialTab()
 
@@ -189,6 +191,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Socket Server
 
     private func startSocketServer() {
+        socketServer.eventBus = eventBus
         socketServer.commandHandler = { [weak self] method, params, completion in
             self?.handleCommand(method: method, params: params, completion: completion)
         }
@@ -265,6 +268,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case "session.info":
             let index = params["index"] as? Int ?? vc.activeIndex
             completion(vc.sessionInfo(index: index))
+
+        case "terminal.shell_precmd":
+            let panelID = params["panel_id"] as? String ?? vc.activeTerminal?.panelID ?? ""
+            eventBus.broadcast(event: "terminal.shell_precmd", data: ["panel_id": panelID])
+            completion(["ok": true])
+
+        case "terminal.shell_preexec":
+            let panelID = params["panel_id"] as? String ?? vc.activeTerminal?.panelID ?? ""
+            eventBus.broadcast(event: "terminal.shell_preexec", data: ["panel_id": panelID])
+            completion(["ok": true])
+
+        case "agent.approve":
+            guard let message = params["message"] as? String else { completion(nil); return }
+            let title = params["title"] as? String ?? "Agent Action"
+            let actions = params["actions"] as? [String] ?? ["Approve", "Deny"]
+            guard let win = window else { completion(["error": "no window"]); return }
+            let alert = NSAlert()
+            alert.messageText = title
+            alert.informativeText = message
+            for action in actions {
+                alert.addButton(withTitle: action)
+            }
+            alert.beginSheetModal(for: win) { response in
+                // NSApplication.ModalResponse.alertFirstButtonReturn = 1000
+                let idx = response.rawValue - 1000
+                let chosen = actions.indices.contains(idx) ? actions[idx] : actions.last ?? "Deny"
+                completion(["action": chosen, "index": idx])
+            }
+            // completion called async from sheet modal callback above — do not call here
 
         case "background.set":
             guard let path = params["path"] as? String else { completion(nil); return }
