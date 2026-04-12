@@ -30,8 +30,7 @@ turm/
 │   │   ├── webview.rs       # WebView panel (WebKitGTK 6.0)
 │   │   ├── plugin_panel.rs  # Plugin panel (WebView + JS bridge)
 │   │   ├── statusbar.rs     # Waybar-style status bar (WebView + plugin modules)
-│   │   ├── socket.rs        # Unix socket server + command dispatcher
-│   │   └── dbus.rs          # D-Bus service (com.marshall.turm)
+│   │   └── socket.rs        # Unix socket server + command dispatcher
 │   ├── turm.desktop      # Desktop entry for system integration
 │   └── install.sh           # Build + install script
 ├── turm-cli/             # CLI control tool (binary: turmctl)
@@ -66,8 +65,7 @@ turm/
 | macOS terminal  | Swift/AppKit + SwiftTerm (LocalProcessTerminalView)         |
 | CLI tool        | clap (Rust)                                                 |
 | Config          | TOML (`~/.config/turm/config.toml`)                         |
-| IPC (Linux)     | D-Bus session bus (`com.marshall.turm`)                     |
-| IPC (socket)    | Unix domain socket, cmux V2 newline-delimited JSON          |
+| IPC             | Unix domain socket, cmux V2 newline-delimited JSON          |
 | Background mgmt | File cache at `~/.cache/turm/wallpapers.txt`                |
 | Theme           | Catppuccin Mocha (hardcoded palette)                        |
 

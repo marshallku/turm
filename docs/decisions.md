@@ -17,19 +17,13 @@
 
 **Consequence:** `turm-core/pty.rs` and `state.rs` were removed — both platforms handle PTY natively (VTE on Linux, SwiftTerm on macOS).
 
-## 3. D-Bus for Linux IPC (Not Unix Socket)
+## 3. Unix Socket for IPC (D-Bus Removed)
 
-**Rationale:** D-Bus is the standard Linux IPC mechanism. Using it means:
+**Original:** D-Bus was used for background control (SetBackground, ClearBackground, SetTint). A Unix socket server was later added for richer control (50+ commands).
 
-- No custom socket server needed
-- System integration (other tools can control turm)
-- Session bus handles lifecycle automatically
+**Decision:** Removed D-Bus entirely. The socket API is the sole IPC mechanism on all platforms. D-Bus only had 3 background methods, all duplicated by socket commands. No external consumers existed.
 
-**GTK thread safety issue:** GTK widgets are not `Send+Sync`. D-Bus callbacks can't directly modify widgets.
-
-**Solution:** `mpsc::channel` + `glib::timeout_add_local(50ms)` polling on the GTK main thread. D-Bus handler sends commands through the channel, GTK main loop polls and applies them.
-
-**Note:** `glib::MainContext::channel` was removed in newer glib versions, so we use `std::sync::mpsc` with manual polling instead.
+**GTK thread safety:** Socket server threads use `mpsc::channel` + `glib::timeout_add_local(50ms)` polling to safely dispatch commands on the GTK main thread.
 
 ## 4. GtkOverlay for Background Compositing
 

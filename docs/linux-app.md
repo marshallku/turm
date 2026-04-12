@@ -129,7 +129,7 @@ All built-in shortcuts use `Ctrl+Shift` — Ctrl-only keys pass through to termi
 
 ### Custom Keybindings
 
-Custom keybindings can be configured in `[keybindings]` section of `config.toml`. They are checked before built-in shortcuts, so they can override defaults. Spawned commands receive `TURM_DBUS` and `TURM_SOCKET` environment variables. See [config.md](./config.md#keybindings) for details.
+Custom keybindings can be configured in `[keybindings]` section of `config.toml`. They are checked before built-in shortcuts, so they can override defaults. Spawned commands receive `TURM_SOCKET` environment variable. See [config.md](./config.md#keybindings) for details.
 
 ## Search (`search.rs`)
 
@@ -146,40 +146,6 @@ In-terminal text search using VTE's built-in regex search API.
 ## Split Panes (`split.rs`)
 
 Binary tree of `SplitNode` (Leaf = terminal, Branch = `gtk4::Paned` with two children). Each tab has a `TabContent` with a root `SplitNode` and a stable container `gtk4::Box`.
-
-## D-Bus Interface (`dbus.rs`)
-
-Bus name: `com.marshall.turm`
-Object path: `/com/marshall/turm`
-
-### Methods
-
-| Method                 | Args           | Description                            |
-| ---------------------- | -------------- | -------------------------------------- |
-| `SetBackground`        | `path: String` | Set specific background image          |
-| `NextBackground`       | —              | Random next from cache                 |
-| `ClearBackground`      | —              | Remove background, restore solid color |
-| `SetTint`              | `opacity: f64` | Set tint overlay opacity               |
-| `GetCurrentBackground` | —              | Returns current image path             |
-
-### Testing D-Bus
-
-```bash
-# Next random background
-gdbus call --session -d com.marshall.turm -o /com/marshall/turm -m com.marshall.turm.NextBackground
-
-# Get current background
-gdbus call --session -d com.marshall.turm -o /com/marshall/turm -m com.marshall.turm.GetCurrentBackground
-
-# Set tint
-gdbus call --session -d com.marshall.turm -o /com/marshall/turm -m com.marshall.turm.SetTint 0.7
-
-# Set specific image
-gdbus call --session -d com.marshall.turm -o /com/marshall/turm -m com.marshall.turm.SetBackground "/path/to/image.jpg"
-
-# Clear background
-gdbus call --session -d com.marshall.turm -o /com/marshall/turm -m com.marshall.turm.ClearBackground
-```
 
 ## Installation
 

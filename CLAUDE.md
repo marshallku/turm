@@ -39,7 +39,7 @@ cargo run -p turm-cli -- <command>
 - Rust edition 2024, Cargo workspace with `resolver = "2"`
 - GTK4 with `gnome_46` feature flag
 - VTE handles PTY on Linux (no custom PTY management)
-- D-Bus (`com.marshall.turm`) for Linux IPC
+- Unix socket (`/tmp/turm-{PID}.sock`) for IPC
 - Config: `~/.config/turm/config.toml` (TOML)
 - Cache: `~/.cache/turm/wallpapers.txt`
 - Theme: Catppuccin Mocha (hardcoded)

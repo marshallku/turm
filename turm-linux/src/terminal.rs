@@ -90,7 +90,6 @@ impl TerminalPanel {
 
         // Spawn shell
         let shell = config.terminal.shell.clone();
-        let dbus_env = format!("TURM_DBUS={}", crate::dbus::bus_name());
         let socket_env = format!("TURM_SOCKET=/tmp/turm-{}.sock", std::process::id());
         let child_pid: Rc<Cell<i32>> = Rc::new(Cell::new(-1));
         let pid_cell = child_pid.clone();
@@ -98,7 +97,7 @@ impl TerminalPanel {
             vte4::PtyFlags::DEFAULT,
             None::<&str>,
             &[&shell],
-            &[&dbus_env, &socket_env],
+            &[&socket_env],
             gtk4::glib::SpawnFlags::DEFAULT,
             || {},
             -1,

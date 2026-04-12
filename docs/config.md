@@ -95,7 +95,7 @@ Map key combinations to shell commands. Commands prefixed with `spawn:` run in t
 
 **Key format:** `modifier+modifier+key` — modifiers: `ctrl`, `shift`, `alt`. Key names follow GDK naming (e.g. `a`, `b`, `bracketright`, `f1`).
 
-**Environment:** Spawned commands inherit `TURM_DBUS` and `TURM_SOCKET` so scripts can communicate back to the running turm instance via D-Bus or socket.
+**Environment:** Spawned commands inherit `TURM_SOCKET` so scripts can communicate back to the running turm instance via socket.
 
 **Note:** Custom bindings override built-in shortcuts. For example, binding `ctrl+shift+b` replaces the default tab bar toggle.
 

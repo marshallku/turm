@@ -70,23 +70,13 @@ Multiple possible causes:
 
 ### App exits immediately with no error
 
-**Cause:** GTK single-instance behavior. Another turm instance already owns the D-Bus app ID `com.marshall.turm`.
+**Cause:** GTK single-instance behavior. Another turm instance already owns the GTK app ID `com.marshall.turm`.
 **Fix:** `killall turm` then relaunch.
 
 ### env_logger output not visible
 
 **Cause:** GTK may capture/redirect stderr. `RUST_LOG=info` has no visible effect.
 **Fix:** Use `eprintln!("[turm] ...")` instead of `log::info!()` for debug output.
-
-### D-Bus: GTK widgets not Send+Sync
-
-**Problem:** D-Bus callbacks need `Send+Sync` closures, but GTK widgets can't be sent across threads.
-**Fix:** Use `mpsc::channel` to send commands from D-Bus handler to GTK main thread. Poll with `glib::timeout_add_local(50ms)`.
-
-### D-Bus: `glib::MainContext::channel` not found
-
-**Cause:** Removed in newer glib crate versions.
-**Fix:** Use `std::sync::mpsc` + `glib::timeout_add_local` polling instead.
 
 ### Terminal shows only one line (collapsed height)
 

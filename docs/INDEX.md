@@ -20,7 +20,6 @@
 - **Binary names**: `turm` (terminal app), `turmctl` (CLI control tool)
 - **Config path**: `~/.config/turm/config.toml`
 - **Cache path**: `~/.cache/turm/wallpapers.txt`
-- **D-Bus bus name**: `com.marshall.turm`
 - **GTK app ID**: `com.marshall.turm`
 - **Theme**: Catppuccin Mocha
 - **Rust edition**: 2024

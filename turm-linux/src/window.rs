@@ -6,7 +6,6 @@ use gtk4::{Application, ApplicationWindow, gio, glib};
 
 use turm_core::config::TurmConfig;
 
-use crate::dbus::{self, DbusCommand};
 use crate::panel::Panel;
 use crate::socket;
 use crate::statusbar::StatusBar;
@@ -82,30 +81,6 @@ impl TurmWindow {
 
         // Config hot-reload
         watch_config(&tab_manager, &statusbar, &plugins);
-
-        // D-Bus: apply to active terminal panel (only if it's a terminal)
-        let rx = dbus::register();
-        let mgr = tab_manager.clone();
-        glib::timeout_add_local(Duration::from_millis(150), move || {
-            while let Ok(cmd) = rx.try_recv() {
-                if let Some(panel) = mgr.active_panel()
-                    && let Some(term) = panel.as_terminal()
-                {
-                    match cmd {
-                        DbusCommand::SetBackground(path) => {
-                            term.set_background(std::path::Path::new(&path));
-                        }
-                        DbusCommand::ClearBackground => {
-                            term.clear_background();
-                        }
-                        DbusCommand::SetTint(opacity) => {
-                            term.set_tint(opacity);
-                        }
-                    }
-                }
-            }
-            glib::ControlFlow::Continue
-        });
 
         let mgr = tab_manager.clone();
         let win = window.clone();

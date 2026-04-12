@@ -1,5 +1,4 @@
 mod app;
-mod dbus;
 mod panel;
 mod plugin_panel;
 mod search;

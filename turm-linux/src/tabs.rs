@@ -1271,14 +1271,12 @@ fn spawn_command(command: &str) {
     };
 
     let expanded = shellexpand::tilde(cmd).to_string();
-    let dbus_name = crate::dbus::bus_name();
     let socket_path = format!("/tmp/turm-{}.sock", std::process::id());
 
     std::thread::spawn(move || {
         let _ = std::process::Command::new("sh")
             .arg("-c")
             .arg(&expanded)
-            .env("TURM_DBUS", &dbus_name)
             .env("TURM_SOCKET", &socket_path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
