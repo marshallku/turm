@@ -16,8 +16,6 @@ turm/
 │       ├── background.rs    # Background image cache & rotation
 │       ├── plugin.rs         # Plugin manifest types + discovery
 │       ├── protocol.rs      # cmux V2 JSON protocol types
-│       ├── state.rs         # AppState, Workspace model
-│       ├── pty.rs           # PTY session (portable-pty)
 │       └── error.rs         # Error types (thiserror)
 ├── turm-linux/           # GTK4 + VTE4 native terminal
 │   ├── src/
@@ -77,12 +75,9 @@ turm/
 
 ### turm-core
 
-- `portable-pty 0.8` - Cross-platform PTY
 - `serde 1` + `serde_json 1` + `toml 0.8` - Serialization
-- `uuid 1` - Session IDs
 - `dirs 6` - XDG directories
 - `thiserror 2` - Error types
-- `rand 0.9` - Random background selection (`rand::seq::IndexedRandom`)
 
 ### turm-linux
 

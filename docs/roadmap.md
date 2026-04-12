@@ -181,7 +181,7 @@ Goal: full Linux feature parity. Phase 1 MVP complete; porting remaining Linux f
 
 ## Pending Cleanup
 
-- [ ] Consider whether turm-core/pty.rs and state.rs are needed for Linux (VTE handles PTY)
+- [x] ~~Remove turm-core/pty.rs and state.rs (VTE handles PTY on Linux, SwiftTerm on macOS)~~
 - [ ] Unify D-Bus and Socket API (D-Bus for system integration, Socket for rich control)
 
 ## Reference Projects

@@ -15,7 +15,7 @@ Cross-platform custom terminal emulator with shared Rust core and platform-nativ
 
 ## Project Structure
 
-- `turm-core/` — Shared Rust library (config, background, protocol, state, pty, error)
+- `turm-core/` — Shared Rust library (config, background, plugin, protocol, theme, error)
 - `turm-linux/` — GTK4 + VTE4 native terminal app (binary: `turm`)
 - `turm-cli/` — CLI control tool (binary: `turmctl`)
 - `turm-macos/` — Swift/AppKit app (stub)

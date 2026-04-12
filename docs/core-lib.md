@@ -63,40 +63,9 @@ ResponseError { code: String, message: String }
 
 Used by turm-cli for socket communication.
 
-### state.rs
-
-Application state model.
-
-```rust
-AppState {
-    config: TurmConfig,
-    sessions: Mutex<HashMap<String, PtySession>>,
-    workspaces: Mutex<Vec<Workspace>>,
-    active_workspace: Mutex<Option<String>>,
-}
-
-Workspace { id, name, sessions: Vec<String>, focused_session: Option<String> }
-```
-
-**Note:** On Linux, VTE handles PTY internally. This state model is used for socket server features and is not yet wired into turm-linux.
-
-### pty.rs
-
-Cross-platform PTY session using `portable-pty`.
-
-```rust
-PtySession { master, child, input_tx: mpsc::Sender<Vec<u8>> }
-```
-
-- Input: mpsc channel → dedicated writer thread (no Mutex on hot path)
-- Output: reader thread → callback function
-- Buffer: 64KB reads
-
-**Note:** Not used by turm-linux (VTE handles PTY). Intended for macOS and future socket server.
-
 ### error.rs
 
 ```rust
-enum TurmError { Pty, Io, Config, SessionNotFound, Protocol }
+enum TurmError { Io, Config, Protocol }
 type Result<T> = std::result::Result<T, TurmError>;
 ```

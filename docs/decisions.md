@@ -15,7 +15,7 @@
 
 **Rationale:** VTE has its own optimized PTY management. Using `portable-pty` alongside VTE would mean double PTY handling. Let VTE do what it does best.
 
-**Consequence:** `turm-core/pty.rs` is not used by turm-linux. It exists for macOS and potential future socket server needs.
+**Consequence:** `turm-core/pty.rs` and `state.rs` were removed — both platforms handle PTY natively (VTE on Linux, SwiftTerm on macOS).
 
 ## 3. D-Bus for Linux IPC (Not Unix Socket)
 
