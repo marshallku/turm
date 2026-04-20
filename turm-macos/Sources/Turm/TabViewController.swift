@@ -68,6 +68,14 @@ final class TabViewController: NSViewController {
         tabBar.onToggle = { [weak self] in
             self?.toggleTabBar(userInitiated: true)
         }
+        tabBar.onRenameTab = { [weak self] index, title in
+            guard let self else { return }
+            renameTab(at: index, title: title)
+            // Restore focus to the active pane after the tab bar field resigns
+            if let activeView = activePaneManager?.activePane.view {
+                view.window?.makeFirstResponder(activeView)
+            }
+        }
         tabBar.onNewPanel = { [weak self] type, mode in
             guard let self else { return }
             switch (type, mode) {
@@ -318,6 +326,7 @@ final class TabViewController: NSViewController {
         if index == activeIndex {
             view.window?.title = title
         }
+        eventBus?.broadcast(event: "tab.renamed", data: ["index": index, "title": title])
     }
 
     func sessionList() -> [[String: Any]] {

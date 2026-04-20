@@ -167,7 +167,7 @@ Goal: full Linux feature parity. Phase 1 MVP complete; porting remaining Linux f
 
 **Phase 4 — Tab Bar & UX Polish**
 - [x] Tab bar toggle (collapsed icon-only mode, Cmd+Shift+B, socket `tabs.toggle_bar`, event `tab.bar_toggled`)
-- [ ] Double-click tab rename (inline editing)
+- [x] Double-click tab rename (inline editing)
 - [ ] Pane focus navigation keyboard shortcuts (next/prev pane)
 - [ ] Background random rotation (socket `background.next`, config `[background] directory`)
 - [ ] Theme hot-reload (config file watcher)

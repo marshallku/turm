@@ -400,7 +400,7 @@ turmctl ──Unix socket──► SocketServer (background thread)
 
 ### Phase 4: Tab Bar & UX Polish
 - ~~**Tab bar toggle** — 아이콘만 보이는 collapsed 모드 (Cmd+Shift+B), `tabs.toggle_bar` 소켓~~ ✅ 구현 완료
-- **Double-click rename** — 탭 라벨 더블클릭으로 인라인 편집
+- ~~**Double-click rename** — 탭 라벨 더블클릭으로 인라인 편집~~ ✅ 구현 완료
 - **Pane focus navigation** — 키보드로 다음/이전 pane 포커스 이동
 - **Background random rotation** — `background.next` 소켓 커맨드, `[background] directory` 설정
 - **Config hot-reload** — 파일 변경 감지 후 테마/설정 즉시 반영

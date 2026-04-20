@@ -27,9 +27,11 @@ enum TabPanelType {
 
 // MARK: - TabButton
 
-private final class TabButton: NSView {
+private final class TabButton: NSView, NSTextFieldDelegate {
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
+    /// Called when the user commits an inline rename. Argument is the new title.
+    var onRename: ((String) -> Void)?
 
     private let titleLabel = NSTextField(labelWithString: "")
     private let closeBtn = NSButton()
@@ -40,6 +42,16 @@ private final class TabButton: NSView {
     private(set) var isActive = false
     private var isHovered = false
     private var panelType: TabPanelType = .terminal
+    private var isCollapsedState = false
+
+    /// Active inline editor, present only during a rename session.
+    private var editingField: NSTextField?
+    /// Guards against double-commit when both doCommandBy and controlTextDidEndEditing fire.
+    private var isCommitting = false
+
+    var isEditing: Bool {
+        editingField != nil
+    }
 
     var title: String {
         get { titleLabel.stringValue }
@@ -102,7 +114,19 @@ private final class TabButton: NSView {
             titleLabel.trailingAnchor.constraint(equalTo: closeBtn.leadingAnchor, constant: -4),
         ])
 
+        let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(doubleClickTapped))
+        doubleClick.numberOfClicksRequired = 2
+        addGestureRecognizer(doubleClick)
+
+        // Single-click for tab selection.
+        // Note: AppKit NSGestureRecognizer does not support require(toFail:) (UIKit only).
+        // On a double-click of an already-active tab, selectTapped fires first but
+        // switchTab() is a no-op (same index guard), so no refreshTabBar() happens and
+        // the TabButton survives for the double-click gesture to call beginEditing().
+        // Double-clicking an inactive tab selects it on the first click (rebuilds buttons)
+        // and does not trigger rename — the user must double-click again after selecting.
         let click = NSClickGestureRecognizer(target: self, action: #selector(selectTapped))
+        click.numberOfClicksRequired = 1
         addGestureRecognizer(click)
 
         applyStyle()
@@ -122,9 +146,87 @@ private final class TabButton: NSView {
     }
 
     func setCollapsed(_ collapsed: Bool) {
+        isCollapsedState = collapsed
         iconView.isHidden = !collapsed
         titleLabel.isHidden = collapsed
         closeBtn.isHidden = collapsed
+    }
+
+    // MARK: - Inline Rename
+
+    private func beginEditing() {
+        guard !isCollapsedState, editingField == nil else { return }
+        isCommitting = false
+
+        let field = NSTextField()
+        field.stringValue = titleLabel.stringValue
+        field.font = NSFont.systemFont(ofSize: 12)
+        field.isBordered = false
+        field.isBezeled = false
+        field.focusRingType = .none
+        field.backgroundColor = .clear
+        field.textColor = theme.text.nsColor
+        field.delegate = self
+        field.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.isHidden = true
+        closeBtn.isHidden = true
+        addSubview(field)
+        NSLayoutConstraint.activate([
+            field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            field.centerYAnchor.constraint(equalTo: centerYAnchor),
+            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+        ])
+        editingField = field
+        // selectText both starts editing and selects all content
+        field.selectText(nil)
+    }
+
+    private func commitEdit() {
+        guard let field = editingField, !isCommitting else { return }
+        isCommitting = true
+        let newTitle = field.stringValue.trimmingCharacters(in: .whitespaces)
+        finishEditing()
+        if !newTitle.isEmpty {
+            onRename?(newTitle)
+        }
+    }
+
+    private func cancelEdit() {
+        guard editingField != nil else { return }
+        isCommitting = true
+        finishEditing()
+    }
+
+    private func finishEditing() {
+        guard let field = editingField else { return }
+        field.removeFromSuperview()
+        titleLabel.isHidden = isCollapsedState
+        closeBtn.isHidden = isCollapsedState
+        // Nil editingField AFTER makeFirstResponder so that if resign triggers
+        // controlTextDidEndEditing synchronously, the identity guard (=== editingField)
+        // can still distinguish the right field instead of matching nil === nil.
+        window?.makeFirstResponder(nil)
+        editingField = nil
+    }
+
+    // MARK: - NSTextFieldDelegate
+
+    func control(_ control: NSControl, textView _: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === editingField else { return false }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            commitEdit()
+            return true
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            cancelEdit()
+            return true
+        }
+        return false
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard notification.object as? NSTextField === editingField else { return }
+        commitEdit()
     }
 
     private func applyStyle() {
@@ -181,6 +283,10 @@ private final class TabButton: NSView {
 
     @objc private func selectTapped() {
         onSelect?()
+    }
+
+    @objc private func doubleClickTapped() {
+        beginEditing()
     }
 
     @objc private func closeTapped() {
@@ -350,6 +456,8 @@ final class TabBarView: NSView {
     var onCloseTab: ((Int) -> Void)?
     var onNewPanel: ((AddPanelType, AddPanelMode) -> Void)?
     var onToggle: (() -> Void)?
+    /// Called when the user commits a double-click inline rename.
+    var onRenameTab: ((Int, String) -> Void)?
 
     private(set) var isCollapsed: Bool = false
 
@@ -453,6 +561,11 @@ final class TabBarView: NSView {
     // MARK: - Public API
 
     func setTabs(titles: [String], types: [TabPanelType], activeIndex: Int) {
+        // Don't recreate buttons while the user is mid-rename — that would silently
+        // destroy the in-flight editor. The tab bar will resync on the next refresh
+        // after editing completes.
+        if tabButtons.contains(where: \.isEditing) { return }
+
         tabButtons.forEach { $0.removeFromSuperview() }
         tabButtons.removeAll()
         tabWidthConstraints.forEach { $0.isActive = false }
@@ -503,6 +616,7 @@ final class TabBarView: NSView {
         btn.configure(type: type, collapsed: isCollapsed)
         btn.onSelect = { [weak self] in self?.onSelectTab?(index) }
         btn.onClose = { [weak self] in self?.onCloseTab?(index) }
+        btn.onRename = { [weak self] newTitle in self?.onRenameTab?(index, newTitle) }
         return btn
     }
 
