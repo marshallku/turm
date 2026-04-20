@@ -166,7 +166,7 @@ Goal: full Linux feature parity. Phase 1 MVP complete; porting remaining Linux f
 - [ ] `terminal.output` — PTY output interception not possible via SwiftTerm public API (`feed(byteArray:)` is non-overridable extension method)
 
 **Phase 4 — Tab Bar & UX Polish**
-- [ ] Tab bar toggle (collapsed icon-only mode, Cmd+Shift+B, socket `tabs.toggle_bar`)
+- [x] Tab bar toggle (collapsed icon-only mode, Cmd+Shift+B, socket `tabs.toggle_bar`, event `tab.bar_toggled`)
 - [ ] Double-click tab rename (inline editing)
 - [ ] Pane focus navigation keyboard shortcuts (next/prev pane)
 - [ ] Background random rotation (socket `background.next`, config `[background] directory`)

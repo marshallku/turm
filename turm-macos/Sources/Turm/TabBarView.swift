@@ -13,6 +13,18 @@ enum AddPanelMode {
     case splitV
 }
 
+enum TabPanelType {
+    case terminal
+    case webview
+
+    var symbolName: String {
+        switch self {
+        case .terminal: "terminal"
+        case .webview: "globe"
+        }
+    }
+}
+
 // MARK: - TabButton
 
 private final class TabButton: NSView {
@@ -21,15 +33,20 @@ private final class TabButton: NSView {
 
     private let titleLabel = NSTextField(labelWithString: "")
     private let closeBtn = NSButton()
+    private let iconView = NSImageView()
     private var trackingArea: NSTrackingArea?
     private let theme: TurmTheme
 
     private(set) var isActive = false
     private var isHovered = false
+    private var panelType: TabPanelType = .terminal
 
     var title: String {
         get { titleLabel.stringValue }
-        set { titleLabel.stringValue = newValue }
+        set {
+            titleLabel.stringValue = newValue
+            toolTip = newValue
+        }
     }
 
     init(theme: TurmTheme) {
@@ -47,6 +64,11 @@ private final class TabButton: NSView {
         wantsLayer = true
         layer?.cornerRadius = 4
 
+        // Icon (visible only in collapsed mode)
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.isHidden = true
+        addSubview(iconView)
+
         titleLabel.font = NSFont.systemFont(ofSize: 12)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -62,11 +84,19 @@ private final class TabButton: NSView {
         addSubview(closeBtn)
 
         NSLayoutConstraint.activate([
+            // Icon (centered, used in collapsed mode)
+            iconView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 14),
+            iconView.heightAnchor.constraint(equalToConstant: 14),
+
+            // Close button (right side, expanded mode)
             closeBtn.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             closeBtn.centerYAnchor.constraint(equalTo: centerYAnchor),
             closeBtn.widthAnchor.constraint(equalToConstant: 16),
             closeBtn.heightAnchor.constraint(equalToConstant: 16),
 
+            // Title (between left edge and close button, expanded mode)
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             titleLabel.trailingAnchor.constraint(equalTo: closeBtn.leadingAnchor, constant: -4),
@@ -83,28 +113,47 @@ private final class TabButton: NSView {
         applyStyle()
     }
 
+    func configure(type: TabPanelType, collapsed: Bool) {
+        panelType = type
+        let img = NSImage(systemSymbolName: type.symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+        iconView.image = img
+        setCollapsed(collapsed)
+    }
+
+    func setCollapsed(_ collapsed: Bool) {
+        iconView.isHidden = !collapsed
+        titleLabel.isHidden = collapsed
+        closeBtn.isHidden = collapsed
+    }
+
     private func applyStyle() {
         let bgColor: NSColor
         let textColor: NSColor
         let closeTint: NSColor
+        let iconTint: NSColor
 
         if isActive {
             bgColor = theme.surface2.nsColor
             textColor = theme.text.nsColor
             closeTint = theme.subtext0.nsColor
+            iconTint = theme.text.nsColor
         } else if isHovered {
             bgColor = theme.surface1.nsColor
             textColor = theme.subtext1.nsColor
             closeTint = theme.subtext0.nsColor
+            iconTint = theme.subtext1.nsColor
         } else {
             bgColor = .clear
             textColor = theme.subtext0.nsColor
             closeTint = .clear
+            iconTint = theme.subtext0.nsColor
         }
 
         layer?.backgroundColor = bgColor.cgColor
         titleLabel.textColor = textColor
         closeBtn.contentTintColor = closeTint
+        iconView.contentTintColor = iconTint
     }
 
     override func updateTrackingAreas() {
@@ -254,13 +303,10 @@ private final class AddPanelPopoverController: NSViewController {
             btn.heightAnchor.constraint(equalToConstant: 24).isActive = true
             let t = type, m = mode
             btn.target = self
-            // Store type/mode in the button's tag and handle via closure via objc block
             btn.action = #selector(dummyAction)
-            // Use mouseDown tracking instead — simpler: just add click gesture
             let gr = NSClickGestureRecognizer(target: self, action: #selector(dummyAction))
             gr.numberOfClicksRequired = 1
             btn.addGestureRecognizer(gr)
-            // Wire up with a closure via subclass workaround: store in action closures dict
             addAction(btn, type: t, mode: m)
             row.addArrangedSubview(btn)
         }
@@ -268,7 +314,6 @@ private final class AddPanelPopoverController: NSViewController {
         return row
     }
 
-    // Maps each button to its (type, mode) via tag
     private var actionMap: [Int: (AddPanelType, AddPanelMode)] = [:]
     private var tagCounter = 0
 
@@ -278,7 +323,6 @@ private final class AddPanelPopoverController: NSViewController {
         actionMap[tagCounter] = (type, mode)
         btn.target = self
         btn.action = #selector(panelButtonTapped(_:))
-        // Remove the gesture recognizer we added above — use target/action instead
         btn.gestureRecognizers.forEach { btn.removeGestureRecognizer($0) }
     }
 
@@ -300,18 +344,25 @@ private final class AddPanelPopoverController: NSViewController {
 
 final class TabBarView: NSView {
     static let height: CGFloat = 36
+    static let collapsedTabWidth: CGFloat = 36
 
     var onSelectTab: ((Int) -> Void)?
     var onCloseTab: ((Int) -> Void)?
-    /// Replaces the old onNewTab. Called when user picks a panel type and placement.
     var onNewPanel: ((AddPanelType, AddPanelMode) -> Void)?
+    var onToggle: (() -> Void)?
 
+    private(set) var isCollapsed: Bool = false
+
+    private let toggleButton = NSButton()
     private let stackView = NSStackView()
     private let scrollView = NSScrollView()
     private let addButton = NSButton()
     private var tabButtons: [TabButton] = []
     private let theme: TurmTheme
     private var popover: NSPopover?
+
+    /// Width constraints for tab buttons (swapped on collapse/expand)
+    private var tabWidthConstraints: [NSLayoutConstraint] = []
 
     init(theme: TurmTheme) {
         self.theme = theme
@@ -341,6 +392,19 @@ final class TabBarView: NSView {
             border.heightAnchor.constraint(equalToConstant: 1),
         ])
 
+        // Toggle button (leftmost) — sidebar.left icon
+        let toggleImg = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle tab bar")?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+        toggleButton.image = toggleImg
+        toggleButton.title = ""
+        toggleButton.isBordered = false
+        toggleButton.contentTintColor = theme.subtext0.nsColor
+        toggleButton.target = self
+        toggleButton.action = #selector(toggleTapped)
+        toggleButton.toolTip = "Toggle Tab Bar (⌘⇧B)"
+        toggleButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(toggleButton)
+
         // Tab stack
         stackView.orientation = .horizontal
         stackView.spacing = 2
@@ -369,7 +433,11 @@ final class TabBarView: NSView {
         addSubview(addButton)
 
         NSLayoutConstraint.activate([
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            toggleButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            toggleButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            toggleButton.widthAnchor.constraint(equalToConstant: 24),
+
+            scrollView.leadingAnchor.constraint(equalTo: toggleButton.trailingAnchor, constant: 4),
             scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: border.topAnchor),
             scrollView.trailingAnchor.constraint(equalTo: addButton.leadingAnchor, constant: -4),
@@ -384,21 +452,33 @@ final class TabBarView: NSView {
 
     // MARK: - Public API
 
-    func setTabs(titles: [String], activeIndex: Int) {
+    func setTabs(titles: [String], types: [TabPanelType], activeIndex: Int) {
         tabButtons.forEach { $0.removeFromSuperview() }
         tabButtons.removeAll()
+        tabWidthConstraints.forEach { $0.isActive = false }
+        tabWidthConstraints.removeAll()
         stackView.arrangedSubviews.forEach { stackView.removeArrangedSubview($0); $0.removeFromSuperview() }
 
         for (i, title) in titles.enumerated() {
-            let btn = makeTabButton(index: i, title: title, active: i == activeIndex)
+            let type = i < types.count ? types[i] : .terminal
+            let btn = makeTabButton(index: i, title: title, type: type, active: i == activeIndex)
             stackView.addArrangedSubview(btn)
             tabButtons.append(btn)
 
-            NSLayoutConstraint.activate([
-                btn.widthAnchor.constraint(greaterThanOrEqualToConstant: 80),
-                btn.widthAnchor.constraint(lessThanOrEqualToConstant: 200),
-                btn.heightAnchor.constraint(equalToConstant: TabBarView.height - 8),
-            ])
+            let h = TabBarView.height - 8
+            if isCollapsed {
+                let w = btn.widthAnchor.constraint(equalToConstant: TabBarView.collapsedTabWidth)
+                w.isActive = true
+                tabWidthConstraints.append(w)
+                btn.heightAnchor.constraint(equalToConstant: h).isActive = true
+            } else {
+                let minW = btn.widthAnchor.constraint(greaterThanOrEqualToConstant: 80)
+                let maxW = btn.widthAnchor.constraint(lessThanOrEqualToConstant: 200)
+                minW.isActive = true
+                maxW.isActive = true
+                tabWidthConstraints.append(contentsOf: [minW, maxW])
+                btn.heightAnchor.constraint(equalToConstant: h).isActive = true
+            }
         }
     }
 
@@ -407,15 +487,27 @@ final class TabBarView: NSView {
         tabButtons[index].title = title
     }
 
+    func setCollapsed(_ collapsed: Bool) {
+        isCollapsed = collapsed
+        // The parent will call setTabs again; just update toggle button appearance here
+        let tint = collapsed ? theme.text.nsColor : theme.subtext0.nsColor
+        toggleButton.contentTintColor = tint
+    }
+
     // MARK: - Private
 
-    private func makeTabButton(index: Int, title: String, active: Bool) -> TabButton {
+    private func makeTabButton(index: Int, title: String, type: TabPanelType, active: Bool) -> TabButton {
         let btn = TabButton(theme: theme)
         btn.title = title
         btn.setActive(active)
+        btn.configure(type: type, collapsed: isCollapsed)
         btn.onSelect = { [weak self] in self?.onSelectTab?(index) }
         btn.onClose = { [weak self] in self?.onCloseTab?(index) }
         return btn
+    }
+
+    @objc private func toggleTapped() {
+        onToggle?()
     }
 
     @objc private func addTabTapped() {

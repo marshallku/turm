@@ -16,9 +16,19 @@ final class TabViewController: NSViewController {
     private var currentBackgroundPath: String?
     private var currentBackgroundTint: Double = 0.6
 
+    // Tab bar collapsed state.
+    // Default: collapsed (icon-only). Auto-expands on 1→2 tab transition
+    // unless the user has manually toggled the bar.
+    private var isBarCollapsed: Bool = true
+    private var userToggledBar: Bool = false
+
     /// Set by AppDelegate; propagated to all PaneManagers.
     weak var eventBus: EventBus? {
         didSet { paneManagers.forEach { $0.eventBus = eventBus } }
+    }
+
+    var isTabBarCollapsed: Bool {
+        isBarCollapsed
     }
 
     var activePaneManager: PaneManager? {
@@ -55,6 +65,9 @@ final class TabViewController: NSViewController {
         tabBar.translatesAutoresizingMaskIntoConstraints = false
         tabBar.onSelectTab = { [weak self] i in self?.switchTab(to: i) }
         tabBar.onCloseTab = { [weak self] i in self?.closeTabByButton(at: i) }
+        tabBar.onToggle = { [weak self] in
+            self?.toggleTabBar(userInitiated: true)
+        }
         tabBar.onNewPanel = { [weak self] type, mode in
             guard let self else { return }
             switch (type, mode) {
@@ -83,6 +96,9 @@ final class TabViewController: NSViewController {
             contentArea.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             contentArea.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
+
+        // Sync view to controller's initial state (single source of truth: isBarCollapsed)
+        tabBar.setCollapsed(isBarCollapsed)
 
         view = root
     }
@@ -132,6 +148,13 @@ final class TabViewController: NSViewController {
         manager.eventBus = eventBus
         paneManagers.append(manager)
         let tabIndex = paneManagers.count - 1
+
+        // Auto-expand when going from 1 to 2 tabs (unless user manually toggled)
+        if paneManagers.count == 2, isBarCollapsed, !userToggledBar {
+            isBarCollapsed = false
+            tabBar.setCollapsed(false)
+        }
+
         switchTab(to: tabIndex)
         eventBus?.broadcast(event: "tab.opened", data: [
             "index": tabIndex,
@@ -219,9 +242,20 @@ final class TabViewController: NSViewController {
 
     // MARK: - Tab Bar
 
+    func toggleTabBar(userInitiated: Bool = false) {
+        if userInitiated { userToggledBar = true }
+        isBarCollapsed.toggle()
+        tabBar.setCollapsed(isBarCollapsed)
+        refreshTabBar()
+        eventBus?.broadcast(event: "tab.bar_toggled", data: ["collapsed": isBarCollapsed])
+    }
+
     private func refreshTabBar() {
         let titles = paneManagers.map(\.activePane.currentTitle)
-        tabBar.setTabs(titles: titles, activeIndex: activeIndex)
+        let types: [TabPanelType] = paneManagers.map { m in
+            m.activePane is WebViewController ? .webview : .terminal
+        }
+        tabBar.setTabs(titles: titles, types: types, activeIndex: activeIndex)
     }
 
     // MARK: - Background

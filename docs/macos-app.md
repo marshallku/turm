@@ -399,7 +399,7 @@ turmctl ──Unix socket──► SocketServer (background thread)
 - **Shell integration via OSC 133** — 위와 동일한 이유. 대신 `terminal.shell_precmd` / `terminal.shell_preexec`를 소켓 커맨드로 구현 (쉘 스크립트에서 직접 호출).
 
 ### Phase 4: Tab Bar & UX Polish
-- **Tab bar toggle** — 아이콘만 보이는 collapsed 모드 (Cmd+Shift+B), `tabs.toggle_bar` 소켓
+- ~~**Tab bar toggle** — 아이콘만 보이는 collapsed 모드 (Cmd+Shift+B), `tabs.toggle_bar` 소켓~~ ✅ 구현 완료
 - **Double-click rename** — 탭 라벨 더블클릭으로 인라인 편집
 - **Pane focus navigation** — 키보드로 다음/이전 pane 포커스 이동
 - **Background random rotation** — `background.next` 소켓 커맨드, `[background] directory` 설정

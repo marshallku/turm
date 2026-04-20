@@ -121,11 +121,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         findPrevAction.tag = Int(NSFindPanelAction.previous.rawValue)
         findMenu.addItem(findPrevAction)
 
-        // View menu (zoom)
+        // View menu (zoom + tab bar toggle)
         let viewItem = NSMenuItem()
         mainMenu.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
         viewItem.submenu = viewMenu
+
+        let toggleTabBarItem = NSMenuItem(title: "Toggle Tab Bar", action: #selector(toggleTabBar), keyEquivalent: "b")
+        toggleTabBarItem.keyEquivalentModifierMask = [.command, .shift]
+        toggleTabBarItem.target = self
+        viewMenu.addItem(toggleTabBarItem)
+
+        viewMenu.addItem(.separator())
 
         let zoomIn = NSMenuItem(title: "Zoom In", action: #selector(zoomIn), keyEquivalent: "=")
         zoomIn.target = self
@@ -166,6 +173,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func switchTabByNumber(_ sender: NSMenuItem) {
         tabVC?.switchTab(to: sender.tag - 1)
+    }
+
+    // MARK: - Tab Bar Toggle
+
+    @objc func toggleTabBar() {
+        tabVC?.toggleTabBar(userInitiated: true)
     }
 
     // MARK: - Find
@@ -297,6 +310,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 completion(["action": chosen, "index": idx])
             }
             // completion called async from sheet modal callback above — do not call here
+
+        case "tabs.toggle_bar":
+            vc.toggleTabBar(userInitiated: true)
+            completion(["ok": true, "collapsed": vc.isTabBarCollapsed])
 
         case "background.set":
             guard let path = params["path"] as? String else { completion(nil); return }

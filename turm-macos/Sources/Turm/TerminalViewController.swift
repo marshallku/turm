@@ -180,11 +180,48 @@ class TerminalViewController: NSViewController, TurmPanel {
     }
 
     private func configureFont(_ tv: LocalProcessTerminalView, size: CGFloat) {
-        if let font = NSFont(name: config.fontFamily, size: size) {
-            tv.font = font
-        } else {
-            tv.font = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+        let font = resolveFont(name: config.fontFamily, size: size)
+        tv.font = font
+    }
+
+    /// Resolves a font by name using multiple strategies so that Nerd Font family
+    /// names (e.g. "JetBrainsMono Nerd Font Mono") are found correctly even when
+    /// NSFont(name:) only accepts PostScript names.
+    private func resolveFont(name: String, size: CGFloat) -> NSFont {
+        // 1. PostScript name / full name lookup (e.g. "JetBrains Mono Regular")
+        if let font = NSFont(name: name, size: size) { return font }
+
+        let manager = NSFontManager.shared
+
+        // 2. Exact family-name lookup via NSFontManager
+        if let font = regularFont(fromFamily: name, manager: manager, size: size) { return font }
+
+        // 3. Case-insensitive family-name lookup (handles "jetbrainsmono nerd font mono" etc.)
+        let lower = name.lowercased()
+        for family in manager.availableFontFamilies where family.lowercased() == lower {
+            if let font = regularFont(fromFamily: family, manager: manager, size: size) { return font }
         }
+
+        // 4. NSFontDescriptor family lookup (last-resort before system fallback)
+        if let font = NSFont(descriptor: NSFontDescriptor().withFamily(name), size: size) { return font }
+
+        return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    /// Picks the "Regular" (or closest upright) member of a font family.
+    private func regularFont(fromFamily family: String, manager: NSFontManager, size: CGFloat) -> NSFont? {
+        guard let members = manager.availableMembers(ofFontFamily: family) else { return nil }
+        let preferred = ["Regular", "Book", "Roman", "Medium", "Text"]
+        for faceName in preferred {
+            if let m = members.first(where: { ($0[1] as? String) == faceName }),
+               let psName = m[0] as? String
+            {
+                return NSFont(name: psName, size: size)
+            }
+        }
+        // Fall back to the first available member in the family
+        if let psName = members.first?[0] as? String { return NSFont(name: psName, size: size) }
+        return nil
     }
 
     // MARK: - Shell
