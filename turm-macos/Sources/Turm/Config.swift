@@ -7,6 +7,9 @@ struct TurmConfig {
     let themeName: String
     let backgroundPath: String?
     let backgroundTint: Double
+    /// Opacity of the background image layer itself (0.0 = invisible, 1.0 = fully visible).
+    /// Distinct from `backgroundTint`, which darkens the image via an overlay.
+    let backgroundOpacity: Double
 
     static func load() -> TurmConfig {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -29,6 +32,7 @@ struct TurmConfig {
         var themeName = "catppuccin-mocha"
         var backgroundPath: String? = nil
         var backgroundTint = 0.6
+        var backgroundOpacity = 1.0
 
         var currentSection = ""
 
@@ -65,10 +69,12 @@ struct TurmConfig {
                 if let n = Int(value) { fontSize = n }
             case ("theme", "name"):
                 themeName = value
-            case ("background", "path"):
+            case ("background", "path"), ("background", "image"):
                 backgroundPath = value.isEmpty ? nil : expandTilde(value)
             case ("background", "tint"):
                 if let d = Double(value) { backgroundTint = max(0, min(1, d)) }
+            case ("background", "opacity"):
+                if let d = Double(value) { backgroundOpacity = max(0, min(1, d)) }
             default:
                 break
             }
@@ -76,7 +82,8 @@ struct TurmConfig {
 
         return TurmConfig(
             shell: shell, fontFamily: fontFamily, fontSize: fontSize,
-            themeName: themeName, backgroundPath: backgroundPath, backgroundTint: backgroundTint,
+            themeName: themeName, backgroundPath: backgroundPath,
+            backgroundTint: backgroundTint, backgroundOpacity: backgroundOpacity,
         )
     }
 
@@ -88,6 +95,7 @@ struct TurmConfig {
             themeName: "catppuccin-mocha",
             backgroundPath: nil,
             backgroundTint: 0.6,
+            backgroundOpacity: 1.0,
         )
     }
 

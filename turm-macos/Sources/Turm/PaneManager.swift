@@ -197,8 +197,8 @@ final class PaneManager {
         (activePane as? TerminalViewController)?.setCustomTitle(title)
     }
 
-    func applyBackground(path: String, tint: Double) {
-        allPanels().forEach { $0.applyBackground(path: path, tint: tint) }
+    func applyBackground(path: String, tint: Double, opacity: Double) {
+        allPanels().forEach { $0.applyBackground(path: path, tint: tint, opacity: opacity) }
     }
 
     func clearBackground() {
@@ -207,6 +207,14 @@ final class PaneManager {
 
     func setTint(_ alpha: Double) {
         allPanels().forEach { $0.setTint(alpha) }
+    }
+
+    func applyTheme(_ theme: TurmTheme) {
+        allTerminals().forEach { $0.applyTheme(theme) }
+    }
+
+    func applyFont(family: String, baseSize: CGFloat) {
+        allTerminals().forEach { $0.applyFont(family: family, baseSize: baseSize) }
     }
 
     // MARK: - View Hierarchy

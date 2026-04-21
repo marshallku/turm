@@ -159,6 +159,14 @@ func installExitMonitor() {
 font_family = "JetBrainsMono Nerd Font Mono"
 ```
 
+### macOS: Background `opacity` config change not reflected at runtime
+
+**Cause:** `Config.swift` only parsed `path` and `tint` from the `[background]` section. The `opacity` field was silently ignored, and the `applyBackground` signature only accepted `path` and `tint`. Hot-reload therefore never changed the image layer's alpha.
+
+**Fix:** Added `backgroundOpacity: Double` to `TurmConfig`, parse `("background", "opacity")` in `Config.parse`, and propagated an `opacity` parameter through the full call chain: `TurmPanel.applyBackground(path:tint:opacity:)` → `TerminalViewController` (sets `backgroundView?.alphaValue`) → `WebViewController` (no-op) → `PaneManager` → `TabViewController` (stores `currentBackgroundOpacity`) → `AppDelegate` initial apply and `background.set` socket command.
+
+Also added `("background", "image")` as an alias for `("background", "path")` to match the documented config key.
+
 ### macOS: OSC 7 CWD URI includes hostname
 
 **Cause:** OSC 7 delivers a `file://hostname/path` URI (e.g. `file://Marshalls-MacBook-Pro.local/Users/marshallku`). Simply stripping `file://` leaves the hostname in the path.

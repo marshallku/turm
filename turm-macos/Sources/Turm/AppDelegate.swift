@@ -6,6 +6,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var tabVC: TabViewController?
     private let socketServer = SocketServer()
     private let eventBus = EventBus()
+    private var configWatcher: ConfigWatcher?
 
     func applicationDidFinishLaunching(_: Notification) {
         let config = TurmConfig.load()
@@ -36,15 +37,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         tabVC = vc
         vc.eventBus = eventBus
         startSocketServer()
+        startConfigWatcher()
         vc.openInitialTab()
 
         if let path = config.backgroundPath {
-            vc.applyBackground(path: path, tint: config.backgroundTint)
+            vc.applyBackground(path: path, tint: config.backgroundTint, opacity: config.backgroundOpacity)
         }
     }
 
     func applicationWillTerminate(_: Notification) {
         socketServer.stop()
+        configWatcher?.stop()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool {
@@ -203,6 +206,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Socket Server
 
+    // MARK: - Config Watcher
+
+    private func startConfigWatcher() {
+        let configURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/turm/config.toml")
+        let watcher = ConfigWatcher(url: configURL)
+        watcher.onChange = { [weak self] in self?.handleConfigChange() }
+        watcher.start()
+        configWatcher = watcher
+    }
+
+    private func handleConfigChange() {
+        let newConfig = TurmConfig.load()
+        let newTheme = TurmTheme.byName(newConfig.themeName) ?? .catppuccinMocha
+        tabVC?.applyConfig(newConfig, theme: newTheme)
+        eventBus.broadcast(event: "config.reloaded", data: ["theme": newTheme.name])
+    }
+
     private func startSocketServer() {
         socketServer.eventBus = eventBus
         socketServer.commandHandler = { [weak self] method, params, completion in
@@ -318,7 +339,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case "background.set":
             guard let path = params["path"] as? String else { completion(nil); return }
             let tint = params["tint"] as? Double ?? 0.6
-            vc.applyBackground(path: path, tint: tint)
+            let opacity = params["opacity"] as? Double ?? 1.0
+            vc.applyBackground(path: path, tint: tint, opacity: opacity)
             completion(["ok": true])
 
         case "background.set_tint":

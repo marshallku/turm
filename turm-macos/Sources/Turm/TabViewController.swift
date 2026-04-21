@@ -15,6 +15,7 @@ final class TabViewController: NSViewController {
     // Retained so new tabs inherit the current background state
     private var currentBackgroundPath: String?
     private var currentBackgroundTint: Double = 0.6
+    private var currentBackgroundOpacity: Double = 1.0
 
     // Tab bar collapsed state.
     // Default: collapsed (icon-only). Auto-expands on 1→2 tab transition
@@ -169,7 +170,7 @@ final class TabViewController: NSViewController {
             "panel_id": manager.activePane.panelID,
         ])
         if let path = currentBackgroundPath {
-            manager.applyBackground(path: path, tint: currentBackgroundTint)
+            manager.applyBackground(path: path, tint: currentBackgroundTint, opacity: currentBackgroundOpacity)
         }
     }
 
@@ -266,12 +267,39 @@ final class TabViewController: NSViewController {
         tabBar.setTabs(titles: titles, types: types, activeIndex: activeIndex)
     }
 
+    // MARK: - Config Hot-Reload
+
+    /// Called when the config file changes at runtime. Applies theme and font to all
+    /// running terminals. Background is re-applied only if the path/tint changed.
+    /// Shell changes do not affect existing terminals — only new ones pick them up.
+    func applyConfig(_ newConfig: TurmConfig, theme: TurmTheme) {
+        // Theme colors + font (family + base size updated; current zoom preserved)
+        for paneManager in paneManagers {
+            paneManager.applyTheme(theme)
+            paneManager.applyFont(family: newConfig.fontFamily, baseSize: CGFloat(newConfig.fontSize))
+        }
+
+        // Background: apply/clear based on new config
+        if let path = newConfig.backgroundPath {
+            applyBackground(path: path, tint: newConfig.backgroundTint, opacity: newConfig.backgroundOpacity)
+        } else if currentBackgroundPath != nil {
+            clearBackground()
+        } else {
+            // Tint may have changed even if path stayed the same
+            setTint(newConfig.backgroundTint)
+        }
+
+        // Update window background to match new theme
+        view.window?.backgroundColor = theme.background.nsColor
+    }
+
     // MARK: - Background
 
-    func applyBackground(path: String, tint: Double) {
+    func applyBackground(path: String, tint: Double, opacity: Double = 1.0) {
         currentBackgroundPath = path
         currentBackgroundTint = tint
-        paneManagers.forEach { $0.applyBackground(path: path, tint: tint) }
+        currentBackgroundOpacity = opacity
+        paneManagers.forEach { $0.applyBackground(path: path, tint: tint, opacity: opacity) }
     }
 
     func clearBackground() {

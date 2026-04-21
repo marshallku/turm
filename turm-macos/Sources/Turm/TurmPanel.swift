@@ -17,7 +17,7 @@ protocol TurmPanel: AnyObject {
     func startIfNeeded()
 
     /// Background image (no-op for panels that don't support it).
-    func applyBackground(path: String, tint: Double)
+    func applyBackground(path: String, tint: Double, opacity: Double)
     func clearBackground()
     func setTint(_ alpha: Double)
 

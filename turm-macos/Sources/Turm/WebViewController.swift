@@ -48,7 +48,7 @@ final class WebViewController: NSViewController, TurmPanel {
     }
 
     /// Background operations are no-ops for WebView panels.
-    func applyBackground(path _: String, tint _: Double) {}
+    func applyBackground(path _: String, tint _: Double, opacity _: Double) {}
     func clearBackground() {}
     func setTint(_: Double) {}
 

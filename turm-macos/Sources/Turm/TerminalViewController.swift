@@ -38,11 +38,17 @@ class TerminalViewController: NSViewController, TurmPanel {
     let panelID: String = UUID().uuidString
 
     private let config: TurmConfig
-    private let theme: TurmTheme
+    // Mutable so applyTheme() can update it; clearBackground() uses the live value.
+    private var theme: TurmTheme
     private var terminalView: TurmTerminalView?
     private var backgroundView: NSImageView?
     private var tintView: NSView?
     private var currentFontSize: CGFloat
+    /// Tracks the live font family (may differ from config after hot-reload).
+    private var currentFontFamily: String
+    /// Base font size from config; updated on hot-reload so zoomReset() uses the
+    /// right baseline after the user changes fontSize in the config file.
+    private var configFontSize: CGFloat
 
     private(set) var currentTitle: String = "Terminal"
     private var customTitle: String?
@@ -55,7 +61,10 @@ class TerminalViewController: NSViewController, TurmPanel {
     init(config: TurmConfig, theme: TurmTheme) {
         self.config = config
         self.theme = theme
-        currentFontSize = CGFloat(config.fontSize)
+        let baseFontSize = CGFloat(config.fontSize)
+        configFontSize = baseFontSize
+        currentFontSize = baseFontSize
+        currentFontFamily = config.fontFamily
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -106,7 +115,7 @@ class TerminalViewController: NSViewController, TurmPanel {
 
         // Apply background from config if set
         if let path = config.backgroundPath {
-            applyBackground(path: path, tint: config.backgroundTint)
+            applyBackground(path: path, tint: config.backgroundTint, opacity: config.backgroundOpacity)
         }
     }
 
@@ -139,12 +148,18 @@ class TerminalViewController: NSViewController, TurmPanel {
 
     // MARK: - Background
 
-    func applyBackground(path: String, tint: Double) {
+    func applyBackground(path: String, tint: Double, opacity: Double) {
         guard let image = NSImage(contentsOfFile: path) else { return }
         backgroundView?.image = image
+        // Use alphaValue (not isHidden) to control opacity so applyTheme always
+        // sees the background as "active" (isHidden == false) and keeps
+        // nativeBackgroundColor = .clear. Hiding via isHidden corrupts SwiftTerm's
+        // internal cell buffer: applyTheme fills it with the solid theme color,
+        // and setting nativeBackgroundColor back to .clear does not clear cells.
+        backgroundView?.alphaValue = CGFloat(opacity)
         backgroundView?.isHidden = false
         tintView?.layer?.backgroundColor = NSColor.black.withAlphaComponent(CGFloat(tint)).cgColor
-        tintView?.isHidden = false
+        tintView?.isHidden = opacity == 0
         // Make terminal layer non-opaque so the image layers composite through.
         // nativeBackgroundColor = .clear tells SwiftTerm not to fill the bg rect.
         terminalView?.layer?.isOpaque = false
@@ -167,6 +182,39 @@ class TerminalViewController: NSViewController, TurmPanel {
         tintView?.layer?.backgroundColor = NSColor.black.withAlphaComponent(CGFloat(alpha)).cgColor
     }
 
+    // MARK: - Hot-reload
+
+    /// Re-apply theme colors to a running terminal (called on config file change).
+    func applyTheme(_ newTheme: TurmTheme) {
+        guard let tv = terminalView else { return }
+        // Resolve bg color upfront so we set nativeBackgroundColor exactly once,
+        // avoiding a potential single-frame flash of the opaque theme color over a
+        // background image if SwiftTerm redraws between two assignments.
+        // backgroundView.isHidden is always false when a background image is configured
+        // (opacity=0 uses alphaValue=0, not isHidden, to avoid corrupting SwiftTerm's
+        // cell buffer). Check image != nil to detect "background configured".
+        let bgColor: NSColor = (backgroundView?.image != nil) ? .clear : newTheme.background.nsColor
+        tv.nativeBackgroundColor = bgColor
+        tv.nativeForegroundColor = newTheme.foreground.nsColor
+        let ansiColors = newTheme.palette.map { c in
+            SwiftTerm.Color(red: UInt16(c.r) * 257, green: UInt16(c.g) * 257, blue: UInt16(c.b) * 257)
+        }
+        tv.installColors(ansiColors)
+        tv.needsDisplay = true
+        // Update the stored theme so clearBackground() uses the new color.
+        theme = newTheme
+    }
+
+    /// Re-apply font family and base size to a running terminal (called on config hot-reload).
+    /// The current zoom level (currentFontSize) is preserved as-is; configFontSize is updated
+    /// so that zoomReset() snaps to the new baseline.
+    func applyFont(family: String, baseSize: CGFloat) {
+        configFontSize = baseSize
+        currentFontFamily = family
+        guard let tv = terminalView else { return }
+        configureFont(tv, size: currentFontSize, family: family)
+    }
+
     // MARK: - Configuration
 
     private func configureColors(_ tv: LocalProcessTerminalView) {
@@ -179,8 +227,8 @@ class TerminalViewController: NSViewController, TurmPanel {
         tv.installColors(ansiColors)
     }
 
-    private func configureFont(_ tv: LocalProcessTerminalView, size: CGFloat) {
-        let font = resolveFont(name: config.fontFamily, size: size)
+    private func configureFont(_ tv: LocalProcessTerminalView, size: CGFloat, family: String? = nil) {
+        let font = resolveFont(name: family ?? currentFontFamily, size: size)
         tv.font = font
     }
 
@@ -341,7 +389,7 @@ class TerminalViewController: NSViewController, TurmPanel {
     }
 
     func zoomReset() {
-        setFontSize(CGFloat(config.fontSize))
+        setFontSize(configFontSize)
     }
 
     private func setFontSize(_ size: CGFloat) {

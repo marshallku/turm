@@ -170,7 +170,7 @@ Goal: full Linux feature parity. Phase 1 MVP complete; porting remaining Linux f
 - [x] Double-click tab rename (inline editing)
 - [ ] Pane focus navigation keyboard shortcuts (next/prev pane)
 - [ ] Background random rotation (socket `background.next`, config `[background] directory`)
-- [ ] Theme hot-reload (config file watcher)
+- [x] Theme hot-reload (config file watcher — `ConfigWatcher`, kqueue DispatchSource, applies theme/font/background)
 
 **Phase 5 — Distribution & Ecosystem**
 - [ ] Session persistence / restore
