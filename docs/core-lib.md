@@ -78,14 +78,19 @@ In-process pub/sub hub for the workflow runtime (see [workflow-runtime.md](./wor
 Event { kind: String, source: String, timestamp_ms: u64, payload: Value }
 EventBus::new() / with_default_buffer(n)
 EventBus::publish(event)
-EventBus::subscribe(pattern) -> EventReceiver
-EventBus::subscribe_with_buffer(pattern, n) -> EventReceiver
+EventBus::subscribe(pattern) -> EventReceiver               // bounded (default)
+EventBus::subscribe_with_buffer(pattern, n) -> EventReceiver // bounded, custom size
+EventBus::subscribe_unbounded(pattern) -> EventReceiver     // lossless, for wire streams
 EventReceiver::try_recv() -> Option<Event>
 EventReceiver::recv() -> Option<Event>
 ```
 
 **Pattern matching:** `*` matches all, `foo.*` matches any kind starting with `foo.` (deep — `foo.bar.baz` matches), otherwise exact string match.
 
-**Delivery:** bounded `sync_channel` per subscriber (default buffer 256). On full buffer, the new event is dropped for that subscriber (`try_send`) with a warn log — publisher never blocks. Disconnected subscribers are pruned lazily on the next publish.
+**Delivery modes:**
+- **Bounded** (`subscribe` / `subscribe_with_buffer`, default 256): `sync_channel` + `try_send`. On full buffer, the new event is dropped for that subscriber with a warn log — publisher never blocks. Right choice for in-process consumers that poll (plugin panels, UI bridges).
+- **Unbounded** (`subscribe_unbounded`): plain `mpsc::channel`. Never drops; memory grows if consumer stalls. Required for external wire contracts (e.g. socket `event.subscribe`) where event loss would violate the client API. The caller must drain promptly or risk unbounded memory.
+
+Disconnected subscribers are pruned lazily on the next publish (both modes).
 
 **Thread safety:** `EventBus` is `Sync`; any thread can publish. Receivers are single-consumer (not `Clone`) — platform UIs drain via `try_recv` on their main thread (GTK: `glib::timeout_add_local`; AppKit: DispatchSource).

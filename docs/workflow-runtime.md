@@ -47,11 +47,16 @@ pub trait EventBus: Send + Sync {
 }
 ```
 
-Delivery is non-blocking via bounded `mpsc` channels per subscriber (already the pattern used in `turm-macos/EventBus.swift`). Slow subscribers never block publishers; when a subscriber's buffer is full the incoming event is dropped for that subscriber with a warn log (`try_send` semantics). Disconnected subscribers are cleaned up lazily on the next publish.
+Delivery is non-blocking via `mpsc` channels per subscriber (already the pattern used in `turm-macos/EventBus.swift`). Two modes:
+
+- **Bounded (`subscribe` / `subscribe_with_buffer`):** `sync_channel` + `try_send`. Slow subscribers never block publishers; when the buffer is full the incoming event is dropped for that subscriber with a warn log. Default for in-process consumers (plugin panels, UI bridges).
+- **Unbounded (`subscribe_unbounded`):** plain `mpsc::channel`. Never drops. Required for external wire contracts like the socket `event.subscribe` projection where dropping would silently violate the client API. Caller must drain promptly.
+
+Disconnected subscribers are cleaned up lazily on the next publish in both modes.
 
 ### Relationship to existing systems
 
-- Existing socket `event.subscribe` remains the external API; internally it becomes `bus.subscribe("*")` and serializes events to JSON over the socket.
+- Existing socket `event.subscribe` remains the external API; internally it becomes `bus.subscribe_unbounded("*")` (lossless — see delivery modes above) and serializes events to JSON over the socket.
 - VTE signal handlers, focus controllers, tab manager — all refactored to publish through the bus instead of calling socket broadcast directly.
 - Platform UIs subscribe to relevant kinds on the GTK / main thread via the existing `mpsc → glib::timeout_add_local` bridging pattern.
 

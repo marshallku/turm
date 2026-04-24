@@ -2,12 +2,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
 
 use gtk4::ApplicationWindow;
 use serde_json::json;
 
+use turm_core::event_bus::{Event as BusEvent, EventBus as CoreEventBus};
 use turm_core::protocol::{Event, Request, Response};
 
 use vte4::prelude::*;
@@ -16,8 +17,9 @@ use crate::tabs::TabManager;
 
 const WALLPAPER_CACHE: &str = ".cache/terminal-wallpapers.txt";
 const BG_MODE_FILE: &str = ".cache/turm-bg-mode";
+const BUS_SOURCE_TURM_LINUX: &str = "turm-linux";
 
-pub type EventBus = Arc<Mutex<Vec<mpsc::Sender<String>>>>;
+pub type EventBus = Arc<CoreEventBus>;
 
 pub struct SocketCommand {
     pub request: Request,
@@ -25,16 +27,15 @@ pub struct SocketCommand {
 }
 
 pub fn new_event_bus() -> EventBus {
-    Arc::new(Mutex::new(Vec::new()))
+    Arc::new(CoreEventBus::new())
 }
 
 pub fn broadcast(bus: &EventBus, event: &Event) {
-    let json = match serde_json::to_string(event) {
-        Ok(j) => j,
-        Err(_) => return,
-    };
-    let mut senders = bus.lock().unwrap();
-    senders.retain(|tx| tx.send(json.clone()).is_ok());
+    bus.publish(BusEvent::new(
+        event.event_type.clone(),
+        BUS_SOURCE_TURM_LINUX,
+        event.data.clone(),
+    ));
 }
 
 pub fn start_server(socket_path: &str, event_bus: EventBus) -> mpsc::Receiver<SocketCommand> {
@@ -107,11 +108,18 @@ pub fn start_server(socket_path: &str, event_bus: EventBus) -> mpsc::Receiver<So
                         let _ = writeln!(writer, "{}", serde_json::to_string(&resp).unwrap());
                         let _ = writer.flush();
 
-                        let (etx, erx) = mpsc::channel();
-                        event_bus.lock().unwrap().push(etx);
-
-                        for event_json in erx.iter() {
-                            if writeln!(writer, "{event_json}").is_err() {
+                        // Unbounded: external wire contract must not drop events on slow clients.
+                        let rx = event_bus.subscribe_unbounded("*");
+                        while let Some(ev) = rx.recv() {
+                            let wire = Event {
+                                event_type: ev.kind,
+                                data: ev.payload,
+                            };
+                            let json = match serde_json::to_string(&wire) {
+                                Ok(j) => j,
+                                Err(_) => continue,
+                            };
+                            if writeln!(writer, "{json}").is_err() {
                                 break;
                             }
                             if writer.flush().is_err() {

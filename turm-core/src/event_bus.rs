@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Mutex;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_SUBSCRIBER_BUFFER: usize = 256;
@@ -46,9 +46,36 @@ impl EventReceiver {
     }
 }
 
+enum SubscriberSender {
+    Bounded(SyncSender<Event>),
+    Unbounded(Sender<Event>),
+}
+
+impl SubscriberSender {
+    fn deliver(&self, event: Event) -> DeliveryResult {
+        match self {
+            Self::Bounded(tx) => match tx.try_send(event) {
+                Ok(()) => DeliveryResult::Ok,
+                Err(TrySendError::Full(_)) => DeliveryResult::Full,
+                Err(TrySendError::Disconnected(_)) => DeliveryResult::Disconnected,
+            },
+            Self::Unbounded(tx) => match tx.send(event) {
+                Ok(()) => DeliveryResult::Ok,
+                Err(_) => DeliveryResult::Disconnected,
+            },
+        }
+    }
+}
+
+enum DeliveryResult {
+    Ok,
+    Full,
+    Disconnected,
+}
+
 struct Subscriber {
     pattern: String,
-    sender: SyncSender<Event>,
+    sender: SubscriberSender,
 }
 
 pub struct EventBus {
@@ -72,11 +99,27 @@ impl EventBus {
         self.subscribe_with_buffer(pattern, self.default_buffer)
     }
 
-    pub fn subscribe_with_buffer(&self, pattern: impl Into<String>, buffer: usize) -> EventReceiver {
+    pub fn subscribe_with_buffer(
+        &self,
+        pattern: impl Into<String>,
+        buffer: usize,
+    ) -> EventReceiver {
         let (tx, rx) = sync_channel(buffer);
         self.subscribers.lock().unwrap().push(Subscriber {
             pattern: pattern.into(),
-            sender: tx,
+            sender: SubscriberSender::Bounded(tx),
+        });
+        EventReceiver { inner: rx }
+    }
+
+    /// Subscribe with an unbounded channel. Use this for external wire streams
+    /// (e.g. the socket `event.subscribe` projection) where event loss would
+    /// violate the client contract. The caller is responsible for draining.
+    pub fn subscribe_unbounded(&self, pattern: impl Into<String>) -> EventReceiver {
+        let (tx, rx) = channel();
+        self.subscribers.lock().unwrap().push(Subscriber {
+            pattern: pattern.into(),
+            sender: SubscriberSender::Unbounded(tx),
         });
         EventReceiver { inner: rx }
     }
@@ -87,9 +130,9 @@ impl EventBus {
             if !pattern_matches(&sub.pattern, &event.kind) {
                 return true;
             }
-            match sub.sender.try_send(event.clone()) {
-                Ok(()) => true,
-                Err(TrySendError::Full(_)) => {
+            match sub.sender.deliver(event.clone()) {
+                DeliveryResult::Ok => true,
+                DeliveryResult::Full => {
                     log::warn!(
                         "event bus subscriber pattern={:?} buffer full, dropping kind={:?}",
                         sub.pattern,
@@ -97,7 +140,7 @@ impl EventBus {
                     );
                     true
                 }
-                Err(TrySendError::Disconnected(_)) => false,
+                DeliveryResult::Disconnected => false,
             }
         });
     }
@@ -206,6 +249,37 @@ mod tests {
         drop(rx);
         bus.publish(mk("second"));
         assert_eq!(bus.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn unbounded_subscriber_never_drops() {
+        let bus = EventBus::new();
+        let rx = bus.subscribe_unbounded("*");
+        for i in 0..1000 {
+            bus.publish(mk(&format!("k{i}")));
+        }
+        for i in 0..1000 {
+            assert_eq!(rx.try_recv().unwrap().kind, format!("k{i}"));
+        }
+        assert!(rx.try_recv().is_none());
+    }
+
+    #[test]
+    fn unbounded_and_bounded_coexist() {
+        let bus = EventBus::new();
+        let rx_u = bus.subscribe_unbounded("*");
+        let rx_b = bus.subscribe_with_buffer("*", 2);
+        bus.publish(mk("a"));
+        bus.publish(mk("b"));
+        bus.publish(mk("c"));
+        // Unbounded got all three; bounded kept only first two.
+        assert_eq!(rx_u.try_recv().unwrap().kind, "a");
+        assert_eq!(rx_u.try_recv().unwrap().kind, "b");
+        assert_eq!(rx_u.try_recv().unwrap().kind, "c");
+        assert!(rx_u.try_recv().is_none());
+        assert_eq!(rx_b.try_recv().unwrap().kind, "a");
+        assert_eq!(rx_b.try_recv().unwrap().kind, "b");
+        assert!(rx_b.try_recv().is_none());
     }
 
     #[test]

@@ -237,27 +237,16 @@ impl PluginPanel {
         // Forward events from EventBus to webview JS
         {
             let wv = webview.clone();
-            let (etx, erx) = mpsc::channel::<String>();
-            event_bus.lock().unwrap().push(etx);
+            let rx = event_bus.subscribe("*");
 
             gtk4::glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                while let Ok(event_json) = erx.try_recv() {
-                    if let Ok(event) =
-                        serde_json::from_str::<turm_core::protocol::Event>(&event_json)
-                    {
-                        let type_escaped = serde_json::to_string(&event.event_type).unwrap();
-                        let data_json = serde_json::to_string(&event.data).unwrap();
-                        let js = format!(
-                            "if (window.turm && window.turm._handleEvent) turm._handleEvent({type_escaped}, {data_json})"
-                        );
-                        wv.evaluate_javascript(
-                            &js,
-                            None,
-                            None,
-                            gtk4::gio::Cancellable::NONE,
-                            |_| {},
-                        );
-                    }
+                while let Some(event) = rx.try_recv() {
+                    let type_escaped = serde_json::to_string(&event.kind).unwrap();
+                    let data_json = serde_json::to_string(&event.payload).unwrap();
+                    let js = format!(
+                        "if (window.turm && window.turm._handleEvent) turm._handleEvent({type_escaped}, {data_json})"
+                    );
+                    wv.evaluate_javascript(&js, None, None, gtk4::gio::Cancellable::NONE, |_| {});
                 }
                 gtk4::glib::ControlFlow::Continue
             });
