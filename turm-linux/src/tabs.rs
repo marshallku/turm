@@ -1264,11 +1264,7 @@ pub enum FocusDirection {
 }
 
 fn spawn_command(command: &str) {
-    let cmd = if command.starts_with("spawn:") {
-        &command["spawn:".len()..]
-    } else {
-        command
-    };
+    let cmd = command.strip_prefix("spawn:").unwrap_or(command);
 
     let expanded = shellexpand::tilde(cmd).to_string();
     let socket_path = format!("/tmp/turm-{}.sock", std::process::id());
@@ -1326,11 +1322,11 @@ fn check_custom_keybinding(
             spawn_command(&binding.command);
             return true;
         }
-        if let Some(ref unshifted) = unshifted_name {
-            if binding.key == *unshifted {
-                spawn_command(&binding.command);
-                return true;
-            }
+        if let Some(ref unshifted) = unshifted_name
+            && binding.key == *unshifted
+        {
+            spawn_command(&binding.command);
+            return true;
         }
     }
 

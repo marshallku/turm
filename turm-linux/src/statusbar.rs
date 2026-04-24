@@ -118,7 +118,7 @@ struct ModuleEntry {
     label: gtk4::Label,
 }
 
-fn build_section(entries: &mut Vec<ModuleEntry>) -> gtk4::Box {
+fn build_section(entries: &mut [ModuleEntry]) -> gtk4::Box {
     entries.sort_by_key(|e| e.order);
     let section = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
     for entry in entries.iter() {
