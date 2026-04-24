@@ -119,3 +119,19 @@ Using the latest Rust edition. No compatibility concerns since the project is ne
 **Decision:** Tab bar position (`top`, `bottom`, `left`, `right`) is configurable via `[tabs] position` in config. Uses `gtk4::Notebook::set_tab_pos()`. Hot-reloads on config change.
 
 **Rationale:** Vertical tabs (left/right) make better use of widescreen displays and are preferred by some users.
+
+## 16. Project Scope: Personal Workflow Runtime, Not Just Terminal
+
+**Problem:** Original framing was "terminal-centric programmable workspace" — a terminal with extensions for browser panels and AI. As integration scope grew to encompass calendars, messengers, knowledge bases, and trigger-driven automation, the "terminal with some extras" framing became inadequate. Every new integration was adding ad-hoc wiring between its source, the UI surfaces that render it, and the actions that operate on it.
+
+**Decision:** Reframe turm as a **personal workflow runtime** that surfaces through a terminal. `turm-core` gains three central abstractions — Event Bus, Action Registry, Context Service — and existing features (socket event stream, plugin system, AI agent integration) consume them rather than reimplementing per-feature wiring.
+
+**Tradeoff:** Larger architectural surface and more upfront design. The alternative — adding each integration ad-hoc — produces n×m wiring between n sources and m consumers (UI panels, triggers, AI agent, future KB indexer). The three abstractions turn this into n + m.
+
+**Scope guardrails:**
+
+- Do not build service clients from scratch when a mature web UI exists. Embed in the existing WebView panel (`webkit6` on Linux, `WKWebView` on macOS).
+- Implement native event streams only for persistent push (WebSocket gateways, webhooks). Everything else polls via provider.
+- Knowledge base is the last layer, built on the three abstractions — not a parallel system.
+
+**See:** [workflow-runtime.md](./workflow-runtime.md) for the abstraction design and first vertical PoC plan.

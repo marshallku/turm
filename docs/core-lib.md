@@ -69,3 +69,23 @@ Used by turm-cli for socket communication.
 enum TurmError { Io, Config, Protocol }
 type Result<T> = std::result::Result<T, TurmError>;
 ```
+
+### event_bus.rs
+
+In-process pub/sub hub for the workflow runtime (see [workflow-runtime.md](./workflow-runtime.md)). All internal event sources (shell signals, VTE output, service providers) publish through this bus; the socket `event.subscribe` stream becomes a projection of it.
+
+```rust
+Event { kind: String, source: String, timestamp_ms: u64, payload: Value }
+EventBus::new() / with_default_buffer(n)
+EventBus::publish(event)
+EventBus::subscribe(pattern) -> EventReceiver
+EventBus::subscribe_with_buffer(pattern, n) -> EventReceiver
+EventReceiver::try_recv() -> Option<Event>
+EventReceiver::recv() -> Option<Event>
+```
+
+**Pattern matching:** `*` matches all, `foo.*` matches any kind starting with `foo.` (deep — `foo.bar.baz` matches), otherwise exact string match.
+
+**Delivery:** bounded `sync_channel` per subscriber (default buffer 256). On full buffer, the new event is dropped for that subscriber (`try_send`) with a warn log — publisher never blocks. Disconnected subscribers are pruned lazily on the next publish.
+
+**Thread safety:** `EventBus` is `Sync`; any thread can publish. Receivers are single-consumer (not `Clone`) — platform UIs drain via `try_recv` on their main thread (GTK: `glib::timeout_add_local`; AppKit: DispatchSource).

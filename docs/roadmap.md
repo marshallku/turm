@@ -2,9 +2,9 @@
 
 ## Vision
 
-turm = terminal-centric programmable workspace.
-Terminal at the core, but extensible to browser panels, AI agents, and custom views.
-Everything controllable via API so AI agents can operate the workspace.
+turm = personal workflow runtime surfaced through a terminal.
+Terminal remains the primary surface, but `turm-core` is a workflow engine — services (calendar, messengers, docs, knowledge base), triggers, and AI agents all plug into a shared Event Bus, Action Registry, and Context Service (see [workflow-runtime.md](./workflow-runtime.md)).
+Goal: every daily work task — coding, checking meetings, processing notifications, searching personal notes — is driven from turm without context-switching.
 
 ## Implementation Phases
 
@@ -178,6 +178,23 @@ Goal: full Linux feature parity. Phase 1 MVP complete; porting remaining Linux f
 - [ ] URL detection + click-to-open
 - [ ] Plugin system (HTML/JS panels + shell commands via plugin.toml)
 - [ ] Status bar (Waybar-style modules)
+
+### Phase 8: Workflow Runtime (in progress)
+
+Reframe `turm-core` as a personal workflow runtime. See [workflow-runtime.md](./workflow-runtime.md) for design.
+
+- [x] **Event Bus** in turm-core (pub/sub with glob pattern matching, bounded mpsc delivery, drop-newest on subscriber overflow, 9 unit tests)
+- [ ] **Socket event stream refactor** — existing `event.subscribe` becomes a bus projection
+- [ ] **Action Registry** in turm-core (name → handler map, JSON Schema for AI tool use)
+- [ ] **Socket dispatcher migration** — new commands go through registry, existing match kept
+- [ ] **Context Service** (active panel, cwd, upcoming events, recent mentions, open documents)
+- [ ] **Trigger engine** — TOML rules, hot-reload, `{event.*}` / `{context.*}` interpolation
+- [ ] **Google Calendar provider** (OAuth + polling + `calendar.event_imminent` events + context contribution)
+- [ ] **First vertical PoC**: meeting-prep trigger opens meeting link tab + Notion doc in WebView panel split
+- [ ] Slack / Discord event gateway (native WebSocket adapter, Event Bus publisher)
+- [ ] Notion document provider (WebView panel with saved-documents quick switcher)
+- [ ] Command palette (Ctrl+Shift+P) over Action Registry
+- [ ] Knowledge base layer (local embeddings + semantic search over context + notes)
 
 ## Pending Cleanup
 
