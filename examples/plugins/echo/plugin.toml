@@ -1,0 +1,13 @@
+[plugin]
+name = "echo"
+title = "Echo Service Plugin"
+version = "0.1.0"
+description = "Mock service plugin used to verify the protocol shape end-to-end."
+
+[[services]]
+name = "main"
+exec = "turm-plugin-echo"
+activation = "onStartup"
+restart = "on-crash"
+provides = ["echo.ping"]
+subscribes = []

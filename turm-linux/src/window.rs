@@ -14,6 +14,7 @@ use turm_core::context::ContextService;
 use turm_core::event_bus::{Event as BusEvent, EventBus as CoreEventBus, EventReceiver};
 use turm_core::trigger::{Trigger, TriggerEngine, TriggerSink, covering_patterns};
 
+use crate::service_supervisor::ServiceSupervisor;
 use crate::trigger_sink::LiveTriggerSink;
 
 use crate::panel::Panel;
@@ -26,6 +27,15 @@ pub struct TurmWindow {
     pub tab_manager: Rc<TabManager>,
     #[allow(dead_code)]
     statusbar: Rc<StatusBar>,
+    /// `connect_destroy` calls `service_supervisor.shutdown_all()` to
+    /// tear down service plugins (send the documented `shutdown`
+    /// notification, drop writer-channel sender, SIGKILL stragglers
+    /// after a grace window). Storing the supervisor on this struct
+    /// also keeps the `Arc` count >= 1 for the duration of the
+    /// window's lifetime so runtime threads aren't suddenly orphaned
+    /// by a refcount drop.
+    #[allow(dead_code)]
+    service_supervisor: Arc<ServiceSupervisor>,
 }
 
 impl TurmWindow {
@@ -129,6 +139,24 @@ impl TurmWindow {
             );
         }
 
+        // Service plugins: spawn long-running supervised subprocesses for
+        // every `[[services]]` declaration. The supervisor walks every
+        // manifest to resolve `provides` conflicts BEFORE spawning so
+        // ownership stays deterministic (lexical name wins). Built-ins
+        // already in the registry (system.ping, system.log,
+        // context.snapshot) are reserved against plugin override.
+        // Approved actions register through the same registry as
+        // built-ins, so socket dispatch and triggers reach service
+        // plugins identically. The Arc is stored on the window struct
+        // so the lifetime is explicit.
+        let service_supervisor = ServiceSupervisor::new(
+            event_bus.clone(),
+            actions.clone(),
+            &plugins,
+            env!("CARGO_PKG_VERSION"),
+            socket::LEGACY_DISPATCH_METHODS,
+        );
+
         // Socket server (per-instance, so multiple turm windows don't collide)
         let socket_path = format!("/tmp/turm-{}.sock", std::process::id());
         let socket_rx = socket::start_server(&socket_path, event_bus.clone());
@@ -201,9 +229,15 @@ impl TurmWindow {
             glib::ControlFlow::Continue
         });
 
-        // Cleanup socket on shutdown
+        // Cleanup socket and tear down service plugins on window
+        // destroy. `shutdown_all` sends the documented `shutdown`
+        // notification, drops the writer-channel sender (so child
+        // stdin closes on EOF), and SIGKILLs anything still alive
+        // after a brief grace window — children don't outlive the GUI.
         let socket_path_cleanup = socket_path.clone();
+        let supervisor_cleanup = service_supervisor.clone();
         window.connect_destroy(move |_| {
+            supervisor_cleanup.shutdown_all();
             socket::cleanup(&socket_path_cleanup);
         });
 
@@ -211,6 +245,7 @@ impl TurmWindow {
             window,
             tab_manager,
             statusbar,
+            service_supervisor,
         }
     }
 

@@ -1955,6 +1955,8 @@ dependencies = [
  "dirs",
  "gtk4",
  "javascriptcore6",
+ "libc",
+ "log",
  "serde",
  "serde_json",
  "shellexpand",
@@ -1962,6 +1964,13 @@ dependencies = [
  "uuid",
  "vte4",
  "webkit6",
+]
+
+[[package]]
+name = "turm-plugin-echo"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

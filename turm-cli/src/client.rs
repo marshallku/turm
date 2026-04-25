@@ -10,7 +10,12 @@ pub fn send_command(
     params: serde_json::Value,
 ) -> Result<Response, Box<dyn std::error::Error>> {
     let stream = UnixStream::connect(socket_path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    // Read timeout sits just above the supervisor's action timeout
+    // (30s default) so a slow service-plugin call can return a
+    // structured `action_timeout` response over the socket instead of
+    // failing at the transport layer. Bump if the supervisor's
+    // `DEFAULT_ACTION_TIMEOUT` ever changes.
+    stream.set_read_timeout(Some(Duration::from_secs(35)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 
     let request = Request {

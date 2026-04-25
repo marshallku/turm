@@ -71,6 +71,16 @@ pub enum Command {
     /// Check for updates or update turm
     #[command(subcommand)]
     Update(UpdateCommand),
+
+    /// Invoke a registry action by name (escape hatch for any action,
+    /// including service-plugin actions like `echo.ping` or `kb.search`).
+    Call {
+        /// Action name (e.g. `system.ping`, `echo.ping`, `kb.search`)
+        method: String,
+        /// JSON params object passed verbatim to the action
+        #[arg(long, default_value = "{}")]
+        params: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -486,6 +496,7 @@ impl Cli {
             }
             .to_string(),
             Command::Update(_) => unreachable!("update commands are handled locally"),
+            Command::Call { method, .. } => method.clone(),
         }
     }
 
@@ -588,6 +599,9 @@ impl Cli {
             | Command::Update(_)
             | Command::Statusbar(_) => {
                 json!({})
+            }
+            Command::Call { params, .. } => {
+                serde_json::from_str(params).unwrap_or_else(|_| json!({}))
             }
             Command::Webview(cmd) => match cmd {
                 WebviewCommand::Open { url, mode } => json!({ "url": url, "mode": mode }),

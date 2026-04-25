@@ -20,6 +20,65 @@ const WALLPAPER_CACHE: &str = ".cache/terminal-wallpapers.txt";
 const BG_MODE_FILE: &str = ".cache/turm-bg-mode";
 const BUS_SOURCE_TURM_LINUX: &str = "turm-linux";
 
+/// Names of socket methods handled directly in the legacy `dispatch`
+/// match arm — i.e. those NOT yet migrated into `ActionRegistry`.
+/// Migration is incremental, so for now this is the second source of
+/// truth (alongside `ActionRegistry::names()`) for "core action names
+/// that a service plugin must not shadow." When a method is migrated
+/// into the registry it should be removed from this list and the
+/// registry will own its name.
+///
+/// `event.subscribe` is intentionally excluded — it's handled in the
+/// socket connection thread, not in `dispatch`, and is not a meaningful
+/// action endpoint (it owns the connection for the lifetime of a
+/// stream).
+pub const LEGACY_DISPATCH_METHODS: &[&str] = &[
+    "background.set",
+    "background.clear",
+    "background.next",
+    "background.toggle",
+    "background.set_tint",
+    "tab.new",
+    "tab.close",
+    "tab.list",
+    "tab.info",
+    "tab.rename",
+    "tabs.toggle_bar",
+    "split.horizontal",
+    "split.vertical",
+    "session.list",
+    "session.info",
+    "webview.open",
+    "webview.navigate",
+    "webview.back",
+    "webview.forward",
+    "webview.reload",
+    "webview.execute_js",
+    "webview.get_content",
+    "webview.screenshot",
+    "webview.query",
+    "webview.query_all",
+    "webview.get_styles",
+    "webview.click",
+    "webview.fill",
+    "webview.scroll",
+    "webview.page_info",
+    "webview.devtools",
+    "terminal.read",
+    "terminal.state",
+    "terminal.exec",
+    "terminal.feed",
+    "terminal.history",
+    "terminal.context",
+    "agent.approve",
+    "theme.list",
+    "plugin.list",
+    "plugin.open",
+    "statusbar.show",
+    "statusbar.hide",
+    "statusbar.toggle",
+];
+
 pub type EventBus = Arc<CoreEventBus>;
 
 pub struct SocketCommand {

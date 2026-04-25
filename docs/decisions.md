@@ -151,3 +151,15 @@ Using the latest Rust edition. No compatibility concerns since the project is ne
 - **Subprocess + stdio + newline-JSON**, NOT WASM yet. WASM (Zed's choice) adds Wasmtime runtime and WIT compilation barriers that personal-scale turm doesn't yet need.
 
 **See:** [service-plugins.md](./service-plugins.md) for full vision, decisions, rationale, research sources, and the Phase 9–13 roadmap.
+
+## 18. Service Plugin Supervisor Threading: One Reader, One Writer, Workers for Recursive Calls
+
+**Problem:** A service plugin can call back into turm via `action.invoke` — a registered action handler that the registry might dispatch to *another* service plugin (or even back to the same one). If the reader thread that just received that inbound `action.invoke` synchronously calls `registry.invoke`, and that handler resolves through `invoke_remote` on the same service, we deadlock: the response we're blocking on is the response that this very reader thread is responsible for delivering.
+
+**Decision:** Per running service, supervise with three OS threads — one writer (drains outgoing channel into child stdin), one reader (parses child stdout, dispatches frames), one stderr-tail (logs). On every inbound `action.invoke` request, the reader spawns a short-lived worker thread that runs `registry.invoke` and sends the response. Notifications (`event.publish`, `log`) stay on the reader thread because they don't recurse.
+
+For the action-handler side: `invoke_remote` blocks the calling thread on a oneshot channel up to the action timeout. Since the calling thread is the dispatcher (socket→GTK timer or trigger sink worker), this is acceptable. The supervisor's response routing is decoupled because `dispatch_invocation` spawns its own worker that owns the reply channel.
+
+**Tradeoff:** Higher thread count per service (3 + 1 wait + 1 per `subscribes` glob, plus transient workers per inbound recursive call). Justified at personal scale (a handful of services). The alternative — a single-threaded event loop with futures — would let us avoid threads but adds an async runtime dependency to `turm-linux` that nothing else needs yet.
+
+**See:** `turm-linux/src/service_supervisor.rs` for the implementation.

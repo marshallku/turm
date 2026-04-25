@@ -2,6 +2,7 @@ mod app;
 mod panel;
 mod plugin_panel;
 mod search;
+mod service_supervisor;
 
 mod socket;
 mod split;

@@ -9,6 +9,8 @@ turm is a cross-platform custom terminal emulator built with a shared Rust core 
 ```
 turm/
 ├── Cargo.toml              # Workspace root (resolver = "2", edition = "2024")
+├── turm-plugin-echo/        # Mock service plugin (verifies protocol shape)
+│   └── src/main.rs            # newline-JSON over stdio: echo.ping + system.heartbeat
 ├── turm-core/            # Shared Rust library
 │   └── src/
 │       ├── lib.rs           # Module declarations
@@ -29,6 +31,7 @@ turm/
 │   │   ├── panel.rs         # Panel trait + PanelVariant enum
 │   │   ├── webview.rs       # WebView panel (WebKitGTK 6.0)
 │   │   ├── plugin_panel.rs  # Plugin panel (WebView + JS bridge)
+│   │   ├── service_supervisor.rs  # Service plugin host: spawn/restart, init handshake, RPC
 │   │   ├── statusbar.rs     # Waybar-style status bar (WebView + plugin modules)
 │   │   └── socket.rs        # Unix socket server + command dispatcher
 │   ├── turm.desktop      # Desktop entry for system integration
@@ -111,7 +114,7 @@ turmctl ──Unix socket──► socket server (per-client thread)
                           oneshot response ──► socket thread ──► client
 ```
 
-**Supported commands**: `system.ping`, `system.log`, `context.snapshot`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `tab.rename`, `tabs.toggle_bar`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`, `terminal.read`, `terminal.state`, `terminal.exec`, `terminal.feed`, `terminal.history`, `terminal.context`, `agent.approve`, `theme.list`, `plugin.list`, `plugin.open`, `plugin.<name>.<cmd>`, `webview.open`, `webview.navigate`, `webview.back`, `webview.forward`, `webview.reload`, `webview.execute_js`, `webview.get_content`, `webview.screenshot`, `webview.query`, `webview.query_all`, `webview.get_styles`, `webview.click`, `webview.fill`, `webview.scroll`, `webview.page_info`, `webview.devtools`, `statusbar.show`, `statusbar.hide`, `statusbar.toggle`
+**Supported commands**: `system.ping`, `system.log`, `context.snapshot`, `background.set`, `background.clear`, `background.set_tint`, `background.next`, `background.toggle`, `tab.new`, `tab.close`, `tab.list`, `tab.info`, `tab.rename`, `tabs.toggle_bar`, `split.horizontal`, `split.vertical`, `session.list`, `session.info`, `event.subscribe`, `terminal.read`, `terminal.state`, `terminal.exec`, `terminal.feed`, `terminal.history`, `terminal.context`, `agent.approve`, `theme.list`, `plugin.list`, `plugin.open`, `plugin.<name>.<cmd>`, `webview.open`, `webview.navigate`, `webview.back`, `webview.forward`, `webview.reload`, `webview.execute_js`, `webview.get_content`, `webview.screenshot`, `webview.query`, `webview.query_all`, `webview.get_styles`, `webview.click`, `webview.fill`, `webview.scroll`, `webview.page_info`, `webview.devtools`, `statusbar.show`, `statusbar.hide`, `statusbar.toggle`. Plus any action declared by a service plugin via `[[services]] provides` (e.g. `echo.ping`, `kb.search`) — registered in the same `ActionRegistry` and reachable through socket dispatch's registry-first lookup.
 
 **Cleanup**: Socket file removed on window destroy.
 
@@ -282,6 +285,42 @@ window.turm = {
 **Plugin modules** are small HTML widgets rendered in the status bar. Plugins declare `[[modules]]` in their manifest with `name`, `file`, `position` (left/center/right), and `order`. All modules are aggregated into a single WebView bar with its own `turm` JS bridge.
 
 **Plugin commands** run shell scripts in a thread with `TURM_SOCKET` and `TURM_PLUGIN_DIR` env vars. Params are piped as JSON to stdin, stdout is parsed as JSON for the response.
+
+### Service plugins (long-running supervised subprocess)
+
+`[[services]]` extends the per-call `[[commands]]` model with a long-running supervised subprocess that speaks newline-JSON over stdio. See [service-plugins.md](./service-plugins.md) for end-state vision and decisions.
+
+```toml
+[[services]]
+name = "main"
+exec = "turm-plugin-echo"          # PATH or relative to plugin dir
+activation = "onStartup"           # | "onAction:kb.*" | "onEvent:slack.*"
+restart = "on-crash"               # | "always" | "never"
+provides = ["echo.ping"]           # actions this service handles
+subscribes = []                    # bus event-kind globs forwarded as event.dispatch
+```
+
+**Lifecycle.** Supervisor in `turm-linux::service_supervisor` walks every enabled plugin's manifest in lexical `[plugin].name` order BEFORE spawning anything, builds the global action-ownership table, resolves `provides` conflicts (lexical-name winner takes the action; loser keeps its other registrations). Activation rules drive spawn timing: `onStartup` eager-spawns at boot; `onAction:` activates on first matching action call (request buffered up to 64 deep during `Starting`); `onEvent:` activates on first matching bus event.
+
+**Init handshake.** turm sends `initialize` with `{turm_version, protocol_version}` (5s default timeout). Service replies with `{service_version, provides, subscribes}`. Asymmetric validation: every runtime entry must appear in the manifest (superset → drop with warn, subset → degraded mode OK). The negotiated runtime `provides` set is recorded BEFORE the state flips to `Running`, and `invoke_remote` gates dispatch against it — manifest-approved actions the runtime didn't claim return `service_degraded`, never reaching the running service. On init timeout, the supervisor SIGKILLs the recorded PID (best-effort) instead of relying on stdin EOF cooperation. Then turm sends `initialized` notification, drains buffered invocations, and spawns one bus forwarder per accepted `subscribes` glob.
+
+**Bidirectional RPC** over newline-JSON, both directions:
+
+| Direction | Method | Notes |
+|---|---|---|
+| turm → service | `initialize` | first message, awaits reply |
+| turm → service | `initialized` | notification (no id), ack of init |
+| turm → service | `action.invoke` | service is the registered handler |
+| turm → service | `event.dispatch` | matches a `subscribes` pattern |
+| service → turm | `event.publish` | publishes to bus; turm fills source/timestamp |
+| service → turm | `action.invoke` | call ANOTHER service's action; runs on a worker thread to keep the reader free for nested calls |
+| service → turm | `log` | stderr-style logging routed via turm |
+
+**Restart.** Exponential backoff on crash: 1s → 2s → 4s … capped at 60s. Reset to 1s on successful init. Policies: `on-crash` (default), `always`, `never`.
+
+**Threading per running service.** Writer thread (drains outgoing channel into child stdin), reader thread (parses child stdout, dispatches frames), stderr-tail thread (logs), wait thread (observes exit, triggers restart). Plus one forwarder thread per accepted `subscribes` pattern bridging the bus into the outgoing channel.
+
+**E2E verification** uses `turm-plugin-echo` (workspace member): registers `echo.ping`, publishes `system.heartbeat` every `TURM_ECHO_HEARTBEAT_SECS` seconds (default 30). `turmctl call echo.ping --params '{...}'` round-trips params through socket → registry → service. `turmctl event subscribe` shows the heartbeat. `pkill -KILL turm-plugin-echo` triggers supervisor restart, after which the next `echo.ping` works again.
 
 | Command | Params | Behavior |
 |---------|--------|----------|
