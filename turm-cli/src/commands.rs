@@ -21,6 +21,9 @@ pub enum Command {
     /// Ping the running turm instance
     Ping,
 
+    /// Show the current workflow context (active panel, cwd, …)
+    Context,
+
     /// Panel management
     #[command(subcommand)]
     Session(SessionCommand),
@@ -403,6 +406,7 @@ impl Cli {
     pub fn method(&self) -> String {
         match &self.command {
             Command::Ping => "system.ping".to_string(),
+            Command::Context => "context.snapshot".to_string(),
             Command::Session(cmd) => match cmd {
                 SessionCommand::List => "session.list",
                 SessionCommand::Info { .. } => "session.info",
@@ -488,6 +492,7 @@ impl Cli {
     pub fn params(&self) -> serde_json::Value {
         match &self.command {
             Command::Ping => json!({}),
+            Command::Context => json!({}),
             Command::Session(cmd) => match cmd {
                 SessionCommand::List => json!({}),
                 SessionCommand::Info { id } => json!({ "id": id }),

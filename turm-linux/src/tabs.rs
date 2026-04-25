@@ -750,10 +750,9 @@ impl TabManager {
             let panel_id = term.id.clone();
             term.terminal
                 .connect_current_directory_uri_changed(move |term| {
-                    let cwd = term.current_directory_uri().map(|u| {
-                        let s = u.to_string();
-                        s.strip_prefix("file://").unwrap_or(&s).to_string()
-                    });
+                    let cwd = term
+                        .current_directory_uri()
+                        .map(|u| crate::terminal::normalize_osc7_uri(u.as_str()));
                     broadcast(
                         &bus,
                         &Event::new(

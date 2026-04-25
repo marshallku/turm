@@ -6,8 +6,10 @@ use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, gio, glib};
 use serde_json::json;
 
-use turm_core::action_registry::ActionRegistry;
+use turm_core::action_registry::{ActionRegistry, internal_error};
 use turm_core::config::TurmConfig;
+use turm_core::context::ContextService;
+use turm_core::event_bus::EventReceiver;
 
 use crate::panel::Panel;
 use crate::socket;
@@ -44,10 +46,32 @@ impl TurmWindow {
 
         let event_bus = socket::new_event_bus();
 
+        // Context Service: live snapshot of "what the user is currently doing."
+        // Pumped from the GTK timer below; exposed via the `context.snapshot` action.
+        //
+        // Exact-match subscriptions per consumed kind (NOT `"*"` and NOT
+        // `panel.*`). High-frequency events (`terminal.output`) and any
+        // potentially-spammy sibling under the `panel.*` namespace
+        // (`panel.title_changed`) must never share a bounded buffer with the
+        // state-changing events Context actually consumes, or drop-newest
+        // semantics could silently evict them and leave context stale until a
+        // compensating event happens.
+        let context = Arc::new(ContextService::new());
+        let context_focused_rx = event_bus.subscribe("panel.focused");
+        let context_exited_rx = event_bus.subscribe("panel.exited");
+        let context_cwd_rx = event_bus.subscribe("terminal.cwd_changed");
+
         // Action Registry: shared across socket + plugin dispatch paths.
         // Migrating commands one at a time from the match arm in socket::dispatch.
         let actions = Arc::new(ActionRegistry::new());
         actions.register("system.ping", |_| Ok(json!({ "status": "ok" })));
+        {
+            let ctx = context.clone();
+            actions.register("context.snapshot", move |_| {
+                serde_json::to_value(ctx.snapshot())
+                    .map_err(|e| internal_error(format!("snapshot serialization failed: {e}")))
+            });
+        }
 
         // Plugin discovery
         let plugins = turm_core::plugin::discover_plugins();
@@ -95,14 +119,40 @@ impl TurmWindow {
         let sp = socket_path.clone();
         let sb = statusbar.clone();
         let act = actions.clone();
+        let ctx_pump = context.clone();
         glib::timeout_add_local(Duration::from_millis(50), move || {
-            // Process commands from socket server
+            // Drain bus events into ContextService BETWEEN every dispatched
+            // command (not just at the top of the tick). A dispatched command
+            // can publish events — e.g. `tab.new` → `panel.focused` — and the
+            // very next command in the same batch (e.g. `context.snapshot`)
+            // must see those events applied. A single drain at the top would
+            // leave such a same-tick reader stale for one full timer period.
+            // Order across the three receivers is not significant: focused,
+            // exited, and cwd_changed for different panels are commutative
+            // for context's state model.
+            drain_context(
+                &ctx_pump,
+                &context_focused_rx,
+                &context_exited_rx,
+                &context_cwd_rx,
+            );
             while let Ok(cmd) = socket_rx.try_recv() {
                 socket::dispatch(cmd, &mgr, &win, &sp, &sb, &act);
+                drain_context(
+                    &ctx_pump,
+                    &context_focused_rx,
+                    &context_exited_rx,
+                    &context_cwd_rx,
+                );
             }
-            // Process commands from plugin JS bridges
             while let Ok(cmd) = plugin_dispatch_rx.try_recv() {
                 socket::dispatch(cmd, &mgr, &win, &sp, &sb, &act);
+                drain_context(
+                    &ctx_pump,
+                    &context_focused_rx,
+                    &context_exited_rx,
+                    &context_cwd_rx,
+                );
             }
             glib::ControlFlow::Continue
         });
@@ -173,4 +223,21 @@ fn watch_config(
     });
 
     std::mem::forget(monitor);
+}
+
+fn drain_context(
+    ctx: &ContextService,
+    rx_focused: &EventReceiver,
+    rx_exited: &EventReceiver,
+    rx_cwd: &EventReceiver,
+) {
+    while let Some(event) = rx_focused.try_recv() {
+        ctx.apply_event(&event);
+    }
+    while let Some(event) = rx_exited.try_recv() {
+        ctx.apply_event(&event);
+    }
+    while let Some(event) = rx_cwd.try_recv() {
+        ctx.apply_event(&event);
+    }
 }

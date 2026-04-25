@@ -14,6 +14,28 @@ use turm_core::theme::Theme;
 use crate::panel::Panel;
 use crate::search::SearchBar;
 
+/// Strip the `file://hostname` prefix off an OSC 7 URI to yield a real path.
+///
+/// VTE reports the current directory as `file://<hostname>/abs/path`. Naive
+/// `strip_prefix("file://")` leaves the hostname mixed into the path
+/// (`arch/home/...`), which is what Linux event consumers were observing.
+/// Both `terminal.cwd_changed` event emission and `terminal.state` use this
+/// helper so payloads stay consistent across paths.
+pub(crate) fn normalize_osc7_uri(uri: &str) -> String {
+    if let Some(rest) = uri.strip_prefix("file://") {
+        if let Some(idx) = rest.find('/') {
+            rest[idx..].to_string()
+        } else {
+            // Bare host with no path — fall back to whatever's left so the
+            // value is at least non-empty.
+            rest.to_string()
+        }
+    } else {
+        uri.to_string()
+    }
+}
+
+
 const DEFAULT_FONT_SCALE: f64 = 1.0;
 const FONT_SCALE_STEP: f64 = 0.1;
 const MIN_FONT_SCALE: f64 = 0.3;
@@ -283,19 +305,7 @@ impl TerminalPanel {
         let cwd = self
             .terminal
             .current_directory_uri()
-            .map(|u| {
-                let s = u.to_string();
-                // file://hostname/path → /path
-                if let Some(rest) = s.strip_prefix("file://") {
-                    if let Some(idx) = rest.find('/') {
-                        rest[idx..].to_string()
-                    } else {
-                        rest.to_string()
-                    }
-                } else {
-                    s.to_string()
-                }
-            })
+            .map(|u| normalize_osc7_uri(u.as_str()))
             .or_else(|| {
                 let pid = self.child_pid.get();
                 if pid > 0 {
@@ -406,4 +416,36 @@ pub fn parse_color(hex: &str) -> gdk::RGBA {
     let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0) as f32 / 255.0;
     let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0) as f32 / 255.0;
     gdk::RGBA::new(r, g, b, 1.0)
+}
+
+#[cfg(test)]
+mod osc7_tests {
+    use super::normalize_osc7_uri;
+
+    #[test]
+    fn strips_hostname_correctly() {
+        assert_eq!(normalize_osc7_uri("file://arch/tmp"), "/tmp");
+        assert_eq!(
+            normalize_osc7_uri("file://example.com/home/user"),
+            "/home/user"
+        );
+    }
+
+    #[test]
+    fn preserves_when_already_no_host() {
+        assert_eq!(normalize_osc7_uri("file:///abs/path"), "/abs/path");
+    }
+
+    #[test]
+    fn passes_through_non_file_uris() {
+        assert_eq!(normalize_osc7_uri("/already/clean"), "/already/clean");
+        assert_eq!(normalize_osc7_uri(""), "");
+    }
+
+    #[test]
+    fn malformed_no_slash_after_host_is_preserved() {
+        // Edge: bare host, no path. Don't try to invent a value, just don't
+        // crash — return whatever's left so the caller sees a non-empty hint.
+        assert_eq!(normalize_osc7_uri("file://lonely-host"), "lonely-host");
+    }
 }
