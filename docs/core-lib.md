@@ -70,6 +70,39 @@ enum TurmError { Io, Config, Protocol }
 type Result<T> = std::result::Result<T, TurmError>;
 ```
 
+### context.rs
+
+Live snapshot of "what the user is currently doing." Reads from the Event Bus. See [workflow-runtime.md](./workflow-runtime.md) for the broader Context Service design and how triggers / AI agent / command palette consume it.
+
+```rust
+Context { active_panel: Option<String>, active_cwd: Option<PathBuf> }
+ContextService::new()
+ContextService::apply_event(&Event)
+ContextService::snapshot() -> Context
+ContextService::active_panel() -> Option<String>
+ContextService::active_cwd() -> Option<PathBuf>
+```
+
+**v1 fields:** `active_panel` and `active_cwd` only — these are the two with confirmed event-stream sources right now. Future fields (`recent_commits`, `upcoming_events`, `unread_mentions`, `open_documents`, …) land alongside their providers.
+
+**Drive pattern (caller side):** `ContextService` is platform-agnostic and does not own a thread. The caller subscribes to `EventBus` and feeds events into `apply_event`:
+
+```rust
+let rx = bus.subscribe("*");
+glib::timeout_add_local(50ms, move || {
+    while let Some(event) = rx.try_recv() { ctx.apply_event(&event); }
+    Continue
+});
+```
+
+**Consumed event kinds:** `panel.focused` (set active panel), `panel.exited` (clear that panel's state, and active if it was), `terminal.cwd_changed` (record cwd in per-panel map). All other kinds are ignored — `apply_event` is safe to call with the firehose subscription `"*"`.
+
+**Why not `tab.closed`?** Its cross-platform payload contract is `{index}` only (see [architecture.md](./architecture.md) event-stream table). turm-linux currently emits a superset that includes `panel_id`, but acting on that would couple the core primitive to Linux-incidental behavior and silently no-op on macOS. Cleanup relies on `panel.exited`, which both platforms emit consistently with `panel_id` on shell process exit. (If a tab is closed without the shell exiting, the per-panel cwd entry lingers — bounded by UUID space, GC'd on process restart.)
+
+**Per-panel cwd cache:** focus switching reflects cached cwd of the newly-focused panel immediately, without waiting for that panel to re-emit `terminal.cwd_changed`.
+
+**Thread safety:** `RwLock<Inner>`. Multiple threads can call `snapshot` / `active_*` concurrently; `apply_event` takes a short write lock. Malformed payloads are ignored, never panic.
+
 ### action_registry.rs
 
 Name → handler map for all invocable actions (see [workflow-runtime.md](./workflow-runtime.md)). v1 is synchronous; async registration will be added when the first service provider (Calendar, Slack) needs non-blocking I/O.

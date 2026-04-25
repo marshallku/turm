@@ -187,7 +187,7 @@ Reframe `turm-core` as a personal workflow runtime. See [workflow-runtime.md](./
 - [ ] **Socket event stream refactor** — existing `event.subscribe` becomes a bus projection
 - [~] **Action Registry** in turm-core (name → handler map; sync v1 with 11 unit tests incl. nested-register / nested-invoke deadlock regressions — JSON Schema + async variants deferred until first service provider needs them)
 - [ ] **Socket dispatcher migration** — new commands go through registry, existing match kept
-- [ ] **Context Service** (active panel, cwd, upcoming events, recent mentions, open documents)
+- [~] **Context Service** (v1: `active_panel` + `active_cwd` from event bus, 10 unit tests; per-panel cwd cache for instant focus-switch reflection. Other fields land with their providers)
 - [ ] **Trigger engine** — TOML rules, hot-reload, `{event.*}` / `{context.*}` interpolation
 - [ ] **Google Calendar provider** (OAuth + polling + `calendar.event_imminent` events + context contribution)
 - [ ] **First vertical PoC**: meeting-prep trigger opens meeting link tab + Notion doc in WebView panel split
