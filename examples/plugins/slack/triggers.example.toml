@@ -1,0 +1,101 @@
+# Example triggers driven by the Slack plugin (Phase 11.1 events +
+# Phase 11.2 raw firehose).
+#
+# The plugin emits THREE event kinds:
+#   - `slack.mention` — `app_mention` events (real human mentions).
+#   - `slack.dm`      — direct messages from real humans.
+#   - `slack.raw`     — every events_api frame (unfiltered firehose,
+#                       includes mention/dm/edits/joins/channel_renames/...)
+#                       intended for the archive trigger below.
+#
+# Mention/DM payload shape (Phase 11.1):
+#   { user, channel, text, ts, thread_ts, team_id, event_id }
+#
+# Raw payload shape (Phase 11.2):
+#   { event_type, channel, ts, team_id, event_id, event_json }
+#   where `event_json` is the verbatim Slack event object (blocks,
+#   files, attachments, edit-history, all of it).
+#
+# slack.post_message action (also Phase 11.2):
+#   turmctl call slack.post_message --params \
+#     '{"channel":"C123","text":"hello","thread_ts":"1700000000.000100"}'
+#   Returns {ts, channel} on success; surfaces Slack error codes
+#   (missing_scope / not_in_channel / channel_not_found / etc.)
+#   verbatim as `io_error`.
+
+# ---------------------------------------------------------------------
+# 1. Raw archive — capture EVERY Slack frame to .raw/slack/<team>/<event_id>.json
+#    so the LLM plugin (Phase 12) can ingest historical context without
+#    re-fetching. Uses `kb.ensure`, NOT `kb.append`:
+#    - `kb.ensure` is create-only — `created=false` on retry, file
+#      content unchanged. That's the dedup property we want when
+#      Slack re-delivers the same event_id.
+#    - `kb.append` with `ensure=true` would atomically create + then
+#      append the body, so a duplicate delivery would append a SECOND
+#      copy to the same file. Wrong for archive semantics.
+#
+#    Path uses event_id, NOT (channel, ts), because slack.raw fires
+#    for non-message events too — channel_renames, team_joins, etc. —
+#    and those have channel=null / ts=null. Interpolating null into
+#    a path collapses every null-keyed event into one file. event_id
+#    (`Ev0PV52K21` form) is populated for every events_api envelope
+#    and is monotonic per workspace, so the path doubles as ordering
+#    + true dedup.
+#
+#    To narrow the firehose (e.g. only archive message events,
+#    skip joins/renames), add a top-level `condition` to this trigger:
+#      condition = "event.event_type == \"message\""
+#    NOTE: `condition` is a top-level [[triggers]] field, NOT a
+#    [triggers.when] sub-key. Putting it under [triggers.when] would
+#    silently turn it into a payload-match requirement.
+# ---------------------------------------------------------------------
+[[triggers]]
+name = "slack-archive-raw"
+action = "kb.ensure"
+params = { id = ".raw/slack/{event.team_id}/{event.event_id}.json", default_template = "{event.event_json}\n" }
+
+[triggers.when]
+event_kind = "slack.raw"
+
+# ---------------------------------------------------------------------
+# 2. Mention → personal-tasks file (Phase 11.1 + 10.2 condition)
+#    Every direct mention appends to a single rolling notes file.
+#    Skip mentions where the text starts with "ack:" so the user has
+#    a way to acknowledge without re-firing follow-up triggers.
+# ---------------------------------------------------------------------
+[[triggers]]
+name = "mention-to-personal-tasks"
+action = "kb.append"
+params = { id = "threads/slack-mentions.md", content = """
+
+## {event.ts} in {event.channel} — from {event.user}
+
+{event.text}
+
+""", ensure = true }
+condition = """!(event.text == "ack: noted")"""
+
+[triggers.when]
+event_kind = "slack.mention"
+
+# ---------------------------------------------------------------------
+# 3. DM auto-reply (Phase 11.2 write action)
+#    On every DM, post a thread reply acknowledging receipt.
+#    REAL users probably want this on a smaller subset (e.g. by user_id
+#    pattern) — this is illustrative.
+# ---------------------------------------------------------------------
+# [[triggers]]
+# name = "dm-auto-ack"
+# action = "slack.post_message"
+# params = { channel = "{event.channel}", text = "got it — @marshall will reply soon", thread_ts = "{event.ts}" }
+# [triggers.when]
+# event_kind = "slack.dm"
+
+# ---------------------------------------------------------------------
+# 4. Open Slack-thread URL on mention via WebView panel (cross-plugin)
+#    Slack's deep-link format: https://<workspace>.slack.com/archives/<channel>/p<ts-without-dot>
+#    Note: that URL transform isn't expressible in the current
+#    interpolation DSL (no string ops); user would need a small wrapper
+#    action (Phase 11.3 candidate). Kept here as a "future composable"
+#    sketch.
+# ---------------------------------------------------------------------

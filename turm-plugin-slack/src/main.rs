@@ -266,7 +266,7 @@ fn handle_frame(
                 id,
                 json!({
                     "service_version": env!("CARGO_PKG_VERSION"),
-                    "provides": ["slack.auth_status"],
+                    "provides": ["slack.auth_status", "slack.post_message"],
                     "subscribes": [],
                 }),
             );
@@ -310,7 +310,7 @@ fn handle_frame(
 
 fn handle_action(
     name: &str,
-    _params: &Value,
+    params: &Value,
     config: &Config,
     store: &Arc<dyn TokenStore>,
 ) -> Result<Value, (String, String)> {
@@ -370,10 +370,61 @@ fn handle_action(
             } else { None },
         }));
     }
+    if name == "slack.post_message" {
+        return handle_post_message(params, config, store);
+    }
     Err((
         "action_not_found".to_string(),
         format!("slack plugin does not handle {name}"),
     ))
+}
+
+fn handle_post_message(
+    params: &Value,
+    config: &Config,
+    store: &Arc<dyn TokenStore>,
+) -> Result<Value, (String, String)> {
+    if config.fatal_error.is_some() {
+        return Err((
+            "not_authenticated".to_string(),
+            "slack plugin is in fatal-config state — see slack.auth_status".to_string(),
+        ));
+    }
+    // Resolve the bot token through the SAME path the Socket Mode
+    // loop uses so write actions don't accidentally diverge from
+    // read events. A user who's authenticated only via env, or
+    // only via store, gets the right token here either way.
+    let creds = socket_mode::current_credentials(config, &**store).ok_or((
+        "not_authenticated".to_string(),
+        "no Slack credentials available — run `turm-plugin-slack auth` or set env tokens"
+            .to_string(),
+    ))?;
+    let channel = params
+        .get("channel")
+        .and_then(Value::as_str)
+        .ok_or((
+            "invalid_params".to_string(),
+            "missing 'channel' (string)".to_string(),
+        ))?;
+    let text = params.get("text").and_then(Value::as_str).ok_or((
+        "invalid_params".to_string(),
+        "missing 'text' (string)".to_string(),
+    ))?;
+    let thread_ts = params.get("thread_ts").and_then(Value::as_str);
+
+    match socket_mode::post_message(&creds.bot_token, channel, text, thread_ts) {
+        Ok((ts, posted_channel)) => Ok(json!({
+            "ts": ts,
+            "channel": posted_channel,
+        })),
+        // Surface Slack's structured error codes verbatim — the
+        // common ones are documented at api.slack.com/methods/chat.postMessage:
+        // `missing_scope`, `not_in_channel`, `channel_not_found`,
+        // `is_archived`, `msg_too_long`, `rate_limited`. Caller
+        // (trigger / turmctl) can branch on these without
+        // re-parsing message strings.
+        Err(err) => Err(("io_error".to_string(), err)),
+    }
 }
 
 fn send_response(tx: &Sender<String>, id: &str, result: Value) {

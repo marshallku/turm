@@ -264,7 +264,10 @@ where
             let ack = json!({"envelope_id": envelope_id});
             ws.send(Message::Text(ack.to_string()))
                 .map_err(|e| format!("ack send: {e}"))?;
-            if let Some(slack_event) = from_events_api_payload(&payload) {
+            // One frame can produce two events: a `slack.raw`
+            // firehose entry plus an optional filtered
+            // mention/dm. Caller is expected to handle each.
+            for slack_event in from_events_api_payload(&payload) {
                 on_event(slack_event);
             }
         }
@@ -331,6 +334,71 @@ fn bootstrap_url(app_token: &str) -> Result<String, String> {
 /// typo or scope misconfiguration fails fast at setup time.
 pub fn validate_app_token(app_token: &str) -> Result<(), String> {
     bootstrap_url(app_token).map(|_url| ())
+}
+
+/// Post a message to a Slack channel or DM via `chat.postMessage`.
+/// Returns the posted message's `(ts, channel)` on success — `ts`
+/// is the canonical handle for follow-up edits/deletes/reactions.
+/// Surfaces Slack's `error` field as the Err string so callers see
+/// `missing_scope` / `not_in_channel` / `channel_not_found` etc.
+/// directly. `thread_ts` is optional; supply to thread the reply.
+pub fn post_message(
+    bot_token: &str,
+    channel: &str,
+    text: &str,
+    thread_ts: Option<&str>,
+) -> Result<(String, String), String> {
+    let mut form: Vec<(&str, &str)> = vec![("channel", channel), ("text", text)];
+    if let Some(ts) = thread_ts {
+        form.push(("thread_ts", ts));
+    }
+    let resp = match ureq::post("https://slack.com/api/chat.postMessage")
+        .set("Authorization", &format!("Bearer {bot_token}"))
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .timeout(Duration::from_secs(15))
+        .send_form(&form)
+    {
+        Ok(r) => r,
+        // 429 from Slack carries a `Retry-After` header rather than an
+        // ok=false JSON body, so it never reaches the JSON-error path
+        // below. Map it to the documented `rate_limited` code so
+        // triggers can branch on the string verbatim. We surface
+        // Retry-After in the message because callers usually want it.
+        Err(ureq::Error::Status(429, r)) => {
+            let retry = r
+                .header("Retry-After")
+                .map(str::to_string)
+                .unwrap_or_default();
+            return Err(format!(
+                "rate_limited (Retry-After: {})",
+                if retry.is_empty() { "unknown" } else { &retry }
+            ));
+        }
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            return Err(format!("chat.postMessage HTTP {code}: {body}"));
+        }
+        Err(e) => return Err(format!("chat.postMessage: {e}")),
+    };
+    let body: Value = resp
+        .into_json()
+        .map_err(|e| format!("chat.postMessage response parse: {e}"))?;
+    if !body.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        let err = body.get("error").and_then(Value::as_str).unwrap_or("?");
+        return Err(err.to_string());
+    }
+    // Slack guarantees `ts` and `channel` on success.
+    let ts = body
+        .get("ts")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "chat.postMessage response missing ts".to_string())?
+        .to_string();
+    let posted_channel = body
+        .get("channel")
+        .and_then(Value::as_str)
+        .unwrap_or(channel)
+        .to_string();
+    Ok((ts, posted_channel))
 }
 
 /// Validate a Bot User OAuth Token against `auth.test`. Returns the
