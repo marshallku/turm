@@ -11,11 +11,12 @@ pub fn send_command(
 ) -> Result<Response, Box<dyn std::error::Error>> {
     let stream = UnixStream::connect(socket_path)?;
     // Read timeout sits just above the supervisor's action timeout
-    // (30s default) so a slow service-plugin call can return a
-    // structured `action_timeout` response over the socket instead of
-    // failing at the transport layer. Bump if the supervisor's
-    // `DEFAULT_ACTION_TIMEOUT` ever changes.
-    stream.set_read_timeout(Some(Duration::from_secs(35)))?;
+    // (`DEFAULT_ACTION_TIMEOUT` in turm-linux/src/service_supervisor.rs,
+    // currently 120s for LLM completions) so a slow service-plugin
+    // call can return a structured `action_timeout` response over
+    // the socket instead of failing at the transport layer. Keep
+    // these in lockstep when the supervisor constant changes.
+    stream.set_read_timeout(Some(Duration::from_secs(130)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 
     let request = Request {

@@ -2779,6 +2779,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "turm-plugin-llm"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "keyring",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "turm-plugin-slack"
 version = "0.1.0"
 dependencies = [

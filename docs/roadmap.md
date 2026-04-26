@@ -275,10 +275,30 @@ Plugin-first foundation. See [service-plugins.md](./service-plugins.md) for full
 
 - [ ] Depends on Phase 12 LLM plugin. Uses the `.raw/slack/` archive as input, summarizes to `~/docs/threads/<topic>.md` for searchability via `kb.search`.
 
-### Phase 12: LLM plugin (when desired)
+### Phase 12: LLM plugin
 
-- [ ] `turm-plugin-llm`: registers `llm.complete`/`llm.summarize`/`llm.draft_reply`
-- [ ] Per-user secrets store, cost tracking via `llm.usage`
+**12.1 — Anthropic provider + token-usage tracking ✅**
+
+- [x] First-party `turm-plugin-llm` (Rust workspace member, Unix-only via `compile_error!` gate). Single provider for v1 (Anthropic Messages API) — multi-provider abstraction (OpenAI / local models) deferred to 12.2+ because the cost of the abstraction outweighs the value before a second provider is committed. Two run modes: `auth` validates `ANTHROPIC_API_KEY` with a 1-token messages call and persists `{api_key, validated_at}`; default RPC mode handles actions over stdio. Activation `onAction:llm.*` (lazy — no inbound stream to keep alive).
+- [x] **Single primitive `llm.complete`** with `{prompt, system?, model?, max_tokens?, temperature?, source?}`. Higher-level `summarize` / `draft_reply` collapse into trigger config patterns rather than separate actions — different system prompts on top of the same primitive. Returns `{text, model, stop_reason, usage: {input_tokens, output_tokens}}`. Refuses upfront on `fatal_error` set or no credentials available. Validates `temperature` in `[0.0, 2.0]` and `max_tokens > 0` so trigger typos surface as `invalid_params` rather than a wasted Anthropic call.
+- [x] **Single-source credential resolution** (env wins, store fallback) via `resolve_api_key` — same shape as slack/calendar. Env-key validation: must start with `sk-ant-`. `auth` subcommand exercises a real messages call so revoked / wrong-prefix keys fail at setup, not at first user-facing action.
+- [x] **Anthropic client** (`src/anthropic.rs`) — `POST /v1/messages` with `x-api-key` + `anthropic-version: 2023-06-01`. Concatenates `content[i].text` blocks into a single string for the common case (skips `tool_use` etc.). Error handling mirrors slack's prefix-match contract: 401 → `auth_error: ...`, 429 → `rate_limited (Retry-After: <s>)`, 4xx other → `messages HTTP <code>: <body>`, top-level `type: "error"` payloads → `<error_type>: <message>`. Top-level `type: "error"` is also handled in 200 responses defensively.
+- [x] **Append-only JSONL usage log** at `$XDG_DATA_HOME/turm/llm-usage-<account>.jsonl`. Each `llm.complete` writes one line `{ts, model, input_tokens, output_tokens, source?}` via single-syscall `libc::write` on `O_APPEND` fd — same atomicity contract as KB plugin's `kb.append`. Short-write surfaces as error (preserves no-interleave guarantee). Failure to append does NOT fail the action — user already paid for the tokens; stderr surfaces the issue.
+- [x] **`llm.usage` aggregation** — read JSONL, optionally filter by `since` / `until` (RFC3339) and / or `by_model`. Returns `{calls, input_tokens, output_tokens, by_model: {<model>: {calls, input_tokens, output_tokens}}, parse_errors, since, until}`. Malformed lines (truncated writes, unrelated drops) counted as `parse_errors` and skipped — aggregation never fails on a partial file. No SQLite for v1; JSONL scan is fine for personal volume (a few hundred calls / month) and the swap to SQLite is internal-only since the action protocol is unchanged.
+- [x] **No USD cost computation in v1**. Pricing changes too often for the plugin to maintain stale tables; users compute cost in their own dashboard layer using `llm.usage` output × current rates. Documented rationale in roadmap; revisit if multiple users ask for it.
+- [x] **`llm.auth_status`** — `{configured, authenticated, credentials_source, fatal_error, store_kind, account, default_model, validated_at}`. Same shape as slack.auth_status; `validated_at` only meaningful when source is "store" (env-supplied keys haven't been validated by this plugin instance — could be revoked / wrong workspace).
+- [x] **Supervisor `action_timeout` bumped 30s → 120s** to accommodate LLM completions. Documented as a Phase 12.1 trade-off — affects all plugins (none currently take more than ~100ms but the bump just changes how long a stuck plugin holds before surfacing `action_timeout`). Per-action timeout override is the right long-term fix; tracked here.
+- [x] Plugin manifest at `examples/plugins/llm/plugin.toml` with `onAction:llm.*` lazy activation. Example file `examples/plugins/llm/triggers.example.toml` explicitly documents the result-handling gap with trigger-fired `llm.complete` (response discarded — fire-and-forget; only usage record is captured) and steers users at `turmctl call llm.complete` for visible-output completions. Phase 12.3 deferred-work fixes the chained-trigger mechanism that would let the result land somewhere useful. 29 unit tests covering env parsing, account-label charset, store roundtrip + concurrent-save isolation, anthropic response parsing (text concat, tool_use skip, error payloads, missing usage), credential resolution preferring env over store, auth_status short-circuit on fatal_error, complete param validation (missing prompt / zero max_tokens / out-of-range temperature / strict-type system+model / missing key), usage filtering (model, time range, parse-error counting, malformed-ts rejection without filter, account_resolved gate).
+
+**12.2 — Multi-provider + streaming + per-action timeout ⏳ (deferred)**
+
+- [ ] OpenAI / local-model providers behind a `provider` discriminator. Token counting + cost surfaces stay uniform.
+- [ ] Streaming completions via SSE — needs a different action-protocol shape (incremental events instead of single response). Most useful for terminal-output progressive rendering.
+- [ ] Per-action timeout override at the `register_blocking` site so `llm.complete` can extend to e.g. 5min for long-context tasks without affecting the rest of the supervisor.
+
+**12.3 — Derived markdown ingestion ⏳**
+
+- [ ] Trigger-driven distillation of the slack `.raw/slack/...` archive into searchable markdown under `~/docs/threads/`. Composes `kb.search` (find related threads) + `kb.read` + `llm.complete` (synthesize) + `kb.ensure` (write derived). Needs the chained-trigger / composite-action mechanism that's been deferred since Phase 9.
 
 ### Phase 13: KB indexing upgrade (when grep is slow)
 

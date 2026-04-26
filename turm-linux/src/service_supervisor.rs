@@ -51,7 +51,16 @@ use turm_core::protocol::{Request, Response, ResponseError};
 pub const PROTOCOL_VERSION: u32 = 1;
 
 const DEFAULT_INIT_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(30);
+/// Action-reply timeout. Bumped from the original 30s in Phase 12.1
+/// because LLM completions (`turm-plugin-llm`'s `llm.complete`) can
+/// run 10-90s for long contexts, and the timeout is currently a
+/// single global on the supervisor — there's no per-action override
+/// yet. Fast-action plugins (KB grep, calendar list) finish in
+/// <100ms regardless, so the bump only changes how long a
+/// genuinely-stuck plugin call holds before surfacing
+/// `action_timeout`. Phase 12.2+ should add per-action overrides
+/// so the LLM path can extend further without affecting the rest.
+const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PENDING_BUFFER: usize = 64;
 const BACKOFF_BASE: Duration = Duration::from_secs(1);
 const BACKOFF_CAP: Duration = Duration::from_secs(60);
@@ -432,8 +441,10 @@ impl ServiceSupervisor {
                 let sup = supervisor.clone();
                 let captured_name = action_name.clone();
                 // `register_blocking`: invoke_remote can park the
-                // calling thread for up to the action timeout (30s by
-                // default) waiting on a stdio reply from the plugin
+                // calling thread for up to the action timeout
+                // (DEFAULT_ACTION_TIMEOUT — currently 120s for LLM
+                // completions; see the constant at the top of this
+                // file) waiting on a stdio reply from the plugin
                 // subprocess. Marking the entry blocking lets
                 // `ActionRegistry::try_dispatch` route this onto a
                 // worker thread so the GTK main loop and trigger

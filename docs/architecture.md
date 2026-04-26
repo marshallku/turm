@@ -22,8 +22,14 @@ turm/
 │   └── src/                    # main.rs (RPC + auth subcommand), config.rs (env),
 │                                # store.rs (two-token keyring + plaintext fallback),
 │                                # socket_mode.rs (apps.connections.open + tungstenite
-│                                # WebSocket loop + reconnect), events.rs (Slack →
-│                                # slack.mention / slack.dm event mapping with filtering)
+│                                # WebSocket loop + reconnect + chat.postMessage),
+│                                # events.rs (Slack → slack.mention / slack.dm /
+│                                # slack.raw mapping with filtering)
+├── turm-plugin-llm/        # First-party LLM plugin (Anthropic provider, Unix only)
+│   └── src/                    # main.rs (RPC + auth subcommand), config.rs (env),
+│                                # store.rs (single-token keyring + plaintext fallback),
+│                                # anthropic.rs (Messages API client), usage.rs
+│                                # (JSONL append-only usage log + aggregation)
 ├── turm-core/            # Shared Rust library
 │   └── src/
 │       ├── lib.rs           # Module declarations

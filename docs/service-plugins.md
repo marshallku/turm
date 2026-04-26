@@ -293,13 +293,32 @@ Each "Turn N.x" is one commit-sized unit (codex review + save.sh).
 **11.2 Derived markdown ingestion trigger** (depends on Phase 12 LLM plugin existing)
 - TOML trigger: on `slack.mention`, call LLM action to summarize thread, write derived markdown to `~/docs/threads/<topic>.md`
 
-### Phase 12: LLM plugin (when desired)
+### Phase 12: LLM plugin
 
-**12.1 `turm-plugin-llm`**
-- Registers `llm.complete`, `llm.summarize`, `llm.draft_reply` actions
-- Uses a configured provider (Anthropic / OpenAI / local)
-- Credentials via `~/.config/turm/secrets.toml` or env vars
-- Cost tracking action `llm.usage`
+**12.1 `turm-plugin-llm`** (shipped — see roadmap.md for details)
+- Single primitive `llm.complete` for text generation; higher-level
+  patterns (`summarize`, `draft_reply`) collapse into trigger config
+  with different system prompts on top of the same call.
+- Anthropic provider only for v1. Multi-provider abstraction
+  deferred to 12.2 — adding it before a second provider is
+  committed is premature.
+- Credentials: `ANTHROPIC_API_KEY` env or keyring (Linux Secret
+  Service / macOS Keychain), with plaintext 0600 fallback gated
+  by `TURM_LLM_REQUIRE_SECURE_STORE`. NOT the abandoned
+  `~/.config/turm/secrets.toml` design — every credential-bearing
+  plugin has converged on the keyring-or-plaintext pattern.
+- `llm.usage` aggregates token counts from a JSONL log at
+  `$XDG_DATA_HOME/turm/llm-usage-<account>.jsonl`. No USD cost
+  computation — pricing tables would go stale fast; users compute
+  cost in their own dashboards using `llm.usage` × current rates.
+- `llm.auth_status` mirrors the slack/calendar shape.
+
+**12.2 (deferred)** — multi-provider, streaming SSE, per-action
+timeout override.
+
+**12.3 (deferred)** — Phase 11.3-style derived markdown ingestion
+that composes `kb.search` + `kb.read` + `llm.complete` +
+`kb.ensure`. Needs the chained-trigger mechanism (still open).
 
 ### Phase 13: KB indexing upgrade (when grep is slow)
 
@@ -310,7 +329,7 @@ Each "Turn N.x" is one commit-sized unit (codex review + save.sh).
 
 - **Plugin distribution.** First-party plugins ship in the turm git repo as separate Cargo crates? Or fully external repos? Initially: same repo, separate crates. Distribution mechanism (registry, install command) is post-MVP.
 - **Service plugin in non-Rust languages.** Protocol over stdio is language-agnostic, so a Python or Node plugin works. Need to publish a small "protocol client" library at some point. Defer until first non-Rust contributor needs it.
-- **Authentication / per-user secrets.** Calendar OAuth, Slack tokens. Where do they live? Probably `~/.config/turm/secrets.toml` per plugin, owned by user, never logged. Defer concrete shape until Phase 10 starts.
+- ~~**Authentication / per-user secrets.** Calendar OAuth, Slack tokens. Where do they live? Probably `~/.config/turm/secrets.toml`...~~ **Resolved (Phase 10–12)**: every credential-bearing plugin uses the `keyring` crate (Linux Secret Service via D-Bus, macOS Keychain) with plaintext 0600 fallback at `$XDG_CONFIG_HOME/turm/<plugin>-token-<account>.json`. Account label scoped via env var (`TURM_<PLUGIN>_ACCOUNT`). `<PLUGIN>_REQUIRE_SECURE_STORE=1` opt-in refuses plaintext fallback. The `~/.config/turm/secrets.toml` shared-file design was abandoned — per-plugin keyring entries are simpler and prevent one plugin's credentials from leaking through another's process boundary.
 - **Multi-instance turm.** Currently socket per PID. Each turm spawns its own copies of all service plugins? Or shared daemons? For v1, per-instance. Revisit if plugin spawn cost matters.
 - **Chained triggers / composite actions.** The current trigger engine (Phase 8) maps one event to one action with `{event.*}/{context.*}` interpolation. Common workflows want a sequence — e.g. "on `calendar.event_imminent`, call `kb.ensure` → use its returned path to call `webview.open`". Three possible designs (decision deferred to Phase 9 wrap-up): (a) chained triggers — the result of one action is published as a synthetic event another trigger consumes; (b) composite actions — a built-in helper like `workflow.open_kb_doc` does both calls; (c) trigger templates with multi-step `actions = [...]`. (a) is most extensible, (c) most readable. **Until this decision is made, the Phase 10 meeting-prep slice ships strictly with `kb.ensure` only — no inline workaround.** The user opens the created file themselves; auto-open lands as a follow-up trigger config update once the chain mechanism is implemented.
 

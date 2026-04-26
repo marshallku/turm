@@ -1,0 +1,63 @@
+# Example triggers using the LLM plugin.
+#
+# llm.complete params:
+#   { prompt: required, system?, model?, max_tokens?, temperature?, source? }
+#   `source` is a free-form label written to the usage log so
+#   `llm.usage by_model=...` reports can be sliced by caller.
+#
+# llm.complete result shape:
+#   { text, model, stop_reason, usage: { input_tokens, output_tokens } }
+#
+# Token-only cost surfacing — the plugin doesn't carry pricing
+# tables. Compute cost in your own dashboard / report layer using
+# `llm.usage` output and your current per-model rates.
+
+# ---------------------------------------------------------------------
+# IMPORTANT: limitation of triggers + llm.complete (Phase 12.1)
+# ---------------------------------------------------------------------
+# Trigger-fired `llm.complete` calls run as blocking actions through
+# the supervisor's worker thread, but the trigger engine has no
+# place for the action's RESULT to land. Successful response text
+# is discarded; only the usage record is appended to the JSONL log.
+#
+# That means triggers using `llm.complete` are effectively
+# "fire-and-forget" — useful for cost tracking or
+# downstream-side-effect workflows (writing to KB via a custom
+# action that wraps llm.complete + kb.append), NOT for surfacing a
+# generated response back to the user.
+#
+# For ad-hoc summarization with visible output, use turmctl:
+#   turmctl call llm.complete --params '{"prompt":"summarize this thread: ..."}'
+#
+# Phase 12.3 (deferred) addresses the result-handling gap with a
+# chained-trigger / composite-action mechanism.
+# ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# 1. Daily usage report (manual via turmctl)
+#    turmctl call llm.usage --params '{"since":"2026-04-27T00:00:00Z"}'
+#    → {calls, input_tokens, output_tokens, by_model: {...},
+#       parse_errors, since, until}
+#
+#    Slice by model:
+#    turmctl call llm.usage --params '{"by_model":"claude-sonnet-4-6"}'
+#
+#    Slice by trigger source: aggregator doesn't filter by `source`
+#    in v1 (just `model` + time). Use the JSONL file directly:
+#    jq -s 'group_by(.source) | map({source: .[0].source, calls: length})' \
+#       ~/.local/share/turm/llm-usage-default.jsonl
+# ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# 2. (Commented sketch) Slack DM cost tracking
+#    Fire llm.complete on every slack.dm purely for usage tracking
+#    + side-effect logging. The response is discarded — see
+#    "IMPORTANT" note above. Don't enable unless you actually want
+#    to pay for one Claude call per DM received.
+# ---------------------------------------------------------------------
+# [[triggers]]
+# name = "slack-dm-cost-track"
+# action = "llm.complete"
+# params = { system = "Reply with a single word.", prompt = "{event.text}", model = "claude-sonnet-4-6", max_tokens = 50, source = "trigger:slack-dm-cost-track" }
+# [triggers.when]
+# event_kind = "slack.dm"

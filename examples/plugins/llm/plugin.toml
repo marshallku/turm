@@ -1,0 +1,34 @@
+[plugin]
+name = "llm"
+title = "LLM (Anthropic)"
+version = "0.1.0"
+description = "Anthropic Claude completions via llm.complete; tracks token usage; queryable via llm.usage."
+
+[[services]]
+name = "main"
+exec = "turm-plugin-llm"
+# onAction:llm.* is lazy — there's no inbound stream to bridge
+# (no Socket Mode equivalent for Anthropic), so the plugin only
+# spawns when a trigger or `turmctl call` invokes one of the
+# actions. Cold start is dominated by the first HTTP call anyway.
+activation = "onAction:llm.*"
+restart = "on-crash"
+provides = ["llm.complete", "llm.usage", "llm.auth_status"]
+subscribes = []
+# Required env: ANTHROPIC_API_KEY (sk-ant-...)
+# Optional env: TURM_LLM_DEFAULT_MODEL (default "claude-sonnet-4-6"),
+#               TURM_LLM_DEFAULT_MAX_TOKENS (default 4096),
+#               TURM_LLM_HTTP_TIMEOUT_SECS (default 110, max 110 —
+#                  capped 10s under the supervisor's 120s
+#                  action_timeout for spawn/init/transit margin),
+#               TURM_LLM_ACCOUNT (default "default" — keyring entry namespace),
+#               TURM_LLM_REQUIRE_SECURE_STORE (default false — refuse plaintext fallback)
+#
+# One-time setup:
+#   1. Get an API key from https://console.anthropic.com/account/keys
+#   2. Run: ANTHROPIC_API_KEY=sk-ant-... turm-plugin-llm auth
+#      (validates the key with a 1-token messages call, persists to keyring)
+#
+# After auth, you can drop the env var — RPC mode resolves the key
+# from the store on demand. Set the env again only to override
+# (e.g. testing a different account).
