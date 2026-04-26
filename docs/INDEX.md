@@ -15,6 +15,7 @@
 | [plugins.md](./plugins.md)                 | Plugin development guide + JS bridge API    | Creating plugins                          |
 | [workflow-runtime.md](./workflow-runtime.md) | Event Bus, Action Registry, Context Service design | Designing integrations, triggers, AI context |
 | [service-plugins.md](./service-plugins.md) | End-state vision, plugin-first pivot, Phase 9-13 plan | Planning beyond Phase 8 — every external integration goes here |
+| [kb-protocol.md](./kb-protocol.md)         | KB action contract (search/read/append/ensure) | Building anything that reads or writes the user's notes |
 | [roadmap.md](./roadmap.md)                 | Implementation phases, pending work         | Planning next steps                       |
 
 ## Quick Reference

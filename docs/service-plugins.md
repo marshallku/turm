@@ -120,6 +120,8 @@ Without this, `action.register` calls trickling in unordered creates ambiguity (
 ### D6: KB action protocol in turm-core, implementation in plugin
 **Decision.** `turm-core` ships a `docs/kb-protocol.md` defining what `kb.search` / `kb.read` / `kb.append` / `kb.ensure` accept and return. **No KB code in turm-core.** A first-party `turm-plugin-kb` (separate Cargo crate or even separate repo) implements grep over `~/docs`. Other backends (Notion, Obsidian) are alternative plugins.
 
+The KB `id` is a logical `<folder>/<filename>`-style path-like key, the same shape across every backend. FS backends use it as a relative path; non-FS backends translate it to their internal UUIDs / vault IDs. This shape is load-bearing for the rest of the protocol surface (parent-folder auto-create on `kb.ensure`, `.raw/` search exclusion, `kb.search.folder` prefix filter, caller-constructed ids like `meetings/{event.id}.md` in triggers) — those affordances only work if every backend agrees on the path-like shape. See [kb-protocol.md](./kb-protocol.md) Design constraints (2) and (3) for the precise contract.
+
 **Rationale.** LSP's design split: the protocol defines what's possible; servers implement it. This decouples the contract from any specific implementation. `~/docs` is the user's chosen backend; making it a plugin means others can swap it without modifying core. And the contract becomes a stable boundary that triggers, AI agents, and command palette all rely on without caring who serves it.
 
 ### D7: Backward compatibility with existing `[[commands]]`
@@ -259,9 +261,10 @@ Each "Turn N.x" is one commit-sized unit (codex review + save.sh).
 - Deterministic conflict resolution: walk all enabled plugin manifests at load time, build the global action-ownership table BEFORE spawning anything; on `provides` collision, the alphabetically-earlier `[plugin].name` wins, others skip just the conflicting entry (rest of their declarations register normally). Warn loudly with both names + the conflicting action.
 - Mock plugin: a Rust binary `turm-plugin-echo` with `activation = "onStartup"`, registers action `echo.ping`, publishes `system.heartbeat` every 30s. Practically useful as a debug heartbeat. Verifies protocol shape.
 
-**9.2 KB action protocol** (turn 2)
-- Write `docs/kb-protocol.md` defining `kb.search`/`kb.read`/`kb.append`/`kb.ensure` request/response shapes. Designed for future FTS/embedding upgrades.
-- Document `~/docs` conventions (folders: `meetings/`, `people/`, `threads/`, `notes/`; optional frontmatter)
+**9.2 KB action protocol** (turn 2) — DONE, see [kb-protocol.md](./kb-protocol.md)
+- ✅ `docs/kb-protocol.md` ships request/response shapes for `kb.search`/`kb.read`/`kb.append`/`kb.ensure` plus shared error codes. Backend-agnostic: hit `id` is the stable round-trip handle; `score` is relative-only; `path` is best-effort (FS backends populate, others null); `match_kind` is forward-compat for FTS5 / vector / semantic search.
+- ✅ Folder conventions documented (`meetings/`, `people/`, `threads/`, `notes/`, `.raw/`).
+- ✅ Forward-compat notes pin down which fields are reserved for backward-compat additions vs which require a protocol version bump.
 
 **9.3 First-party KB plugin** (turn 3)
 - `turm-plugin-kb` Rust binary: registers `kb.*` actions, grep + filename search over `~/docs`
