@@ -428,6 +428,23 @@ Same shape as Slack plugin — REST + auth + events + actions.
 
 Lightweight — no external API, just local git operations. **Worktrees, not plain branches**: keeps the original repo dir clean, supports concurrent parallel branches in different turm tabs (one tab per worktree), and `git worktree remove` cleanly tears them down when work is done. Branch-only workflows would force the user to stash/switch and lose the parallel-tabs property.
 
+**Phase 17.1 — actions + workspace config** (slice 1) — **shipped**:
+
+- [x] **`turm-plugin-git` Rust workspace member** (cross-platform: Linux + macOS, `git` is the only binary dependency). Activation `onAction:git.*` (lazy — file-watcher events come in slice 2 and will flip activation to `onStartup`).
+- [x] **Workspace config** loaded from `~/.config/turm/workspaces.toml` (override via `TURM_GIT_WORKSPACES_FILE`). Per-entry validation: name follows the KB folder charset, path canonicalized + must contain `.git/`, duplicate names rejected, default_base required, default `worktree_root = <path>-worktrees`. Missing config file is OK (returns empty workspace list).
+- [x] **Actions**: `git.list_workspaces`, `git.list_worktrees {workspace}`, `git.worktree_add {workspace, branch, base?}`, `git.worktree_remove {path, force?}`, `git.current_branch {workspace}`, `git.status {workspace?, path?}`. Every git invocation goes through `Command::arg(...)` argv vectors — no shell strings, no injection paths.
+- [x] **Branch validation** mirrors `git check-ref-format` at validate-time so bad names fail fast with a tighter error than git would emit. Rules: non-empty, no leading `-`/`/`, no `..`/`@{`/`//`, no whitespace/`~^:?*[\\`, no segment starts with `.` or ends with `.lock`.
+- [x] **`git.worktree_add.completed` event** emitted on successful worktree creation with `{workspace, path, branch, base}` payload — Phase 14.1 will generalize this to all actions, but the git plugin emits it directly today so Phase 15.2's chain composes ahead of 14.1 landing.
+- [x] **Trust-boundary defense**: `worktree_remove` and `path`-form `status` refuse paths that don't live under any configured workspace `path` or `worktree_root` (canonicalize-existing-prefix + `Path::starts_with` whole-component check) so a misconfigured trigger that interpolates the wrong field can't delete arbitrary directories or leak status from `/etc`. Computed worktree_add target also re-verified to stay under `worktree_root` as belt-and-braces.
+- [x] **22 unit tests** (real-`git` repo fixtures via tempdir): branch-name validation positive/negative, current_branch, list_worktrees porcelain v2 parse, worktree_add → list → remove round-trip, branch-exists conflict, status dirty/untracked detection, action-level forbidden-path enforcement, workspace-or-path mutex, fatal_error short-circuit.
+
+**Phase 17.2 — file-watcher events** (slice 2, deferred):
+
+- [ ] Emit `git.worktree_created` / `git.worktree_removed` / `git.branch_created` / `git.branch_deleted` / `git.checkout` from `notify` (or polling) on `.git/HEAD`, `.git/refs/heads/`, `.git/worktrees/` per workspace. Per-workspace event payload. Flip activation to `onStartup` so the watcher is alive whenever turm runs.
+- [ ] Useful for live status indicators in turm's status bar / a future git panel; not blocking for Vision Flow 3 since `worktree_add.completed` is already emitted directly by the action.
+
+Original spec for reference (kept while slice 2 is pending):
+
 - [ ] **Workspace concept**: configured via `~/.config/turm/workspaces.toml`:
   ```toml
   [[workspace]]
@@ -442,13 +459,13 @@ Lightweight — no external API, just local git operations. **Worktrees, not pla
   default_base = "main"
   ```
 - [ ] **Events** (file-watcher on `.git/HEAD`, `.git/refs/heads/`, `.git/worktrees/`): `git.worktree_created`, `git.worktree_removed`, `git.branch_created`, `git.branch_deleted`, `git.checkout`. Per-workspace event payload.
-- [ ] **Actions**:
-  - `git.list_workspaces` → `[{name, path, current_branch, worktree_count}, ...]`
-  - `git.list_worktrees {workspace}` → `[{path, branch, head_sha, locked, prunable}, ...]`
-  - `git.worktree_add {workspace, branch, base?}` → returns `{path, branch}`. Path is `<worktree_root>/<branch>` by default, sanitized for filesystem safety. Runs `git -C <path> worktree add <worktree_root>/<branch> -b <branch> <base>` (or `<base>` defaults to `default_base`).
-  - `git.worktree_remove {path}` → runs `git worktree remove <path>` (and `--force` if user explicitly requests). Refuses if the worktree has uncommitted changes unless `force=true`.
-  - `git.current_branch {workspace}` → string
-  - `git.status {workspace_or_worktree_path}` → `{ahead, behind, dirty, staged, untracked}`
+- [ ] **Actions** (return shapes shown reflect the as-shipped Phase 17.1 wire format; they're objects rather than bare arrays/strings so a `fatal_error` field can ride along on `list_workspaces` for degraded-mode discovery, and so single-result calls echo enough context for trigger interpolation):
+  - `git.list_workspaces` → `{ workspaces: [{name, path, default_base, worktree_root, current_branch, worktree_count}], fatal_error }`
+  - `git.list_worktrees {workspace}` → `{ workspace, worktrees: [{path, branch, head_sha, locked, prunable}] }`
+  - `git.worktree_add {workspace, branch, base?}` → `{ workspace, path, branch, base }`. Path is `<worktree_root>/<branch>` (slashes preserved as path components). Also publishes a `git.worktree_add.completed` bus event with the same payload so chained triggers compose.
+  - `git.worktree_remove {path, force?}` → `{ workspace, path, removed: true }`. Refuses if the worktree has uncommitted changes unless `force=true`. Refuses paths outside any configured workspace path or worktree_root.
+  - `git.current_branch {workspace}` → `{ workspace, branch }`
+  - `git.status {workspace?, path?}` → `{ path, branch, upstream, ahead, behind, staged, unstaged, untracked, dirty }`. Exactly one of `workspace` / `path` must be supplied.
 - [ ] **Branch name sanitization**: `linked_jira` like `PROJ-456` becomes `proj-456` (lowercase). Slashes from Jira hierarchies (`epic/PROJ-456`) become directory components in the worktree path so `git.worktree_add {branch="feat/PROJ-456"}` lands at `<worktree_root>/feat/PROJ-456/`.
 - [ ] **Phase 14 composability test case**: `todo.start_requested` → `git.worktree_add` (chain via `<action>.completed` event). Branch name derived from todo metadata (`linked_jira` if present, else `todo-<id>`).
 

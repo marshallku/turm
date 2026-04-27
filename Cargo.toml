@@ -10,6 +10,7 @@ members = [
     "turm-plugin-slack",
     "turm-plugin-llm",
     "turm-plugin-todo",
+    "turm-plugin-git",
 ]
 
 [workspace.package]

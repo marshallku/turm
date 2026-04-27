@@ -1,0 +1,39 @@
+# Example triggers driven by the git plugin.
+#
+# The git plugin emits one event today:
+#   git.worktree_add.completed { workspace, path, branch, base }
+#
+# It's published whenever `git.worktree_add` succeeds — not by the
+# trigger engine itself yet (Phase 14.1 will generalize this to
+# every action's `<action>.completed`), but the plugin emits it
+# directly so chained triggers compose ahead of 14.1 landing.
+#
+# Filesystem-driven events (`git.worktree_created`,
+# `git.branch_created`, `git.checkout`, ...) are slice 2 of Phase 17
+# — uncomment after that lands.
+
+# ---------------------------------------------------------------------
+# 1. Phase 15.2 sketch: when a Todo's start_requested chains into
+#    git.worktree_add and that completes, spawn a Claude session
+#    in the new worktree. Requires Phase 18 (claude.start) and
+#    Phase 14.1 (chained `<action>.completed` events from generic
+#    triggers, so the prompt can be interpolated from the original
+#    todo.start_requested payload via Phase 14.2 async correlation).
+#
+# [[triggers]]
+# name = "worktree-then-claude"
+# action = "claude.start"
+# params = { workspace_path = "{event.path}", prompt = "Working on branch {event.branch}\n" }
+# [triggers.when]
+# event_kind = "git.worktree_add.completed"
+
+# ---------------------------------------------------------------------
+# 2. KB log of every worktree creation, for end-of-day review.
+# ---------------------------------------------------------------------
+[[triggers]]
+name = "log-new-worktrees-to-kb"
+action = "kb.append"
+params = { id = "logs/worktrees.md", content = "- {event.workspace}/{event.branch} → {event.path}\n", ensure = true }
+
+[triggers.when]
+event_kind = "git.worktree_add.completed"

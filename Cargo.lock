@@ -2771,6 +2771,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "turm-plugin-git"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "turm-plugin-kb"
 version = "0.1.0"
 dependencies = [

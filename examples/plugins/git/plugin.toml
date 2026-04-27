@@ -1,0 +1,28 @@
+[plugin]
+name = "git"
+title = "Git Workspaces"
+version = "0.1.0"
+description = "Lightweight git workspace + worktree plugin. Reads workspaces from ~/.config/turm/workspaces.toml. Provides git.list_workspaces / list_worktrees / worktree_add / worktree_remove / current_branch / status — every call is an argv-vector shell-out to `git`, no shell strings."
+
+[[services]]
+name = "main"
+exec = "turm-plugin-git"
+# Lazy: actions don't need a long-lived stream, so onAction is
+# enough. File-watcher-driven events (git.worktree_created,
+# git.branch_created, etc.) are deferred to slice 2 — at that
+# point this should switch to onStartup so the watcher is alive
+# even before the first action call.
+activation = "onAction:git.*"
+restart = "on-crash"
+provides = [
+    "git.list_workspaces",
+    "git.list_worktrees",
+    "git.worktree_add",
+    "git.worktree_remove",
+    "git.current_branch",
+    "git.status",
+]
+subscribes = []
+# Optional env:
+#   TURM_GIT_WORKSPACES_FILE — override the default
+#                              ~/.config/turm/workspaces.toml location.

@@ -39,6 +39,14 @@ turm/
 │                                # delete; mirrors KB security posture), watcher.rs
 │                                # (poll-based diff emitting todo.created/changed/
 │                                # completed/deleted)
+├── turm-plugin-git/        # First-party git workspace + worktree plugin
+│   │                            # (lightweight: argv-vector shell-outs to `git`, no
+│   │                            # external API, no keyring; cross-platform Linux+macOS)
+│   └── src/                    # main.rs (RPC + actions + worktree_add.completed event),
+│                                # config.rs (~/.config/turm/workspaces.toml loader with
+│                                # canonicalization), git.rs (current_branch, list_worktrees
+│                                # porcelain v2 parser, worktree_add/remove, status v2 parser,
+│                                # validate_branch_name)
 ├── turm-core/            # Shared Rust library
 │   └── src/
 │       ├── lib.rs           # Module declarations
