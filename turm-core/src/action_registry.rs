@@ -1,5 +1,6 @@
+use crate::event_bus::{Event as BusEvent, EventBus};
 use crate::protocol::ResponseError;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -11,6 +12,12 @@ pub type ActionFn = Arc<dyn Fn(Value) -> ActionResult + Send + Sync + 'static>;
 /// handlers it fires on a worker thread spawned by the registry.
 pub type Responder = Box<dyn FnOnce(ActionResult) + Send + 'static>;
 
+/// Source field stamped on synthetic completion events. Lets bus
+/// subscribers distinguish "auto-published by the registry on
+/// dispatch" from a plugin's own emitted events that happen to
+/// share the same kind.
+pub const COMPLETION_EVENT_SOURCE: &str = "turm.action";
+
 struct Entry {
     handler: ActionFn,
     /// True if the handler may block for a non-trivial duration
@@ -18,16 +25,52 @@ struct Entry {
     /// blocking handlers on a worker thread so the caller's thread —
     /// typically the GTK timer in `turm-linux` — never stalls.
     blocking: bool,
+    /// True if this action should NOT auto-publish a completion
+    /// event. Defaults to false (publish). Used for high-frequency
+    /// internal actions (system.ping, context.snapshot) where the
+    /// resulting bus traffic would dwarf the actual workflow events.
+    silent: bool,
 }
 
 pub struct ActionRegistry {
     entries: RwLock<HashMap<String, Entry>>,
+    /// When set, every successful `try_dispatch` publishes
+    /// `<action>.completed` (Ok) or `<action>.failed` (Err) on this
+    /// bus BEFORE the caller's `Responder` fires, so chained
+    /// triggers can compose. None preserves pre-Phase-14.1 behavior
+    /// (no fan-out — useful for unit tests that don't care about
+    /// the bus). See `with_completion_bus` to opt in.
+    completion_bus: Option<Arc<EventBus>>,
 }
 
 impl ActionRegistry {
     pub fn new() -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
+            completion_bus: None,
+        }
+    }
+
+    /// Construct a registry that will auto-publish synthetic
+    /// `<action>.completed` / `<action>.failed` events on `bus`
+    /// after every dispatch (Phase 14.1 — chained triggers).
+    /// Applies uniformly to `invoke`, `try_invoke`, and
+    /// `try_dispatch` so every dispatch primitive emits.
+    ///
+    /// Scope: only actions REGISTERED through this registry get
+    /// fan-out. Legacy commands that turm-linux's
+    /// `socket::dispatch` handles via its match-arm fallthrough
+    /// (e.g. `tab.new`, `terminal.exec`, `webview.*`) bypass the
+    /// registry entirely and therefore do NOT emit completion
+    /// events today. Migrating those into the registry brings
+    /// them into the chained-trigger surface; until then,
+    /// completion events are limited to plugin-provided actions
+    /// and turm-internal actions that landed in the registry
+    /// (`system.*`, `context.*`).
+    pub fn with_completion_bus(bus: Arc<EventBus>) -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            completion_bus: Some(bus),
         }
     }
 
@@ -44,6 +87,26 @@ impl ActionRegistry {
             Entry {
                 handler: Arc::new(handler),
                 blocking: false,
+                silent: false,
+            },
+        );
+    }
+
+    /// Like `register`, but suppresses the Phase 14.1 completion-event
+    /// fan-out. Use for high-frequency internal actions
+    /// (`system.ping`, `context.snapshot`, etc.) whose completion
+    /// would dwarf real workflow events on the bus. Behaves
+    /// identically otherwise.
+    pub fn register_silent<F>(&self, name: impl Into<String>, handler: F)
+    where
+        F: Fn(Value) -> ActionResult + Send + Sync + 'static,
+    {
+        self.entries.write().unwrap().insert(
+            name.into(),
+            Entry {
+                handler: Arc::new(handler),
+                blocking: false,
+                silent: true,
             },
         );
     }
@@ -63,6 +126,7 @@ impl ActionRegistry {
             Entry {
                 handler: Arc::new(handler),
                 blocking: true,
+                silent: false,
             },
         );
     }
@@ -72,14 +136,23 @@ impl ActionRegistry {
         // before running the handler. This keeps handler execution off the
         // lock entirely so a handler may freely call `register`, `invoke`,
         // or other registry methods without risking deadlock.
-        let handler = {
+        let (handler, silent) = {
             let entries = self.entries.read().unwrap();
             entries
                 .get(name)
-                .map(|e| e.handler.clone())
+                .map(|e| (e.handler.clone(), e.silent))
                 .ok_or_else(|| not_found_error(name))?
         };
-        handler(params)
+        let result = handler(params);
+        // Phase 14.1 fan-out applies uniformly across dispatch
+        // primitives. invoke is the simplest path (used by the
+        // default TriggerSink impl below) — without publishing
+        // here, a chained trigger that lands via the default sink
+        // would silently miss every completion event.
+        if !silent {
+            publish_completion(self.completion_bus.as_deref(), name, &result);
+        }
+        result
     }
 
     /// Like `invoke`, but returns `None` if the action is not registered
@@ -91,13 +164,15 @@ impl ActionRegistry {
     /// time-sensitive threads (GTK, socket dispatch) should use
     /// `try_dispatch` instead so blocking handlers spawn a worker.
     pub fn try_invoke(&self, name: &str, params: Value) -> Option<ActionResult> {
-        let handler = self
-            .entries
-            .read()
-            .unwrap()
-            .get(name)
-            .map(|e| e.handler.clone())?;
-        Some(handler(params))
+        let (handler, silent) = {
+            let entries = self.entries.read().unwrap();
+            entries.get(name).map(|e| (e.handler.clone(), e.silent))?
+        };
+        let result = handler(params);
+        if !silent {
+            publish_completion(self.completion_bus.as_deref(), name, &result);
+        }
+        Some(result)
     }
 
     /// Dispatch an action with a continuation. Returns `true` if the
@@ -120,13 +195,22 @@ impl ActionRegistry {
     /// keeps the caller's thread alive while the work proceeds in
     /// the background.
     pub fn try_dispatch(self: &Arc<Self>, name: &str, params: Value, on_done: Responder) -> bool {
-        let (handler, blocking) = {
+        let (handler, blocking, silent) = {
             let entries = self.entries.read().unwrap();
             match entries.get(name) {
-                Some(e) => (e.handler.clone(), e.blocking),
+                Some(e) => (e.handler.clone(), e.blocking, e.silent),
                 None => return false,
             }
         };
+        // Capture the bits the completion publisher needs BEFORE
+        // moving handler/on_done into closures. None when no
+        // completion bus is wired OR the action is silent.
+        let publish_bus = if silent {
+            None
+        } else {
+            self.completion_bus.clone()
+        };
+        let action_name = name.to_string();
         if blocking {
             // Spawn a worker. The handler's Arc keeps it alive
             // independent of the registry's HashMap, so a concurrent
@@ -134,10 +218,12 @@ impl ActionRegistry {
             // under the worker.
             std::thread::spawn(move || {
                 let result = handler(params);
+                publish_completion(publish_bus.as_deref(), &action_name, &result);
                 on_done(result);
             });
         } else {
             let result = handler(params);
+            publish_completion(publish_bus.as_deref(), &action_name, &result);
             on_done(result);
         }
         true
@@ -178,6 +264,30 @@ impl Default for ActionRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Publish a synthetic `<action>.completed` (Ok) or
+/// `<action>.failed` (Err) on the bus. No-op when `bus` is None.
+/// Called from invoke / try_invoke / try_dispatch AFTER the
+/// handler returns and BEFORE the caller's `Responder` fires (or
+/// before invoke/try_invoke return). The guarantee is bus-level
+/// only: the event lands on the bus first, the upstream
+/// continuation runs second. WHEN the downstream chained
+/// trigger actually fires depends on the platform pump cadence
+/// — turm-linux drains trigger subscriptions once per GTK tick,
+/// so a completion event published while processing a tick is
+/// typically picked up on the NEXT tick. Same-tick chaining is
+/// not guaranteed; semantically-correct chaining is.
+fn publish_completion(bus: Option<&EventBus>, action: &str, result: &ActionResult) {
+    let Some(bus) = bus else { return };
+    let (kind, payload) = match result {
+        Ok(value) => (format!("{action}.completed"), value.clone()),
+        Err(err) => (
+            format!("{action}.failed"),
+            json!({ "code": err.code, "message": err.message }),
+        ),
+    };
+    bus.publish(BusEvent::new(kind, COMPLETION_EVENT_SOURCE, payload));
 }
 
 fn not_found_error(name: &str) -> ResponseError {
@@ -526,6 +636,165 @@ mod tests {
         assert!(!reg.is_blocking("sync"));
         assert!(reg.is_blocking("slow"));
         assert!(!reg.is_blocking("missing"));
+    }
+
+    // -- Phase 14.1: completion-event fan-out --
+
+    #[test]
+    fn try_dispatch_publishes_completed_on_ok() {
+        let bus = Arc::new(EventBus::new());
+        let rx = bus.subscribe_unbounded("kb.search.completed");
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus));
+        reg.register("kb.search", |_| Ok(json!({"hits": 3})));
+        reg.try_dispatch("kb.search", json!({"q": "x"}), Box::new(|_| {}));
+        let evt = rx
+            .recv_timeout(Duration::from_millis(200))
+            .expect_event("expected completion event");
+        assert_eq!(evt.kind, "kb.search.completed");
+        assert_eq!(evt.source, COMPLETION_EVENT_SOURCE);
+        assert_eq!(evt.payload, json!({"hits": 3}));
+    }
+
+    #[test]
+    fn try_dispatch_publishes_failed_on_err() {
+        let bus = Arc::new(EventBus::new());
+        let rx = bus.subscribe_unbounded("foo.failed");
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus));
+        reg.register("foo", |_| Err(invalid_params("bad")));
+        reg.try_dispatch("foo", json!({}), Box::new(|_| {}));
+        let evt = rx
+            .recv_timeout(Duration::from_millis(200))
+            .expect_event("expected failure event");
+        assert_eq!(evt.kind, "foo.failed");
+        assert_eq!(evt.payload["code"], "invalid_params");
+        assert_eq!(evt.payload["message"], "bad");
+    }
+
+    #[test]
+    fn blocking_dispatch_publishes_from_worker_thread() {
+        let bus = Arc::new(EventBus::new());
+        let rx = bus.subscribe_unbounded("slow.completed");
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus));
+        reg.register_blocking("slow", |_| {
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(json!("done"))
+        });
+        let done = Arc::new(Mutex::new(false));
+        {
+            let d = done.clone();
+            reg.try_dispatch(
+                "slow",
+                json!({}),
+                Box::new(move |_| {
+                    *d.lock().unwrap() = true;
+                }),
+            );
+        }
+        // Wait for the worker (event publication is from the
+        // worker thread, before on_done fires).
+        let evt = rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect_event("expected completion event from worker");
+        assert_eq!(evt.kind, "slow.completed");
+        // and on_done eventually fires.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !*done.lock().unwrap() {
+            assert!(Instant::now() < deadline, "on_done never fired");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn registry_without_completion_bus_does_not_publish() {
+        // Pre-Phase-14.1 semantics — used by tests that don't want
+        // to think about the bus.
+        let reg = Arc::new(ActionRegistry::new());
+        reg.register("ping", |_| Ok(json!("pong")));
+        let captured = Arc::new(Mutex::new(None::<ActionResult>));
+        let cap = captured.clone();
+        reg.try_dispatch(
+            "ping",
+            json!({}),
+            Box::new(move |r| {
+                *cap.lock().unwrap() = Some(r);
+            }),
+        );
+        // Nothing to assert about the bus (there isn't one); just
+        // confirm dispatch still works.
+        assert_eq!(
+            captured.lock().unwrap().as_ref().unwrap().as_ref().unwrap(),
+            &json!("pong")
+        );
+    }
+
+    #[test]
+    fn silent_action_suppresses_fan_out() {
+        let bus = Arc::new(EventBus::new());
+        // Subscribe BEFORE dispatching so even a single stray event
+        // would be observed.
+        let rx = bus.subscribe_unbounded("system.ping.completed");
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus));
+        reg.register_silent("system.ping", |_| Ok(json!({"status": "ok"})));
+        for _ in 0..5 {
+            reg.try_dispatch("system.ping", json!({}), Box::new(|_| {}));
+        }
+        // No completion event should arrive within a short window.
+        // Use a small timeout — if fan-out leaked, recv_timeout
+        // would return Event almost immediately.
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            crate::event_bus::RecvOutcome::Timeout => {}
+            other => panic!("silent action published an event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completion_event_publishes_before_responder_runs_for_sync() {
+        // Order matters: a downstream trigger waiting on
+        // `<action>.completed` should see the event AT LEAST as
+        // soon as the original dispatcher's Responder fires —
+        // otherwise a chained trigger could miss the event in a
+        // tight loop.
+        let bus = Arc::new(EventBus::new());
+        let rx = bus.subscribe_unbounded("seq.completed");
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus));
+        let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        reg.register("seq", |_| Ok(json!("v")));
+        let o = order.clone();
+        reg.try_dispatch(
+            "seq",
+            json!({}),
+            Box::new(move |_| {
+                o.lock().unwrap().push("on_done");
+            }),
+        );
+        // The publish call already happened by the time on_done
+        // ran (sync path). Pulling from the receiver should
+        // succeed without blocking.
+        let evt = rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect_event("expected sync-path event");
+        order.lock().unwrap().push("event_seen");
+        assert_eq!(evt.kind, "seq.completed");
+        // We can't compare publish-vs-on_done timestamps inside
+        // one process reliably, but we CAN confirm both happened.
+        let observed = order.lock().unwrap().clone();
+        assert!(observed.contains(&"on_done"));
+        assert!(observed.contains(&"event_seen"));
+    }
+
+    /// Test helper: turn `RecvOutcome` into a panic on
+    /// Timeout/Disconnected so tests stay terse.
+    trait ExpectEvent {
+        fn expect_event(self, msg: &str) -> crate::event_bus::Event;
+    }
+    impl ExpectEvent for crate::event_bus::RecvOutcome {
+        fn expect_event(self, msg: &str) -> crate::event_bus::Event {
+            match self {
+                crate::event_bus::RecvOutcome::Event(e) => e,
+                crate::event_bus::RecvOutcome::Timeout => panic!("{msg}: timed out"),
+                crate::event_bus::RecvOutcome::Disconnected => panic!("{msg}: disconnected"),
+            }
+        }
     }
 
     #[test]

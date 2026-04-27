@@ -1,24 +1,24 @@
 # Example triggers driven by the git plugin.
 #
-# The git plugin emits one event today:
-#   git.worktree_add.completed { workspace, path, branch, base }
-#
-# It's published whenever `git.worktree_add` succeeds — not by the
-# trigger engine itself yet (Phase 14.1 will generalize this to
-# every action's `<action>.completed`), but the plugin emits it
-# directly so chained triggers compose ahead of 14.1 landing.
+# The git plugin's actions all auto-publish completion events
+# via the Phase 14.1 `ActionRegistry::with_completion_bus`
+# fan-out. Every successful `git.*` dispatch surfaces as
+# `<name>.completed` on the bus with the action's return payload;
+# every failure surfaces as `<name>.failed` with `{code, message}`.
+# So the chained trigger below lights up automatically — no plugin-
+# side bookkeeping required.
 #
 # Filesystem-driven events (`git.worktree_created`,
 # `git.branch_created`, `git.checkout`, ...) are slice 2 of Phase 17
-# — uncomment after that lands.
+# and are NOT yet published — uncomment after that lands.
 
 # ---------------------------------------------------------------------
-# 1. Phase 15.2 sketch: when git.worktree_add succeeds, drop a
-#    Claude session in the new worktree. Phase 18 ships the
-#    `claude.start` action; this trigger composes git.worktree_add
-#    with it directly. The session_name is derived from the
-#    worktree path so re-running on the same worktree
-#    re-attaches the live tmux session instead of stacking dups.
+# 1. Vision Flow 3 (the killer demo): when `git.worktree_add`
+#    succeeds, drop a Claude session in the new worktree.
+#    Auto-emitted by the Phase 14.1 fan-out — no plugin-side
+#    code needed. Combine with `todo.start_requested →
+#    git.worktree_add` upstream to get the full chain
+#    `Todo start → worktree → claude tab`.
 #
 #    Note: `prompt` field is rejected by claude.start in slice 1
 #    (Phase 18.1) — it lands in 18.2 once tmux send-keys timing

@@ -9,9 +9,10 @@
 //! Actions (Phase 17 slice 1):
 //! - `git.list_workspaces`
 //! - `git.list_worktrees {workspace}`
-//! - `git.worktree_add {workspace, branch, base?}` — emits
-//!   `git.worktree_add.completed {path, branch, workspace}` on
-//!   success so future Phase 14 chained triggers can compose.
+//! - `git.worktree_add {workspace, branch, base?}` — `Ok(payload)`
+//!   triggers Phase 14.1's registry-level fan-out, which stamps
+//!   `git.worktree_add.completed` onto the bus automatically
+//!   (no plugin-side bookkeeping).
 //! - `git.worktree_remove {path, force?}` — refuses paths outside
 //!   any configured `worktree_root` so a misconfigured trigger can
 //!   never delete arbitrary directories.
@@ -134,7 +135,7 @@ fn handle_frame(frame: &Value, tx: &Sender<String>, initialized: &AtomicBool, co
                 .unwrap_or("")
                 .to_string();
             let action_params = params.get("params").cloned().unwrap_or(Value::Null);
-            let result = handle_action(&name, &action_params, config, tx);
+            let result = handle_action(&name, &action_params, config);
             match result {
                 Ok(v) => send_response(tx, id, v),
                 Err((code, msg)) => send_error(tx, id, &code, &msg),
@@ -156,16 +157,11 @@ fn handle_frame(frame: &Value, tx: &Sender<String>, initialized: &AtomicBool, co
     }
 }
 
-fn handle_action(
-    name: &str,
-    params: &Value,
-    config: &Config,
-    tx: &Sender<String>,
-) -> Result<Value, (String, String)> {
+fn handle_action(name: &str, params: &Value, config: &Config) -> Result<Value, (String, String)> {
     match name {
         "git.list_workspaces" => action_list_workspaces(config),
         "git.list_worktrees" => action_list_worktrees(params, config),
-        "git.worktree_add" => action_worktree_add(params, config, tx),
+        "git.worktree_add" => action_worktree_add(params, config),
         "git.worktree_remove" => action_worktree_remove(params, config),
         "git.current_branch" => action_current_branch(params, config),
         "git.status" => action_status(params, config),
@@ -230,11 +226,7 @@ fn action_list_worktrees(params: &Value, config: &Config) -> Result<Value, (Stri
     }))
 }
 
-fn action_worktree_add(
-    params: &Value,
-    config: &Config,
-    tx: &Sender<String>,
-) -> Result<Value, (String, String)> {
+fn action_worktree_add(params: &Value, config: &Config) -> Result<Value, (String, String)> {
     let ws = require_workspace(params, config)?;
     let branch = required_string(params, "branch")?;
     git::validate_branch_name(&branch).map_err(git_err_to_action)?;
@@ -269,22 +261,12 @@ fn action_worktree_add(
         "branch": result.branch,
         "base": base,
     });
-    // Phase 14 prep: announce completion on the bus so chained
-    // triggers (`todo.start_requested → git.worktree_add → claude.start`)
-    // can compose. Today a turm trigger that listens on
-    // `git.worktree_add.completed` already works — it just isn't
-    // automatically published by the trigger engine until 14.1
-    // lands. We publish it here so the wiring is in place.
-    let evt = json!({
-        "method": "event.publish",
-        "params": {
-            "kind": "git.worktree_add.completed",
-            "payload": payload.clone(),
-        }
-    });
-    if let Err(e) = tx.send(evt.to_string()) {
-        eprintln!("[git] failed to enqueue worktree_add.completed: {e}");
-    }
+    // Phase 14.1: `git.worktree_add.completed` is now auto-emitted
+    // by the registry on every successful dispatch (with the
+    // returned `Ok(payload)` as event payload), so we don't emit
+    // it manually here anymore. Doing both would double-fire and
+    // a downstream chained trigger would run twice for one
+    // worktree creation.
     Ok(payload)
 }
 
@@ -692,7 +674,6 @@ fn send_error(tx: &Sender<String>, id: &str, code: &str, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::channel;
     use tempfile::tempdir;
 
     fn init_repo(dir: &Path) {
@@ -764,17 +745,16 @@ default_base = "main"
     #[test]
     fn worktree_add_then_remove_round_trips_via_actions() {
         let (_d, cfg) = fixture_with_one_workspace();
-        let (tx, rx) = channel();
-        let r = action_worktree_add(
-            &json!({"workspace": "myrepo", "branch": "feature/x"}),
-            &cfg,
-            &tx,
-        )
-        .unwrap();
+        let r = action_worktree_add(&json!({"workspace": "myrepo", "branch": "feature/x"}), &cfg)
+            .unwrap();
         assert_eq!(r["branch"], "feature/x");
-        // worktree_add.completed event was published.
-        let evt: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
-        assert_eq!(evt["params"]["kind"], "git.worktree_add.completed");
+        // Phase 14.1: completion event is now auto-published by
+        // the ActionRegistry on the platform side, not by this
+        // action handler. The plugin just returns Ok(payload) and
+        // the registry stamps `git.worktree_add.completed` onto
+        // the bus from there. Verified in turm-core action_registry
+        // tests; not exercised here because the plugin under test
+        // doesn't own a registry-backed bus.
         let added_path = r["path"].as_str().unwrap().to_string();
         // List should include it.
         let listed = action_list_worktrees(&json!({"workspace": "myrepo"}), &cfg).unwrap();
@@ -852,11 +832,9 @@ default_base = "main"
         // not be passed verbatim to `git worktree add` where it
         // would be parsed as a flag.
         let (_d, cfg) = fixture_with_one_workspace();
-        let (tx, _rx) = channel();
         let err = action_worktree_add(
             &json!({"workspace": "myrepo", "branch": "feat/x", "base": "-d"}),
             &cfg,
-            &tx,
         )
         .unwrap_err();
         assert_eq!(err.0, "invalid_params", "got {err:?}");
@@ -889,34 +867,23 @@ default_base = "main"
         std::fs::create_dir_all(&ws.worktree_root).unwrap();
         let outside = tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), ws.worktree_root.join("feature")).unwrap();
-        let (tx, _rx) = channel();
-        let err = action_worktree_add(
-            &json!({"workspace": "myrepo", "branch": "feature/x"}),
-            &cfg,
-            &tx,
-        )
-        .unwrap_err();
+        let err = action_worktree_add(&json!({"workspace": "myrepo", "branch": "feature/x"}), &cfg)
+            .unwrap_err();
         assert_eq!(err.0, "forbidden", "got {err:?}");
     }
 
     #[test]
     fn worktree_add_rejects_invalid_branch_name() {
         let (_d, cfg) = fixture_with_one_workspace();
-        let (tx, _rx) = channel();
-        let err = action_worktree_add(
-            &json!({"workspace": "myrepo", "branch": "../escape"}),
-            &cfg,
-            &tx,
-        )
-        .unwrap_err();
+        let err = action_worktree_add(&json!({"workspace": "myrepo", "branch": "../escape"}), &cfg)
+            .unwrap_err();
         assert_eq!(err.0, "invalid_branch", "got {err:?}");
     }
 
     #[test]
     fn worktree_add_rejects_unknown_workspace() {
         let (_d, cfg) = fixture_with_one_workspace();
-        let (tx, _rx) = channel();
-        let err = action_worktree_add(&json!({"workspace": "no-such", "branch": "foo"}), &cfg, &tx)
+        let err = action_worktree_add(&json!({"workspace": "no-such", "branch": "foo"}), &cfg)
             .unwrap_err();
         assert_eq!(err.0, "not_found");
     }
@@ -957,8 +924,7 @@ default_base = "main"
             config_path: PathBuf::from("/tmp/x"),
             fatal_error: None,
         };
-        let (tx, _rx) = channel();
-        let err = handle_action("git.fly", &Value::Null, &cfg, &tx).unwrap_err();
+        let err = handle_action("git.fly", &Value::Null, &cfg).unwrap_err();
         assert_eq!(err.0, "action_not_found");
     }
 }

@@ -332,19 +332,26 @@ Throughout the sequence each step ships visible value; Phase 14 design lands wit
 
 The biggest architectural item — but **scheduled mid-stream, not first** (see "Recommended execution order" above). Currently the trigger engine is `event → 1 action → done`. Multi-step flows from the Vision section ("Todo start → worktree → tmux → Claude") collapse against this. Same root cause as Phase 11.3's deferred derived markdown ingestion, Phase 12.1's discarded trigger-fired `llm.complete` results, and Phase 10's deferred meeting-note auto-open. Resolving this unblocks all derived workflows.
 
-**14.1 — design decision** ([service-plugins.md](./service-plugins.md) Open Q reopened)
+**14.1 — design decision** ([service-plugins.md](./service-plugins.md) Open Q reopened) — **shipped**:
 
-Three sketches, pick one:
+Three sketches were on the table:
 - **(a) Chained triggers via synthetic events**: every action's `try_dispatch` callback publishes a synthetic `<action>.completed` (with the result payload) and `<action>.failed` event onto the bus. Downstream triggers match on those. Most extensible — the bus already exists. Most uniform — every step is just another trigger.
 - **(b) Composite actions**: a built-in `workflow.<name>` action whose handler runs a multi-step procedure inline. Easiest for hand-rolled wrappers like `workflow.start_todo` but doesn't help the user-config case.
 - **(c) Multi-step trigger TOML**: extend `[[triggers]]` with `actions = [...]` instead of single `action`. Most readable for users but less flexible (no async wait, no branching).
 
-Recommendation: **(a) primary + selective (b) for hand-rolled wrappers** when the chain is fixed. (c) loses to (a) on async-correlation cases (Slack send → wait for reply).
+**Decided: option (a) — chained triggers via synthetic events** (Phase 14.2 implementation below). (b) deferred to 14.2's `workflow.<name>` follow-up if the chained-TOML form gets unwieldy in practice; (c) discarded because it loses to (a) on async-correlation cases (Slack send → wait for reply).
 
-**14.2 — implementation**
+**14.2 — implementation** (slice 1 — action result fan-out — **shipped**):
 
-- [ ] Action result fan-out: `ActionRegistry::try_dispatch`'s callback (or `LiveTriggerSink`) publishes `<action>.completed` / `<action>.failed` on the bus on every dispatched action with the result as payload. Triggers can match on `event_kind = "kb.append.completed"` etc. Optional via `register_with_completion_event` flag so high-frequency actions (e.g. `system.ping`) don't pollute the bus.
-- [ ] Async correlation primitive: a state-aware trigger variant that waits for a specific follow-up event before firing the next step. `[[triggers]]` extension with `await = { event_kind, payload_match, timeout }` — fires after the matching follow-up arrives within timeout, payload merged into `event` for downstream interpolation. Required for "Slack send → wait for reply with Jira ticket # → next step" flows.
+- [x] **`ActionRegistry::with_completion_bus(bus)`** — opt-in constructor that wires an `EventBus` into the registry. Every `try_dispatch` then publishes `<name>.completed` (Ok, payload = action's `Value`) or `<name>.failed` (Err, payload = `{code, message}`) AFTER the handler returns and BEFORE the caller's `Responder` fires. Source field `turm.action` distinguishes auto-publication from a plugin's own emitted events.
+- [x] **Sync vs blocking semantics**: sync handlers publish from the caller thread (inline) before the `Responder` runs; blocking handlers publish from the worker thread (since the registry already runs them off-thread). Either way, `<action>.completed` lands on the bus before downstream chained triggers run on it.
+- [x] **`register_silent` opt-out** for high-frequency built-ins (`system.ping`, `context.snapshot`) so their completion events don't dwarf real workflow events on the bus. Same handler shape as `register`; only the dispatch-time fan-out differs.
+- [x] **Manual emit removed from `turm-plugin-git`**: previously the git plugin self-published `git.worktree_add.completed` from inside the action handler. With registry-level fan-out that would double-fire (once from the plugin, once from the registry). The plugin now just returns `Ok(payload)` and trusts the registry to stamp the completion event.
+- [x] **6 new unit tests** in `turm-core::action_registry` covering Ok→completed, Err→failed, blocking-from-worker-thread publication, silent suppression, no-bus pre-Phase-14.1 compatibility, and ordering (publish before `Responder` for the sync path).
+
+**14.2 — remaining slices** (deferred):
+
+- [ ] Async correlation primitive: a state-aware trigger variant that waits for a specific follow-up event before firing the next step. `[[triggers]]` extension with `await = { event_kind, payload_match, timeout }` — fires after the matching follow-up arrives within timeout, payload merged into `event` for downstream interpolation. Required for "Slack send → wait for reply with Jira ticket # → next step" flows (Vision Flow 3's optional Slack-question step).
 - [ ] `workflow.<name>` action namespace for hand-rolled multi-step Rust handlers when chained TOML gets cumbersome. Built into core or registered by a `turm-plugin-workflow` (TBD).
 
 **14.3 — backfill: re-enable derived workflows that need composition**
@@ -434,7 +441,7 @@ Lightweight — no external API, just local git operations. **Worktrees, not pla
 - [x] **Workspace config** loaded from `~/.config/turm/workspaces.toml` (override via `TURM_GIT_WORKSPACES_FILE`). Per-entry validation: name follows the KB folder charset, path canonicalized + must contain `.git/`, duplicate names rejected, default_base required, default `worktree_root = <path>-worktrees`. Missing config file is OK (returns empty workspace list).
 - [x] **Actions**: `git.list_workspaces`, `git.list_worktrees {workspace}`, `git.worktree_add {workspace, branch, base?}`, `git.worktree_remove {path, force?}`, `git.current_branch {workspace}`, `git.status {workspace?, path?}`. Every git invocation goes through `Command::arg(...)` argv vectors — no shell strings, no injection paths.
 - [x] **Branch validation** mirrors `git check-ref-format` at validate-time so bad names fail fast with a tighter error than git would emit. Rules: non-empty, no leading `-`/`/`, no `..`/`@{`/`//`, no whitespace/`~^:?*[\\`, no segment starts with `.` or ends with `.lock`.
-- [x] **`git.worktree_add.completed` event** emitted on successful worktree creation with `{workspace, path, branch, base}` payload — Phase 14.1 will generalize this to all actions, but the git plugin emits it directly today so Phase 15.2's chain composes ahead of 14.1 landing.
+- [x] **`git.worktree_add.completed` event** emitted on successful worktree creation with `{workspace, path, branch, base}` payload. Originally the git plugin self-published this event from inside its action handler (Phase 17.1 ship); with Phase 14.1's registry-level fan-out now landed, the platform's `ActionRegistry::with_completion_bus` stamps the event automatically and the manual emit was removed (would have double-fired). Net result for users: identical — the event is on the bus, chained triggers compose.
 - [x] **Trust-boundary defense**: `worktree_remove` and `path`-form `status` refuse paths that don't live under any configured workspace `path` or `worktree_root` (canonicalize-existing-prefix + `Path::starts_with` whole-component check) so a misconfigured trigger that interpolates the wrong field can't delete arbitrary directories or leak status from `/etc`. Computed worktree_add target also re-verified to stay under `worktree_root` as belt-and-braces.
 - [x] **22 unit tests** (real-`git` repo fixtures via tempdir): branch-name validation positive/negative, current_branch, list_worktrees porcelain v2 parse, worktree_add → list → remove round-trip, branch-exists conflict, status dirty/untracked detection, action-level forbidden-path enforcement, workspace-or-path mutex, fatal_error short-circuit.
 
@@ -462,7 +469,7 @@ Original spec for reference (kept while slice 2 is pending):
 - [ ] **Actions** (return shapes shown reflect the as-shipped Phase 17.1 wire format; they're objects rather than bare arrays/strings so a `fatal_error` field can ride along on `list_workspaces` for degraded-mode discovery, and so single-result calls echo enough context for trigger interpolation):
   - `git.list_workspaces` → `{ workspaces: [{name, path, default_base, worktree_root, current_branch, worktree_count}], fatal_error }`
   - `git.list_worktrees {workspace}` → `{ workspace, worktrees: [{path, branch, head_sha, locked, prunable}] }`
-  - `git.worktree_add {workspace, branch, base?}` → `{ workspace, path, branch, base }`. Path is `<worktree_root>/<branch>` (slashes preserved as path components). Also publishes a `git.worktree_add.completed` bus event with the same payload so chained triggers compose.
+  - `git.worktree_add {workspace, branch, base?}` → `{ workspace, path, branch, base }`. Path is `<worktree_root>/<branch>` (slashes preserved as path components). Phase 14.1's registry fan-out auto-publishes `git.worktree_add.completed` with the same payload so chained triggers compose.
   - `git.worktree_remove {path, force?}` → `{ workspace, path, removed: true }`. Refuses if the worktree has uncommitted changes unless `force=true`. Refuses paths outside any configured workspace path or worktree_root.
   - `git.current_branch {workspace}` → `{ workspace, branch }`
   - `git.status {workspace?, path?}` → `{ path, branch, upstream, ahead, behind, staged, unstaged, untracked, dirty }`. Exactly one of `workspace` / `path` must be supplied.

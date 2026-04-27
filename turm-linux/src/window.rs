@@ -67,8 +67,17 @@ impl TurmWindow {
 
         // Action Registry: shared across socket + plugin dispatch paths.
         // Migrating commands one at a time from the match arm in socket::dispatch.
-        let actions = Arc::new(ActionRegistry::new());
-        actions.register("system.ping", |_| Ok(json!({ "status": "ok" })));
+        // `with_completion_bus` opts the registry into Phase 14.1 — every
+        // dispatched action auto-publishes `<name>.completed` / `.failed`
+        // on the bus so chained triggers compose without each plugin
+        // having to emit completion events manually.
+        let actions = Arc::new(ActionRegistry::with_completion_bus(event_bus.clone()));
+        // High-frequency built-ins are registered "silent" so their
+        // completions don't dwarf real workflow events on the bus.
+        // system.ping fires from heartbeat probes; context.snapshot
+        // fires from anything that wants to see the active panel
+        // (potentially every keystroke in agent flows).
+        actions.register_silent("system.ping", |_| Ok(json!({ "status": "ok" })));
         actions.register("system.log", |params| {
             // Built-in observable action — useful as a trigger sink. Falls
             // back to the full params JSON when no `message` field is present
@@ -83,7 +92,7 @@ impl TurmWindow {
         });
         {
             let ctx = context.clone();
-            actions.register("context.snapshot", move |_| {
+            actions.register_silent("context.snapshot", move |_| {
                 serde_json::to_value(ctx.snapshot())
                     .map_err(|e| internal_error(format!("snapshot serialization failed: {e}")))
             });

@@ -878,4 +878,150 @@ mod tests {
         assert_eq!(t.params["event_id"], json!("{event.id}"));
         assert_eq!(t.params["lead_minutes"], json!(10));
     }
+
+    // -- Phase 14.1: end-to-end chained trigger via completion fan-out --
+
+    /// E2E for the killer-demo shape: an originating event fires
+    /// trigger A which invokes action `step1`. The registry's
+    /// completion fan-out publishes `step1.completed` onto the
+    /// bus. Trigger B on `step1.completed` invokes action `step2`,
+    /// which is what we assert ran. Without Phase 14.1 the second
+    /// step would never have anything to listen to.
+    #[test]
+    fn phase_14_1_chained_triggers_compose_via_completion_event() {
+        use crate::event_bus::{EventBus, RecvOutcome};
+        use std::time::Duration;
+
+        let bus = Arc::new(EventBus::new());
+        let registry = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+
+        // step1 returns a payload that step2 will interpolate from.
+        registry.register("step1", |params| {
+            Ok(json!({
+                "echoed": params,
+                "marker": "from-step1",
+            }))
+        });
+
+        // step2 records the params it was invoked with so we can
+        // assert the chain wired the data through correctly.
+        let step2_calls: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let recorder = step2_calls.clone();
+            registry.register("step2", move |params| {
+                recorder.lock().unwrap().push(params);
+                Ok(json!(null))
+            });
+        }
+
+        let engine = TriggerEngine::new(registry as Arc<dyn TriggerSink>);
+        engine.set_triggers(vec![
+            Trigger {
+                name: "trigger-a".into(),
+                when: WhenSpec {
+                    event_kind: "user.kicked_off".into(),
+                    payload_match: Map::new(),
+                },
+                action: "step1".into(),
+                params: json!({ "id": "{event.id}" }),
+                condition: None,
+            },
+            Trigger {
+                name: "trigger-b".into(),
+                when: WhenSpec {
+                    event_kind: "step1.completed".into(),
+                    payload_match: Map::new(),
+                },
+                action: "step2".into(),
+                params: json!({ "marker": "{event.marker}" }),
+                condition: None,
+            },
+        ]);
+
+        // Subscribe to the bus before dispatching so we can drive
+        // trigger-b ourselves on whatever the registry publishes.
+        // Pattern matches the platform layer's pump loop.
+        let rx = bus.subscribe_unbounded("step1.completed");
+
+        // Fire the originating event manually. trigger-a fires
+        // step1; the registry then auto-publishes
+        // step1.completed; we read it from the bus and re-dispatch
+        // through engine.dispatch(), which fires trigger-b.
+        let originating = Event::new("user.kicked_off", "test", json!({"id": "abc"}));
+        engine.dispatch(&originating, None);
+
+        // Pull the completion event the registry published.
+        let completion = match rx.recv_timeout(Duration::from_millis(200)) {
+            RecvOutcome::Event(e) => e,
+            other => panic!("expected step1.completed, got {other:?}"),
+        };
+        assert_eq!(completion.kind, "step1.completed");
+        assert_eq!(completion.payload["marker"], "from-step1");
+
+        // Re-pump: feed the completion event through the engine.
+        // Trigger-b matches and runs step2.
+        engine.dispatch(&completion, None);
+
+        let step2_invocations = step2_calls.lock().unwrap();
+        assert_eq!(step2_invocations.len(), 1);
+        assert_eq!(step2_invocations[0]["marker"], json!("from-step1"));
+    }
+
+    /// Same shape as above but the first step FAILS — verify
+    /// `step1.failed` lights up a recovery trigger.
+    #[test]
+    fn phase_14_1_failed_event_drives_recovery_trigger() {
+        use crate::action_registry::invalid_params;
+        use crate::event_bus::{EventBus, RecvOutcome};
+        use std::time::Duration;
+
+        let bus = Arc::new(EventBus::new());
+        let registry = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+        registry.register("flaky", |_| Err(invalid_params("nope")));
+        let recovery_calls = Arc::new(AtomicUsize::new(0));
+        {
+            let c = recovery_calls.clone();
+            registry.register("recovery", move |_| {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(json!(null))
+            });
+        }
+
+        let engine = TriggerEngine::new(registry as Arc<dyn TriggerSink>);
+        engine.set_triggers(vec![
+            Trigger {
+                name: "kick".into(),
+                when: WhenSpec {
+                    event_kind: "go".into(),
+                    payload_match: Map::new(),
+                },
+                action: "flaky".into(),
+                params: Value::Null,
+                condition: None,
+            },
+            Trigger {
+                name: "on-fail".into(),
+                when: WhenSpec {
+                    event_kind: "flaky.failed".into(),
+                    payload_match: Map::new(),
+                },
+                action: "recovery".into(),
+                params: Value::Null,
+                condition: None,
+            },
+        ]);
+
+        let rx = bus.subscribe_unbounded("flaky.failed");
+        engine.dispatch(&Event::new("go", "test", json!({})), None);
+
+        let failed = match rx.recv_timeout(Duration::from_millis(200)) {
+            RecvOutcome::Event(e) => e,
+            other => panic!("expected flaky.failed, got {other:?}"),
+        };
+        assert_eq!(failed.kind, "flaky.failed");
+        assert_eq!(failed.payload["code"], "invalid_params");
+
+        engine.dispatch(&failed, None);
+        assert_eq!(recovery_calls.load(Ordering::SeqCst), 1);
+    }
 }
