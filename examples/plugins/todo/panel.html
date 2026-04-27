@@ -108,9 +108,18 @@
     cursor: grab; user-select: none;
     display: flex; flex-direction: column; gap: 6px;
     position: relative;
+    /* Block WebKit's native HTML5 drag entirely — we use Pointer Events. */
+    -webkit-user-drag: none;
+    touch-action: none;
   }
   .card:active { cursor: grabbing; }
-  .card.dragging { opacity: 0.45; }
+  .card.dragging { opacity: 0.35; }
+  .card.drag-ghost {
+    box-shadow: 0 6px 16px rgba(0,0,0,0.4);
+    transform: rotate(-1.5deg);
+    opacity: 0.95;
+  }
+  .card.drag-ghost .actions { display: none !important; }
   .card .title { line-height: 1.3; word-break: break-word; }
   .card.done .title { color: var(--turm-subtext0); text-decoration: line-through; }
   .card .meta { display: flex; flex-wrap: wrap; gap: 4px; font-size: 0.75em; }
@@ -232,7 +241,6 @@ function render(todos) {
 function buildCard(t) {
   const card = document.createElement("div");
   card.className = `card ${t.status}`;
-  card.draggable = true;
   card.dataset.id = t.id;
   card.dataset.workspace = t.workspace;
   card.dataset.status = t.status;
@@ -265,15 +273,13 @@ function buildCard(t) {
   }
   card.appendChild(actions);
 
-  card.addEventListener("dragstart", (e) => {
-    card.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "move";
-    // setData is required for some browsers to actually fire `drop`.
-    e.dataTransfer.setData("text/plain", `${t.workspace}/${t.id}`);
-  });
-  card.addEventListener("dragend", () => {
-    card.classList.remove("dragging");
-  });
+  // Pointer Events instead of HTML5 native drag-and-drop. WebKitGTK6
+  // hands the native HTML5 `dragstart` off to the GTK drag controller,
+  // which initiates a system-level drag operation that can stall the
+  // GTK main loop and produce an "application not responding" hang
+  // before any `drop` handler runs. Pointer Events stay inside the
+  // WebView's renderer and let us paint the drag ghost ourselves.
+  card.addEventListener("pointerdown", onCardPointerDown);
 
   return card;
 }
@@ -285,40 +291,115 @@ function badge(cls, text) {
   return span;
 }
 
-// Drop targets — every column body accepts cards.
-$$(".col-body").forEach((body) => {
-  body.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    body.classList.add("drag-over");
-  });
-  body.addEventListener("dragleave", (e) => {
-    // Leaving onto a child fires dragleave with relatedTarget inside the body.
-    if (!body.contains(e.relatedTarget)) body.classList.remove("drag-over");
-  });
-  body.addEventListener("drop", async (e) => {
-    e.preventDefault();
-    body.classList.remove("drag-over");
-    const targetStatus = body.dataset.status;
-    const dragging = $(".card.dragging");
-    if (!dragging) return;
-    const id = dragging.dataset.id;
-    const workspace = dragging.dataset.workspace;
-    const prevStatus = dragging.dataset.status;
-    if (COLUMN_OF(prevStatus) === targetStatus) return;
-    moveCardOptimistic(dragging, targetStatus);
-    dragging.classList.remove("dragging");
-    try {
-      await turm.call("todo.set_status", { id, workspace, status: targetStatus });
-      // load() reconciles action-button visibility (Start only on Todo
-      // column) without waiting for the watcher's 2s poll cycle.
-      load();
-    } catch (err) {
-      alert(`set_status failed: ${err.message}`);
-      load();
-    }
-  });
-});
+// --- Pointer-event-based drag-and-drop ---
+const DRAG_THRESHOLD_PX = 5;
+let dragState = null; // { card, pointerId, startX, startY, ghost?, dragging }
+
+function onCardPointerDown(e) {
+  // Don't start a drag from action buttons (Start). They have their own click handler.
+  if (e.target.closest(".actions")) return;
+  if (e.button !== 0 && e.pointerType === "mouse") return;
+  const card = e.currentTarget;
+  dragState = {
+    card,
+    pointerId: e.pointerId,
+    startX: e.clientX, startY: e.clientY,
+    ghost: null,
+    dragging: false,
+  };
+  // Capture so we keep getting moves even if the cursor leaves the card.
+  card.setPointerCapture(e.pointerId);
+  card.addEventListener("pointermove", onCardPointerMove);
+  card.addEventListener("pointerup", onCardPointerUp);
+  card.addEventListener("pointercancel", onCardPointerCancel);
+}
+
+function onCardPointerMove(e) {
+  if (!dragState || e.pointerId !== dragState.pointerId) return;
+  const dx = e.clientX - dragState.startX;
+  const dy = e.clientY - dragState.startY;
+  if (!dragState.dragging) {
+    if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+    // Promote to active drag — build a floating ghost.
+    dragState.dragging = true;
+    const rect = dragState.card.getBoundingClientRect();
+    const ghost = dragState.card.cloneNode(true);
+    ghost.classList.add("drag-ghost");
+    ghost.style.position = "fixed";
+    ghost.style.left = rect.left + "px";
+    ghost.style.top = rect.top + "px";
+    ghost.style.width = rect.width + "px";
+    ghost.style.pointerEvents = "none";
+    ghost.style.zIndex = "9999";
+    document.body.appendChild(ghost);
+    dragState.ghost = ghost;
+    dragState.offsetX = e.clientX - rect.left;
+    dragState.offsetY = e.clientY - rect.top;
+    dragState.card.classList.add("dragging");
+  }
+  dragState.ghost.style.left = (e.clientX - dragState.offsetX) + "px";
+  dragState.ghost.style.top = (e.clientY - dragState.offsetY) + "px";
+  // Highlight the column body under the cursor.
+  const targetBody = columnBodyAt(e.clientX, e.clientY);
+  $$(".col-body").forEach(b => b.classList.toggle("drag-over", b === targetBody));
+}
+
+function onCardPointerUp(e) {
+  if (!dragState || e.pointerId !== dragState.pointerId) return;
+  const { card, ghost, dragging } = dragState;
+  cleanupDrag();
+  if (!dragging) return;
+  const targetBody = columnBodyAt(e.clientX, e.clientY);
+  if (!targetBody) return;
+  const targetStatus = targetBody.dataset.status;
+  const prevStatus = card.dataset.status;
+  if (COLUMN_OF(prevStatus) === targetStatus) return;
+  performDrop(card, targetStatus);
+}
+
+function onCardPointerCancel(e) {
+  if (!dragState || e.pointerId !== dragState.pointerId) return;
+  cleanupDrag();
+}
+
+function cleanupDrag() {
+  if (!dragState) return;
+  const { card, ghost, pointerId } = dragState;
+  if (ghost && ghost.parentNode) ghost.parentNode.removeChild(ghost);
+  card.classList.remove("dragging");
+  try { card.releasePointerCapture(pointerId); } catch {}
+  card.removeEventListener("pointermove", onCardPointerMove);
+  card.removeEventListener("pointerup", onCardPointerUp);
+  card.removeEventListener("pointercancel", onCardPointerCancel);
+  $$(".col-body").forEach(b => b.classList.remove("drag-over"));
+  dragState = null;
+}
+
+function columnBodyAt(x, y) {
+  // Use elementFromPoint and walk up to find the col-body; fall back to
+  // bounding-rect hit-test in case the cursor is over a child.
+  let el = document.elementFromPoint(x, y);
+  while (el && el !== document.body) {
+    if (el.classList && el.classList.contains("col-body")) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+async function performDrop(card, targetStatus) {
+  const id = card.dataset.id;
+  const workspace = card.dataset.workspace;
+  moveCardOptimistic(card, targetStatus);
+  try {
+    await turm.call("todo.set_status", { id, workspace, status: targetStatus });
+    // load() reconciles action-button visibility (Start only on Todo
+    // column) without waiting for the watcher's 2s poll cycle.
+    load();
+  } catch (err) {
+    alert(`set_status failed: ${err.message}`);
+    load();
+  }
+}
 
 // Move a card DOM node into the target column body and refresh counts +
 // empty-state placeholders. Used by both drag-drop and the Start button so
