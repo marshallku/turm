@@ -1,4 +1,18 @@
 #!/bin/bash
+# End-user install script: downloads turm + turmctl from the
+# latest GitHub Release tag and lays them out at ~/.local/bin (or
+# /usr/local/bin with --system).
+#
+# For LOCAL DEVELOPMENT iteration on the working tree, use
+# scripts/install-dev.sh instead — that one builds from source
+# AND keeps system + user binaries from drifting against each
+# other (a stale system binary silently shadowing a working-tree
+# fix is a real failure mode this script can't avoid).
+#
+# Plugin binaries (turm-plugin-*) are NOT in the release tarball
+# yet; if you want plugins, install them separately via
+# scripts/install-plugins.sh after running install-dev.sh, OR
+# build from source.
 set -euo pipefail
 
 REPO="marshallku/turm"

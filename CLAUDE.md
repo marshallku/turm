@@ -34,16 +34,28 @@ cargo run -p turm-linux
 cargo run -p turm-cli -- <command>
 ```
 
+## Local development install
+
+`install.sh` is for end users (downloads from GitHub Releases). For dev iteration on the working tree, use:
+
+```bash
+./scripts/install-dev.sh           # cargo build --release + sudo install /usr/local/bin/{turm,turmctl} + plugins
+./scripts/install-dev.sh --user    # ~/.local/bin instead of /usr/local/bin (no sudo)
+./scripts/install-dev.sh --restart # also pkill -x turm afterwards
+```
+
+Why this exists: `install.sh --system` puts turm at `/usr/local/bin/turm`. After that, `cargo build --release` only refreshes `target/release/turm` — the system binary stays at whatever Release version was last installed, so a fix in the working tree is silently shadowed when turm is launched via a desktop entry. The script also warns when `~/.local/bin/turm` and `/usr/local/bin/turm` are both present and differ.
+
 ## Install first-party plugins
 
-Plugins live in `examples/plugins/<name>/`; turm's runtime discovers them from `~/.config/turm/plugins/<name>/` at startup. After `cargo build --release --workspace`, run:
+`install-dev.sh` runs `install-plugins.sh` automatically. To install plugins on their own (e.g. you only changed a plugin manifest):
 
 ```bash
 ./scripts/install-plugins.sh           # all plugins with a manifest
 ./scripts/install-plugins.sh todo git  # just these two
 ```
 
-The script copies the manifest + assets and symlinks the built binary into the plugin dir. `<plugin_dir>/<exec>` takes precedence over `PATH`, which matters because turm is often launched from a desktop entry whose env doesn't include `~/.local/bin`. After installing, **restart turm** — `discover_plugins()` only runs at startup. Symptom of an outdated install: `service X is not running and X.action cannot trigger its activation (OnStartup)` from the supervisor.
+Plugins live in `examples/plugins/<name>/`; turm's runtime discovers them from `~/.config/turm/plugins/<name>/` at startup. The script copies the manifest + assets and symlinks the built binary into the plugin dir. `<plugin_dir>/<exec>` takes precedence over `PATH`, which matters because turm is often launched from a desktop entry whose env doesn't include `~/.local/bin`. After installing, **restart turm** — `discover_plugins()` only runs at startup. Symptom of an outdated install: `service X is not running and X.action cannot trigger its activation (OnStartup)` from the supervisor.
 
 ## Git Hooks
 
