@@ -228,8 +228,21 @@ fn action_list_worktrees(params: &Value, config: &Config) -> Result<Value, (Stri
 
 fn action_worktree_add(params: &Value, config: &Config) -> Result<Value, (String, String)> {
     let ws = require_workspace(params, config)?;
-    let branch = required_string(params, "branch")?;
-    git::validate_branch_name(&branch).map_err(git_err_to_action)?;
+    let raw_branch = required_string(params, "branch")?;
+    // `sanitize_jira` lowercases the branch (preserving slashes
+    // for Jira hierarchies) before validation. Used by Phase
+    // 15.2's killer-demo trigger that interpolates `linked_jira`
+    // straight from a Todo payload — the user's TOML doesn't
+    // need to pre-lowercase, the action does it. Default `false`
+    // keeps the contract for callers that pass a fully-prepared
+    // branch name (including pre-Phase-15.2 callers).
+    let sanitize_jira = optional_bool(params, "sanitize_jira")?.unwrap_or(false);
+    let branch = if sanitize_jira {
+        git::sanitize_jira_branch(&raw_branch).map_err(git_err_to_action)?
+    } else {
+        git::validate_branch_name(&raw_branch).map_err(git_err_to_action)?;
+        raw_branch
+    };
     let base = optional_string(params, "base")?.unwrap_or_else(|| ws.default_base.clone());
     let target = compute_worktree_target(ws, &branch);
     // Lexical prefix guard catches `..`-style escapes that slipped
@@ -824,6 +837,48 @@ default_base = "main"
         assert_eq!(cfg.workspaces.len(), 1);
         assert_eq!(cfg.workspaces[0].name, "outer");
         assert!(cfg.fatal_error.unwrap().contains("overlaps"));
+    }
+
+    #[test]
+    fn worktree_add_with_sanitize_jira_lowercases_branch() {
+        // Phase 15.2: a trigger interpolating `{event.linked_jira}`
+        // (e.g. "PROJ-456") with `sanitize_jira = true` lands at
+        // `<worktree_root>/proj-456` — confirms the Jira→branch
+        // transform runs end-to-end through the action surface.
+        let (_d, cfg) = fixture_with_one_workspace();
+        let r = action_worktree_add(
+            &json!({
+                "workspace": "myrepo",
+                "branch": "PROJ-456",
+                "sanitize_jira": true,
+            }),
+            &cfg,
+        )
+        .unwrap();
+        assert_eq!(r["branch"], "proj-456");
+        // Path includes the lowercased branch.
+        assert!(
+            r["path"].as_str().unwrap().ends_with("/proj-456"),
+            "got {}",
+            r["path"]
+        );
+    }
+
+    #[test]
+    fn worktree_add_without_sanitize_jira_preserves_case() {
+        // Default behavior: branch passed through verbatim. A
+        // user who ALREADY lowercased the Jira key gets the
+        // string they typed.
+        let (_d, cfg) = fixture_with_one_workspace();
+        let r = action_worktree_add(
+            &json!({
+                "workspace": "myrepo",
+                "branch": "Feature-X",
+            }),
+            &cfg,
+        )
+        .unwrap();
+        assert_eq!(r["branch"], "Feature-X");
     }
 
     #[test]

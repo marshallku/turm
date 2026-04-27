@@ -375,8 +375,9 @@ User-explicit gap. Workflow entry point AND daily-use UI surface. **Ships in two
 - UI: Plugin Panel route (HTML/JS via existing `plugin_panel.rs`). Default activation goes through `turmctl plugin open todo`; keybinding is left to the user's `[keybindings]` config since `Ctrl+Shift+T` is already "new tab". Native GTK widget is the fallback if WebView UX proves insufficient.
 - Example triggers: `calendar.event_imminent → todo.create`, `jira.ticket_assigned → todo.create` — both work with current single-action engine.
 
-**Slice 2 — composite `start` workflow** (depends on Phase 14.1):
-- `todo.start_requested → git.worktree_add → claude.start` chained via `<action>.completed` events. The pre-filled prompt is composed from Todo title+body, Jira summary (via `jira.get_ticket` if `linked_jira`), and linked KB notes (via `kb.read` on each `linked_kb` path) — fan-in is expressed as further chained triggers, joined with the original `todo.start_requested` payload via Phase 14.2 async correlation. Result: clicking "start" on a Todo pops a turm tab with claude-code running inside a tmux session in a fresh worktree, prompt pre-filled with full task context. This is Vision Flow 3 (the "killer demo") working end-to-end.
+**Slice 2 — composite `start` workflow** (depends on Phase 14.1) — **shipped, partial**:
+- `todo.start_requested → git.worktree_add → claude.start` chains via Phase 14.1's auto-published `<action>.completed` events. Three trigger rows in `examples/triggers/vision-flow-3.toml` (with-jira / without-jira branches for `git.worktree_add`, then `git.worktree_add.completed → claude.start`). Today the user clicks Start in the Todo panel and gets a fresh turm tab in the new worktree with claude REPL ready — they paste the prompt themselves.
+- **Deferred (intentionally not in this slice)**: prompt pre-fill (Phase 18.2 — needs `tmux send-keys` timing design), Jira summary enrichment via `jira.get_ticket` (Phase 16 + 14.2 async correlation), `linked_kb` fan-in via `kb.read` (Phase 14.2). The full prompt-enriched killer demo lands when those three slices ship; Phase 15.2 lights up the chain itself today.
 
 ### Phase 16: Jira plugin
 
@@ -402,7 +403,7 @@ Closes the loop: workflow stages a worktree + context, then drops the user into 
 - **Action `claude.start {workspace_path, session_name?, resume_session?}`** (Phase 18.1 shipped — turm-internal socket action, not a stdio plugin): (1) opens new turm tab with `cwd=workspace_path`, (2) runs `tmux new-session -A -s <session_name>` (attach-or-create — re-running on the same worktree re-attaches the existing tmux), (3) inside tmux runs `claude` (or `claude --resume <id>`). Default `session_name` derived from worktree path components. Returns `{panel_id, tab, tmux_session, workspace_path}`. **`prompt` seeding deferred to Phase 18.2** — interactive `claude` reads its REPL via the TTY, not stdin/`--print`, so reliable prompt pre-fill needs `tmux send-keys` after claude is up; passing `prompt` today returns `not_implemented`.
 - **Persistence wins from tmux**: detach the tab → kill turm → next restart → `claude.start` with same `session_name` reattaches the running claude. Long refactors / multi-step reasoning survive turm crashes.
 - Built on `tab.new` + `terminal.exec` — no custom IPC with claude-code.
-- **End-to-end Phase 14 test (Vision Flow 3)**: `todo.start_requested` → `git.worktree_add.completed {path, branch}` → `claude.start {workspace_path = path, prompt = "<todo body>\n\nLinked Jira: <linked_jira>"}`. Tab pops with claude running in a fresh tmux session inside the worktree, prompt pre-filled.
+- **End-to-end Phase 14 chain test (Vision Flow 3, Phase 15.2 slice 1)**: `todo.start_requested` → `git.worktree_add` → `git.worktree_add.completed` → `claude.start {workspace_path}` works today. Tab pops with claude running in a fresh tmux session inside the worktree. The `prompt` portion of the original spec is deferred: claude.start currently rejects `prompt` with `not_implemented` (Phase 18.2 lands the tmux-send-keys-based seeding). Jira summary + linked_kb fan-in deferred to Phase 16 + 14.2.
 
 ## Open questions
 

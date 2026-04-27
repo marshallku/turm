@@ -420,12 +420,30 @@ fn validate_base_ref(s: &str) -> Result<(), GitError> {
     Ok(())
 }
 
-// Branch sanitization for the Jira→worktree flow (`PROJ-456` →
-// `proj-456`, slashes preserved as path components) lands in
-// Phase 15.2 alongside the `todo.start_requested → worktree_add`
-// chain that actually consumes it. Deferred here to keep slice 1
-// surface minimal — caller code today already lowercases its Jira
-// keys if it wants to.
+/// Lowercase a branch name for the Jira→worktree flow.
+/// `PROJ-456` → `proj-456`; preserves slashes (Jira hierarchies
+/// land as branch path components: `epic/PROJ-456` →
+/// `epic/proj-456`). Wrapped by `validate_branch_name` so any
+/// rule the validator enforces (no leading `.`, no `..`, no
+/// trailing `.`, etc.) still applies after lowercasing — the
+/// transform never produces a name git would reject without our
+/// validator catching it first.
+///
+/// Used by `git.worktree_add` when called with `sanitize_jira =
+/// true` from a Phase 15.2 trigger that's interpolating a
+/// `linked_jira` field straight from a Todo payload.
+pub fn sanitize_jira_branch(s: &str) -> Result<String, GitError> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err(GitError::new(
+            "invalid_branch",
+            "cannot sanitize an empty branch name",
+        ));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    validate_branch_name(&lower)?;
+    Ok(lower)
+}
 
 /// Run `git -C <repo> <args...>` and return the captured Output on
 /// success, or a GitError on non-zero exit / spawn failure.
@@ -573,6 +591,32 @@ mod tests {
         ] {
             assert!(validate_branch_name(bad).is_err(), "should reject {bad:?}");
         }
+    }
+
+    #[test]
+    fn sanitize_jira_lowercases_and_preserves_slashes() {
+        assert_eq!(sanitize_jira_branch("PROJ-456").unwrap(), "proj-456");
+        assert_eq!(
+            sanitize_jira_branch("Epic/PROJ-456").unwrap(),
+            "epic/proj-456"
+        );
+        // Pre-lowercased input is a no-op.
+        assert_eq!(sanitize_jira_branch("feat/foo").unwrap(), "feat/foo");
+        // Whitespace trimmed.
+        assert_eq!(sanitize_jira_branch("  PROJ-1 ").unwrap(), "proj-1");
+    }
+
+    #[test]
+    fn sanitize_jira_rejects_validate_failures_after_lowercase() {
+        // `..` survives lowercasing and validate_branch_name
+        // still catches it.
+        assert!(sanitize_jira_branch("a..b").is_err());
+        // Empty trim.
+        assert!(sanitize_jira_branch("   ").is_err());
+        // Leading `.` after lowercasing.
+        assert!(sanitize_jira_branch(".HIDDEN").is_err());
+        // Leading `-` would be parsed as a flag.
+        assert!(sanitize_jira_branch("-flag").is_err());
     }
 
     #[test]

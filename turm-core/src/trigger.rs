@@ -1024,4 +1024,414 @@ mod tests {
         engine.dispatch(&failed, None);
         assert_eq!(recovery_calls.load(Ordering::SeqCst), 1);
     }
+
+    // -- Phase 15.2: end-to-end Vision Flow 3 chain --
+
+    /// Drives a 3-trigger chain modeling the killer demo:
+    ///   `todo.start_requested` (with linked_jira)
+    ///     → `git.worktree_add` (sanitize_jira branch)
+    ///     → `git.worktree_add.completed` (auto-emitted)
+    ///     → `claude.start` (with workspace_path interpolated)
+    ///
+    /// Every step is a real `[[triggers]]` row; the actions are
+    /// mocks that record their interpolated params so we can
+    /// assert end-to-end data flow without spawning real
+    /// subprocesses (claude.start needs GTK; git.worktree_add
+    /// needs a real repo). The relevant integration surface
+    /// here IS the engine + bus + registry plumbing — that's
+    /// what Phase 15.2 wires together.
+    #[test]
+    fn phase_15_2_killer_demo_chain_with_jira() {
+        use crate::event_bus::EventBus;
+        use std::time::Duration;
+
+        let bus = Arc::new(EventBus::new());
+        let registry = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+
+        // Captures so we can assert what each action received.
+        let worktree_calls: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let claude_calls: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Mock git.worktree_add — returns the canonical
+        // `{workspace, path, branch, base}` shape so the
+        // registry's auto-published `git.worktree_add.completed`
+        // carries the same payload trigger-3 will interpolate.
+        // Mirrors the real plugin's sanitize_jira semantics so
+        // the test asserts the lowercased branch flows through
+        // to claude.start (NOT just that the flag was set on
+        // the params).
+        {
+            let recorder = worktree_calls.clone();
+            registry.register("git.worktree_add", move |params| {
+                recorder.lock().unwrap().push(params.clone());
+                let workspace = params
+                    .get("workspace")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let raw_branch = params
+                    .get("branch")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let sanitize = params
+                    .get("sanitize_jira")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let branch = if sanitize {
+                    raw_branch.to_ascii_lowercase()
+                } else {
+                    raw_branch
+                };
+                Ok(json!({
+                    "workspace": workspace,
+                    "path": format!("/tmp/wt/{branch}"),
+                    "branch": branch,
+                    "base": "main",
+                }))
+            });
+        }
+
+        // Mock claude.start — records params; returns a stub
+        // shape matching Phase 18.1's response so any further
+        // chained trigger has data to interpolate from.
+        {
+            let recorder = claude_calls.clone();
+            registry.register("claude.start", move |params| {
+                recorder.lock().unwrap().push(params.clone());
+                Ok(json!({
+                    "panel_id": "panel-test",
+                    "tab": 1,
+                    "tmux_session": "wt-feature",
+                    "workspace_path": params
+                        .get("workspace_path")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                }))
+            });
+        }
+
+        let engine = TriggerEngine::new(registry as Arc<dyn TriggerSink>);
+        engine.set_triggers(vec![
+            // Trigger 1: with-jira branch
+            Trigger {
+                name: "with-jira".into(),
+                when: WhenSpec {
+                    event_kind: "todo.start_requested".into(),
+                    payload_match: Map::new(),
+                },
+                action: "git.worktree_add".into(),
+                params: json!({
+                    "workspace": "{event.workspace}",
+                    "branch": "{event.linked_jira}",
+                    // NOTE: the engine doesn't yet have a
+                    // sanitize_jira flag because the production
+                    // chain delegates that to the git plugin.
+                    // We still pass `sanitize_jira = true`
+                    // through interpolation so the captured
+                    // params reflect the real-world TOML.
+                    "sanitize_jira": true,
+                }),
+                condition: Some("event.linked_jira != null".to_string()),
+            },
+            Trigger {
+                name: "without-jira".into(),
+                when: WhenSpec {
+                    event_kind: "todo.start_requested".into(),
+                    payload_match: Map::new(),
+                },
+                action: "git.worktree_add".into(),
+                params: json!({
+                    "workspace": "{event.workspace}",
+                    "branch": "todo-{event.id}",
+                }),
+                condition: Some("event.linked_jira == null".to_string()),
+            },
+            Trigger {
+                name: "claude-after-worktree".into(),
+                when: WhenSpec {
+                    event_kind: "git.worktree_add.completed".into(),
+                    payload_match: Map::new(),
+                },
+                action: "claude.start".into(),
+                params: json!({"workspace_path": "{event.path}"}),
+                condition: None,
+            },
+        ]);
+
+        // Subscribe to the chained event before dispatching so
+        // we can manually re-pump it through the engine. In the
+        // live system, turm-linux's pump_state drains
+        // `git.worktree_add.completed` once per GTK tick.
+        let rx = bus.subscribe_unbounded("git.worktree_add.completed");
+
+        // Fire originating event with linked_jira set.
+        let originating = Event::new(
+            "todo.start_requested",
+            "test",
+            json!({
+                "id": "T-20260427",
+                "workspace": "myrepo",
+                "linked_jira": "PROJ-456",
+                "title": "feature work",
+            }),
+        );
+        engine.dispatch(&originating, None);
+
+        // Trigger 1 fired (with-jira), trigger 2 skipped (cond false).
+        let calls = worktree_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "only the with-jira trigger should run");
+        assert_eq!(calls[0]["workspace"], "myrepo");
+        assert_eq!(calls[0]["branch"], "PROJ-456");
+        assert_eq!(calls[0]["sanitize_jira"], true);
+
+        // Re-pump the auto-emitted git.worktree_add.completed
+        // through the engine so trigger-3 fires on it.
+        let completion = match rx.recv_timeout(Duration::from_millis(200)) {
+            crate::event_bus::RecvOutcome::Event(e) => e,
+            other => panic!("expected git.worktree_add.completed, got {other:?}"),
+        };
+        engine.dispatch(&completion, None);
+
+        let claude_seen = claude_calls.lock().unwrap().clone();
+        assert_eq!(
+            claude_seen.len(),
+            1,
+            "claude.start should have been invoked once"
+        );
+        // workspace_path comes from the worktree result's path,
+        // and the path was computed AFTER the mock applied
+        // sanitize_jira's lowercasing — same shape as the real
+        // plugin.
+        assert_eq!(
+            claude_seen[0]["workspace_path"], "/tmp/wt/proj-456",
+            "claude.start should receive the LOWERCASED worktree path"
+        );
+    }
+
+    /// Same chain, no `linked_jira` → trigger 2 (without-jira)
+    /// fires instead, branch is `todo-<id>`.
+    #[test]
+    fn phase_15_2_killer_demo_chain_without_jira() {
+        use crate::event_bus::EventBus;
+        use std::time::Duration;
+
+        let bus = Arc::new(EventBus::new());
+        let registry = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+
+        let worktree_calls: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let claude_calls: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+
+        {
+            let recorder = worktree_calls.clone();
+            registry.register("git.worktree_add", move |params| {
+                recorder.lock().unwrap().push(params.clone());
+                let branch = params
+                    .get("branch")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                Ok(json!({
+                    "workspace": "myrepo",
+                    "path": format!("/tmp/wt/{branch}"),
+                    "branch": branch,
+                    "base": "main",
+                }))
+            });
+        }
+        {
+            let recorder = claude_calls.clone();
+            registry.register("claude.start", move |params| {
+                recorder.lock().unwrap().push(params.clone());
+                Ok(json!({"workspace_path": params.get("workspace_path").cloned()}))
+            });
+        }
+
+        let engine = TriggerEngine::new(registry as Arc<dyn TriggerSink>);
+        engine.set_triggers(vec![
+            Trigger {
+                name: "with-jira".into(),
+                when: WhenSpec {
+                    event_kind: "todo.start_requested".into(),
+                    payload_match: Map::new(),
+                },
+                action: "git.worktree_add".into(),
+                params: json!({
+                    "workspace": "{event.workspace}",
+                    "branch": "{event.linked_jira}",
+                }),
+                condition: Some("event.linked_jira != null".to_string()),
+            },
+            Trigger {
+                name: "without-jira".into(),
+                when: WhenSpec {
+                    event_kind: "todo.start_requested".into(),
+                    payload_match: Map::new(),
+                },
+                action: "git.worktree_add".into(),
+                params: json!({
+                    "workspace": "{event.workspace}",
+                    "branch": "todo-{event.id}",
+                }),
+                condition: Some("event.linked_jira == null".to_string()),
+            },
+            Trigger {
+                name: "claude-after-worktree".into(),
+                when: WhenSpec {
+                    event_kind: "git.worktree_add.completed".into(),
+                    payload_match: Map::new(),
+                },
+                action: "claude.start".into(),
+                params: json!({"workspace_path": "{event.path}"}),
+                condition: None,
+            },
+        ]);
+
+        let rx = bus.subscribe_unbounded("git.worktree_add.completed");
+
+        // No linked_jira in payload (omitted entirely; the
+        // todo plugin emits null in this case).
+        let originating = Event::new(
+            "todo.start_requested",
+            "test",
+            json!({
+                "id": "T-20260427",
+                "workspace": "myrepo",
+                "linked_jira": Value::Null,
+                "title": "personal",
+            }),
+        );
+        engine.dispatch(&originating, None);
+
+        let calls = worktree_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "only the without-jira trigger should run");
+        assert_eq!(calls[0]["branch"], "todo-T-20260427");
+
+        let completion = match rx.recv_timeout(Duration::from_millis(200)) {
+            crate::event_bus::RecvOutcome::Event(e) => e,
+            other => panic!("expected git.worktree_add.completed, got {other:?}"),
+        };
+        engine.dispatch(&completion, None);
+
+        let claude_seen = claude_calls.lock().unwrap().clone();
+        assert_eq!(claude_seen.len(), 1);
+        assert_eq!(claude_seen[0]["workspace_path"], "/tmp/wt/todo-T-20260427");
+    }
+
+    /// The `examples/triggers/vision-flow-3.toml` file ships as
+    /// the documented Phase 15.2 reference config. If it stops
+    /// parsing — e.g. because someone renamed a field or
+    /// changed the condition DSL — users copy-pasting it would
+    /// hit a config-load error at turm startup. Pin it.
+    #[test]
+    fn phase_15_2_example_toml_parses_cleanly() {
+        // Path is relative to the workspace root; cargo runs
+        // tests with the per-crate dir as CWD, so step out.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("examples/triggers/vision-flow-3.toml");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+
+        #[derive(serde::Deserialize)]
+        struct File {
+            #[serde(default)]
+            triggers: Vec<Trigger>,
+        }
+        let parsed: File =
+            toml::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+
+        // Sanity: 3 active triggers (the optional log row is commented out).
+        assert_eq!(parsed.triggers.len(), 3);
+        let names: Vec<&str> = parsed.triggers.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"vision3-start-with-jira"));
+        assert!(names.contains(&"vision3-start-without-jira"));
+        assert!(names.contains(&"vision3-claude-after-worktree"));
+
+        // The condition strings must compile under the same
+        // condition DSL the engine uses — set_triggers calls
+        // condition::parse() and silently drops triggers whose
+        // condition fails to parse. Catch that here so the
+        // example doesn't silently fail in the field.
+        let bus_sink = ActionRegistry::new();
+        let engine = TriggerEngine::new(Arc::new(bus_sink));
+        engine.set_triggers(parsed.triggers);
+        assert_eq!(
+            engine.count(),
+            3,
+            "all three triggers should compile (no condition::parse drops)"
+        );
+    }
+
+    /// Ensures `git.worktree_add.failed` does NOT fire
+    /// claude.start. The chain only progresses on success.
+    #[test]
+    fn phase_15_2_chain_halts_on_worktree_failure() {
+        use crate::event_bus::EventBus;
+        use std::time::Duration;
+
+        let bus = Arc::new(EventBus::new());
+        let registry = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+
+        registry.register("git.worktree_add", |_| {
+            Err(crate::action_registry::invalid_params("branch_exists"))
+        });
+        let claude_calls = Arc::new(AtomicUsize::new(0));
+        {
+            let c = claude_calls.clone();
+            registry.register("claude.start", move |_| {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(json!(null))
+            });
+        }
+
+        let engine = TriggerEngine::new(registry as Arc<dyn TriggerSink>);
+        engine.set_triggers(vec![
+            Trigger {
+                name: "kick".into(),
+                when: WhenSpec {
+                    event_kind: "todo.start_requested".into(),
+                    payload_match: Map::new(),
+                },
+                action: "git.worktree_add".into(),
+                params: json!({"workspace": "x", "branch": "y"}),
+                condition: None,
+            },
+            Trigger {
+                name: "claude-after-worktree".into(),
+                when: WhenSpec {
+                    event_kind: "git.worktree_add.completed".into(),
+                    payload_match: Map::new(),
+                },
+                action: "claude.start".into(),
+                params: Value::Null,
+                condition: None,
+            },
+        ]);
+
+        // Subscribe to BOTH possible chained events to confirm
+        // only `failed` was emitted, not `completed`.
+        let completed_rx = bus.subscribe_unbounded("git.worktree_add.completed");
+        let failed_rx = bus.subscribe_unbounded("git.worktree_add.failed");
+
+        engine.dispatch(&Event::new("todo.start_requested", "test", json!({})), None);
+
+        // failed event lands.
+        let failed = match failed_rx.recv_timeout(Duration::from_millis(200)) {
+            crate::event_bus::RecvOutcome::Event(e) => e,
+            other => panic!("expected failed event, got {other:?}"),
+        };
+        assert_eq!(failed.kind, "git.worktree_add.failed");
+
+        // completed event does NOT land.
+        match completed_rx.recv_timeout(Duration::from_millis(50)) {
+            crate::event_bus::RecvOutcome::Timeout => {}
+            other => panic!("completed event should NOT fire on Err: {other:?}"),
+        }
+
+        // claude.start never invoked.
+        engine.dispatch(&failed, None);
+        assert_eq!(claude_calls.load(Ordering::SeqCst), 0);
+    }
 }

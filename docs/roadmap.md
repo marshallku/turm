@@ -407,14 +407,24 @@ Original spec for reference (kept in case a Phase 15 v2 wants to revisit decisio
   - `slack.mention` matching specific patterns (e.g. text contains "todo:") → `todo.create`
   - `jira.ticket_assigned` (Phase 16) → `todo.create` linked to the ticket
 
-**Phase 15.2 — composite "start" workflow chain** (slice 2, depends on Phase 14.1):
+**Phase 15.2 — composite "start" workflow chain** (slice 2, depends on Phase 14.1) — **shipped (without prompt/Jira/KB enrichment)**:
 
-- `todo.start_requested` (emitted by `todo.start` action in 15.1) chains via `<action>.completed` events:
-  1. `git.worktree_add {workspace, branch = linked_jira ? sanitize(linked_jira) : "todo-<id>"}` → emits `git.worktree_add.completed {path, branch}`
-  2. `claude.start {workspace_path = path, prompt = build_prompt(todo)}` — opens tmux session inside the worktree, starts claude with the pre-filled prompt.
-- **`build_prompt(todo)` composes**: the Todo title + body, the Jira summary fetched via `jira.get_ticket {key=linked_jira}` if present, and the contents of every file path in the Todo's `linked_kb` frontmatter array (read via `kb.read`). The fan-in step is also expressed as chained triggers — the prompt is built incrementally as each enrichment action's `.completed` event arrives. Phase 14.2 async correlation joins the original `todo.start_requested` payload with these later enrichments.
-- **Result**: clicking "start" on a Todo in the panel pops up a new turm tab with claude-code already running inside a tmux session in a fresh worktree, prompt pre-filled with the full context (Todo body + Jira summary + linked KB notes). This is Vision Flow 3 (the "killer demo") working end-to-end.
-- **Optional further chain** (also lands with Phase 14.2): if the Todo doesn't yet have `linked_jira`, post Slack message asking → wait for reply → extract Jira id → use it for the worktree branch name.
+The killer demo without the enrichment fan-in. Clicking "start" on a Todo pops a turm tab with claude-code running inside a tmux session in a fresh git worktree — minus the pre-filled prompt that depends on Phases 18.2 (tmux send-keys timing) + 16 (Jira plugin) + 14.2 (async correlation).
+
+- [x] **`git.worktree_add { sanitize_jira: bool }`** — opt-in flag that lowercases the input branch name (preserving slashes for Jira hierarchies like `epic/PROJ-456` → `epic/proj-456`) before validation. Lets the trigger interpolate `{event.linked_jira}` straight from the Todo payload without the user pre-lowercasing in TOML. Default `false` keeps the contract for callers passing pre-prepared branch names.
+- [x] **`examples/triggers/vision-flow-3.toml`** — the full chain as `[[triggers]]` rows ready to drop into `~/.config/turm/config.toml`. Three rules:
+  1. `todo.start_requested` (with `linked_jira != null`) → `git.worktree_add { branch = "{event.linked_jira}", sanitize_jira = true }`
+  2. `todo.start_requested` (with `linked_jira == null`) → `git.worktree_add { branch = "todo-{event.id}" }`
+  3. `git.worktree_add.completed` → `claude.start { workspace_path = "{event.path}" }`
+- [x] **Convention documented**: the Todo plugin's `workspace` label and the git plugin's workspace `name` are assumed to coincide. If they don't, the user hardcodes `workspace = "<git-name>"` in the trigger params instead of `{event.workspace}`.
+- [x] **3 integration tests in `turm-core::trigger`** drive the chain end-to-end via the in-process `TriggerEngine` + `EventBus` + `ActionRegistry::with_completion_bus`: with-jira branch (sanitize_jira flag carried through interpolation), without-jira branch (`todo-<id>` fallback), and failure-halts-chain (`git.worktree_add.failed` does NOT fire `claude.start`).
+- [x] **What works end-to-end today**: click Start in Todo panel → new turm tab opens with cwd=worktree → tmux session attached or created → claude REPL ready. User pastes the prompt themselves.
+
+**Deferred to follow-up slices** (intentionally out of scope here to keep the chain shippable now):
+- `prompt` pre-fill: needs Phase 18.2 (tmux send-keys timing). claude.start currently rejects `prompt` with `not_implemented`.
+- Jira summary enrichment via `jira.get_ticket {key=linked_jira}`: needs Phase 16 (Jira plugin) + Phase 14.2 (async correlation primitive to join the enrichment with the original payload).
+- `linked_kb` fan-in via `kb.read` per path: same shape as Jira enrichment, also Phase 14.2.
+- Optional Slack-question branch when `linked_jira == null` (post → wait for reply with Jira id → use as branch): needs Phase 14.2's `await = { event_kind, payload_match, timeout }` primitive.
 
 ### Phase 16: Jira plugin
 
