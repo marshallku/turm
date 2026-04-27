@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Todos</title>
+<style>
+  body { padding: 16px; }
+  h1 { font-size: 1.05rem; margin: 0 0 12px; color: var(--turm-subtext1); font-weight: 500; letter-spacing: 0.02em; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .toolbar input, .toolbar select {
+    background: var(--turm-surface0); color: var(--turm-text);
+    border: 1px solid var(--turm-surface2); border-radius: 4px;
+    padding: 4px 8px; font: inherit;
+  }
+  .toolbar input::placeholder { color: var(--turm-subtext0); }
+  .toolbar button {
+    background: var(--turm-accent); color: var(--turm-bg);
+    border: 0; border-radius: 4px; padding: 4px 10px; font: inherit;
+    cursor: pointer;
+  }
+  .toolbar button:hover { filter: brightness(1.1); }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--turm-surface1);
+    background: var(--turm-surface0);
+    margin-bottom: 6px;
+  }
+  li.done .title { text-decoration: line-through; color: var(--turm-subtext0); }
+  li .title { flex: 1; }
+  li .meta { font-size: 0.85em; color: var(--turm-subtext0); }
+  .badge {
+    font-size: 0.7em; padding: 1px 6px; border-radius: 4px;
+    background: var(--turm-surface2); color: var(--turm-subtext1);
+  }
+  .badge.high { background: var(--turm-red); color: var(--turm-bg); }
+  .badge.in_progress { background: var(--turm-accent); color: var(--turm-bg); }
+  .badge.blocked { background: var(--turm-overlay0); }
+  .empty { color: var(--turm-subtext0); font-style: italic; padding: 12px; text-align: center; }
+  .err { color: var(--turm-red); padding: 12px; }
+  .actions button {
+    background: transparent; color: var(--turm-subtext1);
+    border: 1px solid var(--turm-surface2);
+    border-radius: 4px; padding: 2px 6px; cursor: pointer;
+    font-size: 0.8em;
+  }
+  .actions button:hover { color: var(--turm-text); border-color: var(--turm-overlay0); }
+</style>
+</head>
+<body>
+<h1>Todos</h1>
+<div class="toolbar">
+  <input id="new-title" placeholder="New todo title (Enter to create)" />
+  <select id="filter-status">
+    <option value="">all</option>
+    <option value="open" selected>open</option>
+    <option value="in_progress">in progress</option>
+    <option value="blocked">blocked</option>
+    <option value="done">done</option>
+  </select>
+  <button id="refresh">refresh</button>
+</div>
+<div id="root"><div class="empty">loading…</div></div>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+const root = $("#root");
+const filter = $("#filter-status");
+const newInput = $("#new-title");
+
+async function load() {
+  try {
+    const params = {};
+    if (filter.value) params.status = filter.value;
+    const { todos } = await turm.call("todo.list", params);
+    render(todos);
+  } catch (e) {
+    root.innerHTML = `<div class="err">load failed: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function render(todos) {
+  if (!todos.length) {
+    root.innerHTML = `<div class="empty">no todos match this filter</div>`;
+    return;
+  }
+  const html = todos.map((t) => {
+    const checked = t.status === "done" ? "checked" : "";
+    const badges = [];
+    if (t.priority && t.priority !== "normal") {
+      badges.push(`<span class="badge ${escapeAttr(t.priority)}">${escapeHtml(t.priority)}</span>`);
+    }
+    if (t.status !== "open" && t.status !== "done") {
+      badges.push(`<span class="badge ${escapeAttr(t.status)}">${escapeHtml(t.status)}</span>`);
+    }
+    if (t.due) {
+      badges.push(`<span class="badge">due ${escapeHtml(t.due)}</span>`);
+    }
+    if (t.linked_jira) {
+      badges.push(`<span class="badge">${escapeHtml(t.linked_jira)}</span>`);
+    }
+    return `
+      <li class="${escapeAttr(t.status)}" data-id="${escapeAttr(t.id)}" data-workspace="${escapeAttr(t.workspace)}">
+        <input type="checkbox" ${checked} class="check" />
+        <span class="title">${escapeHtml(t.title)}</span>
+        <span class="meta">${badges.join(" ")}</span>
+        <span class="actions">
+          <button class="start">start</button>
+        </span>
+      </li>`;
+  }).join("");
+  root.innerHTML = `<ul>${html}</ul>`;
+  root.querySelectorAll("li").forEach(wireRow);
+}
+
+function wireRow(row) {
+  const id = row.dataset.id;
+  const workspace = row.dataset.workspace;
+  row.querySelector(".check").addEventListener("change", async (e) => {
+    const newStatus = e.target.checked ? "done" : "open";
+    try {
+      await turm.call("todo.set_status", { id, workspace, status: newStatus });
+      load();
+    } catch (err) {
+      alert(`set_status failed: ${err.message}`);
+      e.target.checked = !e.target.checked;
+    }
+  });
+  row.querySelector(".start").addEventListener("click", async () => {
+    try {
+      await turm.call("todo.start", { id, workspace });
+    } catch (err) {
+      alert(`start failed: ${err.message}`);
+    }
+  });
+}
+
+newInput.addEventListener("keydown", async (e) => {
+  if (e.key !== "Enter") return;
+  const title = newInput.value.trim();
+  if (!title) return;
+  try {
+    await turm.call("todo.create", { title });
+    newInput.value = "";
+    load();
+  } catch (err) {
+    alert(`create failed: ${err.message}`);
+  }
+});
+
+filter.addEventListener("change", load);
+$("#refresh").addEventListener("click", load);
+
+// Live-refresh on file-watcher events. We just reload the list —
+// cheap because the list call returns full payloads and the panel
+// is small. If a future iteration shows visible flicker on every
+// vim save, switch to in-place patches keyed by id.
+turm.on("todo.created", load);
+turm.on("todo.changed", load);
+turm.on("todo.completed", load);
+turm.on("todo.deleted", load);
+
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function escapeAttr(s) { return escapeHtml(s); }
+
+load();
+</script>
+</body>
+</html>

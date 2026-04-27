@@ -1,0 +1,35 @@
+[plugin]
+name = "todo"
+title = "Todos"
+version = "0.1.0"
+description = "Markdown-checkbox todo plugin: ~/docs/todos/<workspace>/<id>.md as source of truth, vim/git-edit compatible. UI panel + file-watcher events + actions for create/list/start/set_status."
+
+[[services]]
+name = "main"
+# onStartup so the file-watcher is alive whenever turm runs — a vim
+# edit must surface as todo.changed without needing an explicit
+# action call to wake the plugin first.
+exec = "turm-plugin-todo"
+activation = "onStartup"
+restart = "on-crash"
+provides = [
+    "todo.create",
+    "todo.list",
+    "todo.set_status",
+    "todo.start",
+    "todo.delete",
+]
+subscribes = []
+# Optional env:
+#   TURM_TODO_ROOT (default ~/docs/todos)
+#   TURM_TODO_DEFAULT_WORKSPACE (default "default")
+#   TURM_TODO_POLL_SECS (default 2, range 1..=60)
+
+# Panel name "main" so `turmctl plugin open todo` works without
+# having to pass `--params '{"panel":"list"}'` — the dispatch path
+# at turm-linux/src/socket.rs::handle_plugin_open defaults to
+# panel="main" when none is supplied.
+[[panels]]
+name = "main"
+title = "Todos"
+file = "panel.html"

@@ -30,6 +30,15 @@ turm/
 │                                # store.rs (single-token keyring + plaintext fallback),
 │                                # anthropic.rs (Messages API client), usage.rs
 │                                # (JSONL append-only usage log + aggregation)
+├── turm-plugin-todo/       # First-party Todo plugin (markdown-checkbox files at
+│   │                            # ~/docs/todos/<workspace>/<id>.md, vim/git compatible)
+│   └── src/                    # main.rs (RPC loop + actions), config.rs (env),
+│                                # todo.rs (Todo struct + frontmatter parse/render +
+│                                # surgical update_status_in_text), store.rs (atomic
+│                                # create via renameat2 NOREPLACE, list_all, set_status,
+│                                # delete; mirrors KB security posture), watcher.rs
+│                                # (poll-based diff emitting todo.created/changed/
+│                                # completed/deleted)
 ├── turm-core/            # Shared Rust library
 │   └── src/
 │       ├── lib.rs           # Module declarations

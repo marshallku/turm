@@ -1,0 +1,70 @@
+# Example triggers for the Todo plugin.
+#
+# Drop relevant pieces into `~/.config/turm/config.toml` once the
+# plugin is enabled. The todo plugin emits four event kinds:
+#   - todo.created          full Todo payload
+#   - todo.changed          full Todo payload (mtime delta detected)
+#   - todo.completed        full Todo payload (status transitioned * → done)
+#   - todo.deleted          { id, workspace } only (file is gone)
+#   - todo.start_requested  full Todo payload (emitted by todo.start action)
+#
+# The Todo payload is what `todo.list` returns per item: id, status,
+# created, workspace, title, body, priority, due, linked_jira,
+# linked_slack, linked_kb, tags.
+#
+# Phase 15.1 ships single-step triggers only. The composite
+# todo.start → git.worktree_add → claude.start chain is Phase 15.2,
+# blocked on Phase 14.1's chained `<action>.completed` events.
+
+# ---------------------------------------------------------------------
+# 1. Inbox channel: when a meeting is 10 min out, create a prep todo
+#    so the agenda survives past the meeting itself.
+# ---------------------------------------------------------------------
+[[triggers]]
+name = "meeting-prep-todo"
+action = "todo.create"
+params = { workspace = "default", title = "Prep: {event.title}", body = "Linked event: {event.id}\nStart: {event.start_time}\n\n- [ ] agenda\n- [ ] follow-up notes\n", priority = "normal", tags = ["meeting"] }
+condition = """
+event.my_response_status != "declined"
+"""
+
+[triggers.when]
+event_kind = "calendar.event_imminent"
+lead_minutes = 10
+
+# ---------------------------------------------------------------------
+# 2. Slack-mention-as-todo: when someone @-mentions you with the
+#    text "todo:" prefix, file a todo from that thread. Manual
+#    enrichment (linked_jira, linked_kb) happens later in vim.
+# ---------------------------------------------------------------------
+# [[triggers]]
+# name = "slack-mention-to-todo"
+# action = "todo.create"
+# params = { title = "{event.text_first_line}", body = "From Slack: {event.permalink}\nThread ts: {event.thread_ts}\n\n", linked_slack = ["{event.team_channel_ts}"], tags = ["inbox"] }
+# condition = """
+# event.text != null
+# """
+# [triggers.when]
+# event_kind = "slack.mention"
+
+# ---------------------------------------------------------------------
+# 3. When a todo gets completed, append a one-liner to a daily
+#    rolling log so the day's wins are visible.
+# ---------------------------------------------------------------------
+# [[triggers]]
+# name = "todo-completed-to-daily-log"
+# action = "kb.append"
+# params = { id = "logs/done-{event.workspace}.md", content = "- {event.title} ({event.id})\n", ensure = true }
+# [triggers.when]
+# event_kind = "todo.completed"
+
+# ---------------------------------------------------------------------
+# 4. Phase 16 sketch: when Jira assigns you a ticket, file a linked
+#    todo. (Uncomment after the Jira plugin lands.)
+# ---------------------------------------------------------------------
+# [[triggers]]
+# name = "jira-assigned-to-todo"
+# action = "todo.create"
+# params = { title = "{event.summary}", linked_jira = "{event.key}", priority = "normal", tags = ["jira"] }
+# [triggers.when]
+# event_kind = "jira.ticket_assigned"
