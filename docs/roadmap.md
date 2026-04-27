@@ -325,6 +325,7 @@ So Phase 14 lands AFTER its real consumers exist:
 6. **Phase 15.2 — Todo `start` workflow chain**. `todo.start_requested → git.worktree_add.completed → claude.start` end-to-end demo of Flow G from the Vision section.
 7. **Phase 14.2 — async correlation primitive** (Slack ask → wait for reply with Jira id). Enables Flow H.
 8. **Backfill** — Phase 11.3 derived slack markdown, Phase 12.3 LLM ingestion, Phase 10's deferred meeting-note auto-open all unblock here.
+9. **Phase 19 — CLI ergonomics + context aggregation** (`turmctl todo create …`, `turmctl context`, `turmctl recent`). Parallel track to the chain work — every plugin's actions are already exposed via `turmctl plugin run`, so this is pure UX layering. Lands once the plugin set has stabilized so subcommand surfaces don't churn.
 
 Throughout the sequence each step ships visible value; Phase 14 design lands with concrete consumers ready to dogfood it.
 
@@ -515,6 +516,35 @@ Closes the loop: after a workflow stages a worktree + context, drop the user int
 - [ ] **Phase 14 composability test case**: full end-to-end Vision Flow 3, all triggers in user's `[[triggers]]`:
   1. `todo.start_requested` → `git.worktree_add` → publishes `git.worktree_add.completed {path, branch}`
   2. `git.worktree_add.completed` → `claude.start {workspace_path, prompt}` where prompt is interpolated from the original `todo.start_requested` payload (via Phase 14.2 async correlation that joins the chain's earlier event with the latest one).
+
+### Phase 19: CLI ergonomics + richer context surfaces
+
+User-explicit gap. The plugin landscape (Todo / KB / Calendar / Slack / Jira / Git) ships with a Plugin Panel UI per surface, but the CLI side is still the generic `turmctl plugin run <plugin>.<action> --params '{...}'`. That works — it's how every `[[triggers]]` row already drives those actions — but JSON-string params and bare-action names make it the wrong tool for "I just want to add a todo from the prompt before starting work." On the reading side, `turmctl context` already exists (Phase 8 — surfaces `active_panel` + `active_cwd` from `context.snapshot`) but it stops at raw window/cwd state; "what am I actually working on?" needs that base joined with the open todos, calendar events, and git worktree state for the resolved workspace. Slice 19.1 fixes the writing side; 19.2 expands the existing `turmctl context` surface for the reading side.
+
+**Phase 19.1 — per-plugin ergonomic subcommands** (slice 1):
+
+- [ ] **`turmctl todo`** subcommands: `create <title> [--priority] [--workspace] [--due] [--linked-jira] [--tags]`, `list [--status] [--workspace] [--tag] [--due-before]`, `set <id> --status <open|in_progress|blocked|done>` (status tokens match the wire format the action accepts; the panel's "Doing" column is a label for `in_progress`), `start <id>` (publishes `todo.start_requested` for the vision-flow-3 chain), `delete <id>`. Convenience shorthands `done <id>` / `doing <id>` / `block <id>` desugar to `set <id> --status …` so muscle-memory works without paging the status enum. Defaults the workspace to whatever the current cwd maps to via `[[workspace]]` resolution; falls back to `default`. ID-shorthand: bare prefix matches uniquely (`turmctl todo done T-2026` matches `T-2026-0042` if unambiguous).
+- [ ] **`turmctl kb`** subcommands: `new <id> [--title] [--from-stdin]`, `cat <id>` (renders the markdown), `search <query> [--limit]`, `append <id> <text>` (calls `kb.append` with `ensure=true`), `list <prefix>`. Composes the existing kb actions; no new plugin work.
+- [ ] **`turmctl calendar`** subcommands: `today` and `next [--within 2h]` map to `calendar.list_events` with sane defaults; `event <id>` maps to `calendar.event_details` for a full payload including description and attendees.
+- [ ] **`turmctl slack`** subcommands: `send <channel> <message> [--thread-ts]`, `auth status`, `auth login`. Wraps `slack.post_message` and the existing `auth` subcommand of `turm-plugin-slack`.
+- [ ] **`turmctl jira`** subcommands: `mine`, `ticket <key>`, `transition <key> <status>`, `comment <key> <text>` (lands when Phase 16 ships).
+- [ ] **`turmctl git`** subcommands: `worktrees [--workspace]`, `wt add <branch> [--workspace] [--sanitize-jira]`, `wt remove <path>`, `status`. Wraps `git.list_worktrees` / `git.worktree_add` etc.
+- [ ] **Output mode flags**: each subcommand accepts `--json` (raw payload from the action, identical to `plugin run`), `--yaml`, and a default human-readable table/list. The default mode is what makes this slice valuable; `--json` keeps the surface scriptable for shell pipelines.
+- [ ] **Auto-completion**: shell completion script (`turmctl completions zsh|bash|fish`) generated from clap so subcommand discovery doesn't require reading source.
+- [ ] **Implementation**: each subcommand is a thin clap wrapper that builds the right action params and calls into the existing socket dispatch (same path `plugin run` uses today). No new IPC, no new actions. Lives in `turm-cli/src/commands.rs` with one module per plugin under `turm-cli/src/plugin_cmds/`.
+
+**Phase 19.2 — context aggregation surfaces** (slice 2, depends on 19.1 + Phase 16):
+
+- [ ] **`turmctl todo show <id>`**: full Todo payload + linked-entity expansion. If `linked_jira` set, fans out to `jira.get_ticket` for summary/status (single call, swallow errors). If `linked_kb` non-empty, runs `kb.read` for each path and renders the first few lines as previews. If recent watcher events for this id (`todo.changed` / `todo.completed`) plus the action-event `todo.start_requested` exist in the bus history (when that lands — currently events are ephemeral, see follow-up below), shows them as a timeline. Output is structured for terminal reading, not for piping; `--json` returns the aggregate as a single object for scripting.
+- [ ] **`turmctl context` expansion**: today's `turmctl context` returns the bare `context.snapshot` payload (`active_panel`, `active_cwd`). 19.2 widens it (behind a `--full` flag, default-on for the human renderer; `--json` keeps the raw `context.snapshot` shape for backward-compat with anything already piping it) to fan out into `todo.list` (open + in-progress for the resolved workspace), `calendar.list_events` (next 2h), `git.status` (active worktree + branch + ahead/behind), and `slack.list_unseen_mentions` (if linked — TBD, may slip to 19.3 since it needs a new slack action). Single command for "where am I?" before sitting down.
+- [ ] **`turmctl recent [--since 2h]`**: scrollback of recent bus events from a ring buffer. Requires a small core change: `EventBus` retains the last N events (configurable, default 500) so the CLI can ask the running turm "what just happened?" without subscribing live. Useful for "what did Slack/Jira/Calendar surface in the last hour while I was AFK?" Lands as a turm-internal socket action (`event.history`); not a plugin concern.
+- [ ] **Cross-plugin enrichment via composition, not new actions**: `turmctl todo show` doesn't gain a special "enrich" code path — it's just N parallel action calls in the CLI, same as a chained trigger would be. Keeps the plugin protocol surface flat and the enrichment logic in one place (CLI) rather than spread across plugin services.
+
+**Phase 19.X — open follow-ups** (not in slices 1/2):
+
+- [ ] **Workspace resolution from cwd**: needs a turm-internal "given cwd, what's the workspace label?" helper. Today the git plugin has a `resolve_workspace(path)` notion in `git.status`; lift it into core or socket so `turmctl todo create` can use it without spawning git first. Lands when 19.1 picks up the workspace-default behavior.
+- [ ] **Bus-history retention** (`event.history`): Phase 19.2's `turmctl recent` needs `EventBus` to keep a bounded ring buffer. Trivial implementation; tracked here so the turn isn't surprised when the action shows up.
+- [ ] **CLI as a panel surface**: a longer arc — let the CLI render the same kanban Todo board (text-mode), full-screen, when invoked as `turmctl todo board`. Useful in SSH sessions where the GUI panel isn't reachable. Out of scope for 19.1/19.2; flagged here so the subcommand layout stays consistent if we do it later.
 
 ## Pending Cleanup
 
