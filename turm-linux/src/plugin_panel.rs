@@ -254,6 +254,36 @@ impl PluginPanel {
         // Load the HTML file
         let file_path = plugin.dir.join(&panel_def.file);
         let uri = format!("file://{}", file_path.display());
+
+        // Diagnostic instrumentation — without these, a stuck panel
+        // (the "first turm shows blank, second turm spawn unsticks
+        // it" symptom users have hit) leaves no log trace because
+        // WebKit's load failures and WebProcess crashes go silent
+        // by default. Each handler eprintlns a one-line tag with
+        // the panel's id + plugin so we can correlate against the
+        // WebProcess pids in lsof / journalctl when reproduction
+        // happens. Cost: three signal connections per panel.
+        let panel_label = format!("{plugin_name}/{panel_name}");
+        {
+            let label = panel_label.clone();
+            webview.connect_load_changed(move |_, event| {
+                eprintln!("[panel:{label}] load_changed: {event:?}");
+            });
+        }
+        {
+            let label = panel_label.clone();
+            webview.connect_load_failed(move |_, _evt, failing_uri, err| {
+                eprintln!("[panel:{label}] load_failed: uri={failing_uri} err={err}");
+                false // false = don't suppress default handler
+            });
+        }
+        {
+            let label = panel_label.clone();
+            webview.connect_web_process_terminated(move |_, reason| {
+                eprintln!("[panel:{label}] web_process_terminated: {reason:?}");
+            });
+        }
+
         webview.load_uri(&uri);
 
         // Forward events from EventBus to webview JS
