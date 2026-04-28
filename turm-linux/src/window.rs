@@ -7,6 +7,7 @@ use std::time::Duration;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, gio, glib};
 use serde_json::json;
+use webkit6::prelude::WebViewExt;
 
 use turm_core::action_registry::{ActionRegistry, internal_error};
 use turm_core::config::TurmConfig;
@@ -39,6 +40,20 @@ pub struct TurmWindow {
     /// by a refcount drop.
     #[allow(dead_code)]
     service_supervisor: Arc<ServiceSupervisor>,
+    /// Hidden 1x1 zero-opacity `WebView` loaded with `about:blank` at
+    /// window construction time so WebKit's auxiliary services
+    /// (NetworkProcess, GPU process, xdg-portal D-Bus connections)
+    /// are already warm by the time the user opens their first
+    /// plugin panel. Without this, on cold boot the first plugin
+    /// panel's `load_uri()` hangs in WebProcess startup until
+    /// something else (e.g. spawning a second turm) wakes the
+    /// underlying daemons — see commit 78ebdb1 for the diagnostic
+    /// instrumentation that surfaced the symptom. Stored on the
+    /// struct so the WebContext stays live for the window's
+    /// lifetime; dropping it would let WebKit reap the warmed
+    /// auxiliary processes.
+    #[allow(dead_code)]
+    prewarm_webview: webkit6::WebView,
 }
 
 impl TurmWindow {
@@ -49,6 +64,60 @@ impl TurmWindow {
             .default_width(1200)
             .default_height(800)
             .build();
+
+        // Cold-boot WebKit prewarm: kicked off ASAP (before plugins
+        // load, before tabs build) so WebKit's host-side daemons —
+        // xdg-desktop-portal lazy systemd activation, the bubblewrap
+        // sandbox setup path, the session-bus connection to the
+        // portal, and the document-portal handshake that mediates
+        // file:// access from a sandboxed WebProcess — all finish
+        // handshaking while turm does the rest of its init in
+        // parallel. The first plugin panel the user opens then
+        // finds those daemons already running and avoids the
+        // cold-boot hang where `load_uri()` sits silent until a
+        // second turm process happens to wake them. See commit
+        // 78ebdb1 for the diagnostic instrumentation, and the
+        // `prewarm_webview` field on `TurmWindow` for the lifetime
+        // contract.
+        //
+        // The prewarm uses its own `WebContext` so it doesn't share
+        // a sandbox / cookie jar with any plugin panel. Note that
+        // WebKitGTK process state (NetworkProcess, WebProcess) is
+        // per-WebContext, so each plugin panel still cold-spawns
+        // its own; what this prewarm warms is the SHARED host-side
+        // state (portal daemons, D-Bus name ownership, kernel
+        // bubblewrap setup) which is what's suspected of cold-boot
+        // hang. Loading a `file://` stub (not `about:blank`) and
+        // adding `/tmp` to the sandbox exercises the same code path
+        // plugin panels later traverse, including the portal-mediated
+        // file read that is the most likely hang site.
+        //
+        // Cost: one extra WebProcess + 100-byte temp file for the
+        // window's lifetime. Temp file is per-pid so concurrent turm
+        // instances don't collide; cleaned up on window destroy.
+        let prewarm_path =
+            std::env::temp_dir().join(format!("turm-prewarm-{}.html", std::process::id()));
+        // Surface the write failure rather than swallow it — if the
+        // temp file isn't there, the file:// load fails silently and
+        // the cold-boot hypothesis can't be evaluated next reproduction.
+        if let Err(e) = std::fs::write(&prewarm_path, b"<!doctype html><title>p</title>") {
+            eprintln!(
+                "[turm] prewarm: failed to write {}: {e} — cold-boot \
+                 prewarm degraded to file-not-found",
+                prewarm_path.display()
+            );
+        }
+        let prewarm_webview = {
+            let ctx = webkit6::WebContext::new();
+            ctx.add_path_to_sandbox(std::env::temp_dir(), false);
+            let wv = webkit6::WebView::builder().web_context(&ctx).build();
+            wv.set_size_request(1, 1);
+            wv.set_opacity(0.0);
+            wv.set_can_focus(false);
+            wv.set_can_target(false);
+            wv.load_uri(&format!("file://{}", prewarm_path.display()));
+            wv
+        };
 
         // Window-level fallback bg: visible whenever no `BackgroundLayer`
         // image is loaded. The provider handle is reused on hot reload so a
@@ -211,6 +280,12 @@ impl TurmWindow {
         root_overlay.set_child(Some(&background.bg_picture));
         root_overlay.add_overlay(&background.tint_overlay);
         root_overlay.add_overlay(&layout);
+        // Park the prewarm WebView in the overlay tree so it
+        // realizes alongside the rest of the UI and its WebProcess
+        // actually spawns instead of sitting idle on an unparented
+        // widget. `can_target=false` + opacity 0 + 1×1 size keeps
+        // it inert and invisible.
+        root_overlay.add_overlay(&prewarm_webview);
         // Use the layout's natural size to drive the overlay so the bg
         // image stretches/letterboxes against the real UI footprint
         // rather than the picture's intrinsic size.
@@ -277,9 +352,11 @@ impl TurmWindow {
         // after a brief grace window — children don't outlive the GUI.
         let socket_path_cleanup = socket_path.clone();
         let supervisor_cleanup = service_supervisor.clone();
+        let prewarm_path_cleanup = prewarm_path.clone();
         window.connect_destroy(move |_| {
             supervisor_cleanup.shutdown_all();
             socket::cleanup(&socket_path_cleanup);
+            let _ = std::fs::remove_file(&prewarm_path_cleanup);
         });
 
         Self {
@@ -288,6 +365,7 @@ impl TurmWindow {
             statusbar,
             background,
             service_supervisor,
+            prewarm_webview,
         }
     }
 
