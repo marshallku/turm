@@ -2765,6 +2765,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "turm-plugin-discord"
+version = "0.1.0"
+dependencies = [
+ "keyring",
+ "serde",
+ "serde_json",
+ "tungstenite",
+ "ureq",
+]
+
+[[package]]
 name = "turm-plugin-echo"
 version = "0.1.0"
 dependencies = [

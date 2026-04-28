@@ -1,0 +1,36 @@
+[plugin]
+name = "discord"
+title = "Discord"
+version = "0.1.0"
+description = "Discord Gateway plugin: emits discord.message / discord.mention / discord.dm and provides discord.send_message for replies. Slice 1 ships only auth + auth_status; Gateway events + send_message land in slice 2."
+
+[[services]]
+name = "main"
+exec = "turm-plugin-discord"
+# onStartup so the Gateway WebSocket (slice 2) lives whenever turm
+# is running. Lazy `onAction:discord.*` would lose mention/DM events
+# between turm starts. Same posture as the Slack plugin.
+activation = "onStartup"
+restart = "on-crash"
+provides = ["discord.auth_status"]
+subscribes = []
+# Required env: TURM_DISCORD_BOT_TOKEN (only for the one-time `auth`
+#   subcommand; the runtime reads from the keyring).
+# Optional env: TURM_DISCORD_WORKSPACE (default "default" — keyring
+#   namespace), TURM_DISCORD_REQUIRE_SECURE_STORE (default false —
+#   refuse plaintext fallback).
+#
+# One-time setup:
+#   1. Visit <https://discord.com/developers/applications>, create an
+#      app, add a Bot. Copy the bot token (Reset Token if first time).
+#   2. Enable the MESSAGE CONTENT privileged intent (required to read
+#      message bodies for keyword matching). Discord may require
+#      verification once the bot is in 100+ servers.
+#   3. Use OAuth2 → URL Generator → bot scope + the permissions you
+#      want (Read Messages, Send Messages typical) → copy URL → invite
+#      the bot to your server.
+#   4. From a shell:
+#        TURM_DISCORD_BOT_TOKEN=<token> turm-plugin-discord auth
+#      → validates against /users/@me, persists to OS keyring.
+#   5. Restart turm — the supervisor spawns the plugin which reads
+#      tokens from the keyring (not env).

@@ -564,6 +564,31 @@ User-explicit gap. The plugin landscape (Todo / KB / Calendar / Slack / Jira / G
 - [ ] **Bus-history retention** (`event.history`): Phase 19.2's `turmctl recent` needs `EventBus` to keep a bounded ring buffer. Trivial implementation; tracked here so the turn isn't surprised when the action shows up.
 - [ ] **CLI as a panel surface**: a longer arc — let the CLI render the same kanban Todo board (text-mode), full-screen, when invoked as `turmctl todo board`. Useful in SSH sessions where the GUI panel isn't reachable. Out of scope for 19.1/19.2; flagged here so the subcommand layout stays consistent if we do it later.
 
+### Phase 20: Discord plugin
+
+User-explicit gap. Same shape as Slack (Phase 11) — a long-lived WebSocket plugin that emits messenger events into the bus. Discord's Gateway protocol is more involved than Slack's Socket Mode (explicit heartbeat, IDENTIFY/RESUME OP codes, intents declaration), but the plugin's external surface mirrors Slack: `<plugin> auth` one-time CLI, keyring-backed token store, `onStartup` activation, `discord.message` / `discord.mention` / `discord.dm` events plus `discord.send_message` action.
+
+**Phase 20.1 — auth + manifest** (slice 1) — **shipped**:
+
+- [x] **`turm-plugin-discord` Rust workspace member** (Linux + macOS). Same dep set as Slack: `ureq` (HTTPS), `tungstenite` (WebSocket, scaffolded for slice 2), `keyring`. Workspace registered in root `Cargo.toml`.
+- [x] **`turm-plugin-discord auth` subcommand**. Reads `TURM_DISCORD_BOT_TOKEN` env, calls Discord's `GET /users/@me` with `Authorization: Bot <token>`, parses the response, persists `TokenSet { bot_token, user_id, username }` via the same keyring-with-plaintext-fallback pattern Slack uses (`KeyringStore` / `PlaintextStore` / `BrokenStore` triplet, namespaced by `TURM_DISCORD_WORKSPACE`). `TURM_DISCORD_REQUIRE_SECURE_STORE=1` refuses plaintext fallback identically to Slack.
+- [x] **`discord.auth_status` action**. Returns `{configured, authenticated, store_kind, workspace, user_id, username}`. Mirrors Slack's `slack.auth_status` so a future `turmctl context --full` can surface both workspaces uniformly.
+- [x] **Plugin manifest** at `examples/plugins/discord/plugin.toml`. `onStartup` activation (Gateway WebSocket lives whenever turm runs once slice 2 ships). `provides = ["discord.auth_status"]` only; slice 2 adds `discord.send_message`. Required scopes / OAuth flow / MESSAGE CONTENT intent setup documented inline in the manifest.
+- [x] **2 unit tests** in `config.rs` cover workspace label charset acceptance and rejection.
+
+**Phase 20.2 — Gateway WebSocket + message events** (slice 2, deferred):
+
+- [ ] `gateway.rs` Gateway v10 client: HELLO → IDENTIFY (with intents bitfield: `GUILD_MESSAGES + MESSAGE_CONTENT + DIRECT_MESSAGES` for the typical "watch DMs and mentions" flow) → heartbeat thread (interval from HELLO) → DISPATCH MESSAGE_CREATE → RESUME on disconnect (track session_id + last seq from each DISPATCH; on reconnect, RESUME instead of IDENTIFY).
+- [ ] `events.rs` parses MESSAGE_CREATE → emits one of `discord.message` (any), `discord.mention` (when bot user_id is in `mentions[]`), `discord.dm` (when channel is type 1 / DM). Each event payload carries `{channel_id, channel_type, author_id, author_username, content, message_id, ts, raw}` plus a `discord.raw` archive event for full-fidelity ingestion (mirrors `slack.raw`).
+- [ ] `discord.send_message` action: `POST /channels/{channel_id}/messages` with `{content}`. Returns `{message_id, ts}` so chained triggers can reference the posted message.
+- [ ] `discord.add_reaction` / `discord.list_channels` deferred to slice 3 — convenience actions, not blocking.
+- [ ] **Cross-plugin trigger example** in `examples/plugins/discord/triggers.example.toml`: `discord.dm + payload_match { author_id = "<my-id>" } → todo.create` for "DM the bot a Todo title" workflow.
+
+**Phase 20.X — open follow-ups**:
+
+- [ ] OAuth redirect flow as alternative to bot-token paste — needs a localhost listener; defer until env+keyring proves insufficient (same posture as Slack).
+- [ ] **Voice / slash command surface**: not in scope — text-channel ingestion + send is the messenger-style use case turm cares about.
+
 ## Pending Cleanup
 
 - [x] ~~Remove turm-core/pty.rs and state.rs (VTE handles PTY on Linux, SwiftTerm on macOS)~~
