@@ -205,16 +205,46 @@ function applyHideDone() {
   try { localStorage.setItem(HIDE_KEY, hidden ? "1" : "0"); } catch {}
 }
 
-async function load() {
-  try {
-    const { todos } = await turm.call("todo.list", {});
-    render(todos);
-  } catch (e) {
-    statusEl.className = "err";
-    statusEl.textContent = `load failed: ${e.message}`;
-    statusEl.hidden = false;
-    board.hidden = true;
+// Retry budget for the FIRST load only — covers a startup race where
+// the panel opens before the supervisor's dispatch wiring is fully
+// up. Subsequent loads (drag/drop, Start, watcher events) skip the
+// retry so a real plugin error surfaces immediately.
+const INITIAL_LOAD_BACKOFF_MS = [200, 800, 3000];
+
+// Generation counter so a slow retry doesn't clobber the UI after a
+// newer load() (manual refresh, watcher event) already finished. Each
+// load() bumps the counter and bails on render/error if a newer call
+// has started in the meantime.
+let loadGen = 0;
+
+async function load({ retry = false } = {}) {
+  const myGen = ++loadGen;
+  const attempts = retry ? [0, ...INITIAL_LOAD_BACKOFF_MS] : [0];
+  let lastErr;
+  for (let i = 0; i < attempts.length; i++) {
+    if (attempts[i]) await new Promise(r => setTimeout(r, attempts[i]));
+    if (myGen !== loadGen) return;
+    try {
+      const { todos } = await turm.call("todo.list", {});
+      if (myGen !== loadGen) return;
+      render(todos);
+      return;
+    } catch (e) {
+      if (myGen !== loadGen) return;
+      lastErr = e;
+      if (i < attempts.length - 1) {
+        statusEl.className = "loading";
+        statusEl.textContent = `load failed (${e.message}) — retrying…`;
+        statusEl.hidden = false;
+        board.hidden = true;
+      }
+    }
   }
+  if (myGen !== loadGen) return;
+  statusEl.className = "err";
+  statusEl.textContent = `load failed: ${lastErr?.message || "unknown"} (click refresh to retry)`;
+  statusEl.hidden = false;
+  board.hidden = true;
 }
 
 function render(todos) {
@@ -472,13 +502,18 @@ newInput.addEventListener("keydown", async (e) => {
   }
 });
 
-$("#refresh").addEventListener("click", load);
-turm.on("todo.created", load);
-turm.on("todo.changed", load);
-turm.on("todo.completed", load);
-turm.on("todo.deleted", load);
+// Manual refresh + watcher-driven reloads use the no-retry path: an
+// error here means a real failure (plugin crashed mid-session, file
+// permissions changed) that the user should see immediately.
+$("#refresh").addEventListener("click", () => load());
+turm.on("todo.created", () => load());
+turm.on("todo.changed", () => load());
+turm.on("todo.completed", () => load());
+turm.on("todo.deleted", () => load());
 
-load();
+// Initial load DOES retry — covers the startup-race where the panel
+// opens before the dispatch wiring / plugin handshake is ready.
+load({ retry: true });
 </script>
 </body>
 </html>
