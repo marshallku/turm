@@ -150,3 +150,33 @@ event_kind = "git.worktree_add.completed"
 # params = { id = "logs/worktrees.md", content = "- {event.workspace}/{event.branch} → {event.path}\n", ensure = true }
 # [triggers.when]
 # event_kind = "git.worktree_add.completed"
+
+# ---------------------------------------------------------------------
+# Phase 14.2 example — Slack ask + wait pattern.
+#
+# When a Todo without `linked_jira` starts, DM the user asking for the
+# Jira key, then wait up to 5 min for a reply. On reply, fire a
+# synthesized event so a downstream trigger can use the answer as the
+# branch name. Copy this block + uncomment if you want this flow.
+# Requires `turm-plugin-slack` registered with `slack.post_message`
+# action and `slack.dm` event (Phase 11.2).
+# ---------------------------------------------------------------------
+# [[triggers]]
+# name = "vision3-ask-jira-on-todo-start"
+# action = "slack.post_message"
+# params = { channel = "U_MARSHALL", text = "What's the Jira key for {event.title}? (DM the key to seed the worktree branch)" }
+# condition = "event.linked_jira == null"
+# [triggers.when]
+# event_kind = "todo.start_requested"
+# [triggers.await]
+# event_kind = "slack.dm"
+# payload_match = { user = "U_MARSHALL" }
+# timeout_seconds = 300
+# on_timeout = "abort"   # or "fire_with_default" to fall back to todo-<id> branch
+#
+# [[triggers]]
+# name = "vision3-worktree-after-jira-answer"
+# action = "git.worktree_add"
+# params = { workspace = "{event.workspace}", branch = "{event.await.text}", sanitize_jira = true, prompt = "{event.assembled_prompt}" }
+# [triggers.when]
+# event_kind = "vision3-ask-jira-on-todo-start.awaited"

@@ -18,10 +18,11 @@
 use crate::action_registry::{ActionRegistry, ActionResult};
 use crate::condition;
 use crate::context::Context;
-use crate::event_bus::{Event, pattern_matches};
+use crate::event_bus::{Event, EventBus, pattern_matches};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 /// Pluggable action invoker for the trigger engine. Default impl on
 /// `ActionRegistry` covers registry-only reach. Platform integrations can
@@ -53,6 +54,56 @@ pub struct Trigger {
     /// fires the action on a misconfigured condition.
     #[serde(default)]
     pub condition: Option<String>,
+    /// Phase 14.2 async-correlation primitive. When set, after the
+    /// action fires the engine registers a "pending await" entry and
+    /// holds the chain until a follow-up event matching
+    /// `await.event_kind` + interpolated `await.payload_match`
+    /// arrives within `await.timeout_seconds`. On match, a
+    /// synthesized `<trigger_name>.awaited` event is published with
+    /// the matched event's payload nested under `await:`. Downstream
+    /// triggers reference that synthesized event_kind to continue
+    /// the chain.
+    #[serde(default)]
+    pub r#await: Option<AwaitClause>,
+}
+
+/// Configuration for the await-primitive on a trigger. Lives next to
+/// `Trigger` rather than as a separate top-level concept because each
+/// await is intrinsically scoped to one trigger row — there's no
+/// shared registry of "wait specs" that triggers can reference.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AwaitClause {
+    /// Glob-pattern for the event kind we're waiting for. Same matcher
+    /// as `WhenSpec.event_kind`, supports `*`.
+    pub event_kind: String,
+    /// Field equality requirements on the awaited event's payload.
+    /// Each value is interpolated against the ORIGINAL event (the
+    /// one that fired this trigger) before matching, so a clause
+    /// like `payload_match = { user = "{event.user}" }` filters
+    /// awaited events to those that match the originating user.
+    /// `action_result` is intentionally NOT exposed here in v1 —
+    /// the sink's return value is unreliable for blocking actions
+    /// (LiveTriggerSink returns `{queued: true}` and the real result
+    /// arrives asynchronously). v2 may grow that via
+    /// `<action>.completed` correlation.
+    #[serde(default)]
+    pub payload_match: Map<String, Value>,
+    /// Maximum seconds to wait. After expiry, `on_timeout` decides.
+    pub timeout_seconds: u64,
+    /// `abort` (default): drop the pending entry, no further events
+    /// fire. `fire_with_default`: synthesize the awaited event with
+    /// nulls in the `await` slot so downstream triggers run with
+    /// degraded data — caller's responsibility to handle null.
+    #[serde(default)]
+    pub on_timeout: TimeoutPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeoutPolicy {
+    #[default]
+    Abort,
+    FireWithDefault,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -100,9 +151,79 @@ struct CompiledTrigger {
     condition: Option<condition::Expr>,
 }
 
+/// In-flight async-correlation entry tracked by the engine after a
+/// trigger with an `await` clause fires its action.
+///
+/// **Two-phase state machine**: a trigger's action dispatch lands in
+/// `preflight_awaits` first; promotion to `pending_awaits` waits for
+/// the `<action>.completed` event (Phase 14.1 fan-out). Why: blocking
+/// and plugin actions return `Ok({queued: true})` synchronously from
+/// `LiveTriggerSink` BEFORE the action actually runs, so arming a
+/// pending entry on the sink's `Ok` would queue an await even when
+/// the action later fails async. `<action>.completed` is the only
+/// signal that's true for both sync registry calls AND async-blocking
+/// calls — `publish_completion` fires it in both paths. Legacy
+/// match-arm actions that don't go through the registry don't fire
+/// `.completed`, so awaits on them never arm — documented limitation,
+/// same audience as Phase 14.1.
+struct PreflightAwait {
+    trigger_name: String,
+    /// Action name we're waiting for completion of. The completion
+    /// event kind is `format!("{action}.completed")`; failure is
+    /// `format!("{action}.failed")`.
+    action: String,
+    await_event_kind: String,
+    payload_match: Map<String, Value>,
+    original_payload: Value,
+    deadline: Instant,
+    on_timeout: TimeoutPolicy,
+}
+
+/// Holds the data needed to (1) match incoming events against the
+/// await's payload_match, (2) build the synthesized
+/// `<trigger_name>.awaited` payload when a match arrives or timeout
+/// fires. Promoted from `PreflightAwait` once `<action>.completed`
+/// confirms the dispatched action actually succeeded.
+struct PendingAwait {
+    /// Used both to namespace the synthesized event kind
+    /// (`<trigger_name>.awaited`) and as a debugging label.
+    trigger_name: String,
+    await_event_kind: String,
+    /// Payload-equality requirements with literal `Value`s — already
+    /// interpolated against the original event at registration time.
+    /// Comparing JSON `Value`s lets us match scalars exactly (string
+    /// vs number vs bool) without re-interpolating per incoming event.
+    payload_match: Map<String, Value>,
+    /// Original event payload, carried forward into the synthesized
+    /// event so downstream interpolation still sees `{event.<orig>}`.
+    original_payload: Value,
+    deadline: Instant,
+    on_timeout: TimeoutPolicy,
+}
+
 pub struct TriggerEngine {
     triggers: RwLock<Vec<CompiledTrigger>>,
     sink: Arc<dyn TriggerSink>,
+    /// Phase 14.2 async-correlation state — preflight half. Entry
+    /// added when a trigger with `await` fires; promoted to
+    /// `pending_awaits` when `<action>.completed` arrives, dropped
+    /// when `<action>.failed` arrives or the sweep timer expires.
+    preflight_awaits: RwLock<Vec<PreflightAwait>>,
+    /// Phase 14.2 async-correlation state — armed half. Pending
+    /// entries accumulate after promotion from preflight and drain
+    /// when matching events arrive or `sweep_pending_awaits` removes
+    /// expired ones. Bounded in practice by the number of in-flight
+    /// workflows; we don't cap length here, so a runaway producer of
+    /// await-bearing triggers would grow unboundedly — acceptable
+    /// for now since the only producer is user-authored config.
+    pending_awaits: RwLock<Vec<PendingAwait>>,
+    /// Optional bus for publishing synthesized `<trigger_name>.awaited`
+    /// events. None makes the engine unable to emit awaited events —
+    /// triggers with `await` clauses still register pending entries
+    /// but no downstream chains can fire. Opt-in (matches
+    /// `ActionRegistry::with_completion_bus` shape) so test harnesses
+    /// don't need to construct a bus.
+    publish_bus: Option<Arc<EventBus>>,
 }
 
 impl TriggerEngine {
@@ -110,6 +231,23 @@ impl TriggerEngine {
         Self {
             triggers: RwLock::new(Vec::new()),
             sink,
+            preflight_awaits: RwLock::new(Vec::new()),
+            pending_awaits: RwLock::new(Vec::new()),
+            publish_bus: None,
+        }
+    }
+
+    /// Same as `new` but threads in an `EventBus` so the engine can
+    /// publish synthesized `<trigger_name>.awaited` events for the
+    /// async-correlation primitive (Phase 14.2). Production code on
+    /// turm-linux uses this; pure unit tests use `new`.
+    pub fn with_publish_bus(sink: Arc<dyn TriggerSink>, bus: Arc<EventBus>) -> Self {
+        Self {
+            triggers: RwLock::new(Vec::new()),
+            sink,
+            preflight_awaits: RwLock::new(Vec::new()),
+            pending_awaits: RwLock::new(Vec::new()),
+            publish_bus: Some(bus),
         }
     }
 
@@ -145,6 +283,16 @@ impl TriggerEngine {
             })
             .collect();
         *self.triggers.write().unwrap() = compiled;
+        // Phase 14.2: hot-reload is documented as all-or-nothing
+        // (docs/core-lib.md), so any await state from the OLD trigger
+        // set must die with the swap — otherwise a removed-or-renamed
+        // trigger could still emit `<old_name>.awaited` after the
+        // new config takes effect. Volatile state was already
+        // documented as restart-loses; reload-loses is the same
+        // contract. Pre-Phase-14.2 callers (no `await` clauses) are
+        // unaffected because both vectors are always empty.
+        self.preflight_awaits.write().unwrap().clear();
+        self.pending_awaits.write().unwrap().clear();
     }
 
     pub fn count(&self) -> usize {
@@ -169,6 +317,23 @@ impl TriggerEngine {
     /// outcome; those failures are surfaced asynchronously by the sink
     /// itself).
     pub fn dispatch(&self, event: &Event, context: Option<&Context>) -> usize {
+        // Phase 14.2: do the await-state passes BEFORE iterating
+        // triggers. Order matters because a trigger that fires its
+        // own action X on the same event we just used to promote
+        // could otherwise have its freshly-registered preflight
+        // immediately consumed by the same `X.completed` event,
+        // arming a downstream await against the WRONG action call.
+        // Pass order:
+        //   1. promote/drop pre-existing preflights against this
+        //      event (handles `<X>.completed` / `<X>.failed` events).
+        //   2. match this event against pre-existing pending awaits
+        //      and emit `<trigger_name>.awaited` for any hit.
+        //   3. iterate triggers, register fresh preflights for
+        //      await-bearing matches — these will only see FUTURE
+        //      completion events, never the one we just processed.
+        self.try_promote_or_drop_preflight(event);
+        self.try_match_pending_awaits(event);
+
         // Snapshot the trigger list under a short read lock so a concurrent
         // `set_triggers` can't observe partial iteration. Triggers are small
         // and infrequent, so cloning is cheap.
@@ -208,6 +373,17 @@ impl TriggerEngine {
                         trigger.action,
                         event.kind
                     );
+                    // Phase 14.2: stage a PREFLIGHT entry. Don't arm
+                    // pending_awaits directly off the sink's `Ok` —
+                    // blocking/plugin actions return
+                    // `Ok({queued: true})` synchronously BEFORE the
+                    // action actually succeeds. The preflight is
+                    // promoted to pending_awaits when
+                    // `<action>.completed` arrives (or dropped on
+                    // `<action>.failed`).
+                    if let Some(aw) = &trigger.r#await {
+                        self.register_preflight_await(trigger, aw, event, context);
+                    }
                 }
                 Err(err) => {
                     log::warn!(
@@ -223,6 +399,263 @@ impl TriggerEngine {
         }
         fired
     }
+
+    /// Stage a preflight-await entry. Interpolates the `payload_match`
+    /// against the originating event NOW, so once the action's
+    /// `.completed` event promotes this entry, the per-incoming-event
+    /// comparison is a pure JSON value check (no per-event
+    /// interpolation overhead).
+    fn register_preflight_await(
+        &self,
+        trigger: &Trigger,
+        aw: &AwaitClause,
+        event: &Event,
+        context: Option<&Context>,
+    ) {
+        let mut interpolated_match = Map::new();
+        for (k, v) in &aw.payload_match {
+            // Use `interpolate_value_typed` so a single-token string like
+            // `"{event.count}"` resolves to the raw JSON value (preserves
+            // numbers, booleans, nulls instead of coercing to string).
+            // Awaited events compare via JSON value equality; without
+            // this, `payload_match = { count = "{event.count}" }` would
+            // compare `Value::String("42")` to `Value::Number(42)` and
+            // never match.
+            interpolated_match.insert(k.clone(), interpolate_value_typed(v, event, context));
+        }
+        let preflight = PreflightAwait {
+            trigger_name: trigger.name.clone(),
+            action: trigger.action.clone(),
+            await_event_kind: aw.event_kind.clone(),
+            payload_match: interpolated_match,
+            original_payload: event.payload.clone(),
+            deadline: Instant::now() + Duration::from_secs(aw.timeout_seconds),
+            on_timeout: aw.on_timeout,
+        };
+        self.preflight_awaits.write().unwrap().push(preflight);
+    }
+
+    /// Promote first matching preflight to pending on `<X>.completed`,
+    /// drop first matching preflight on `<X>.failed`. **Trust check**:
+    /// only events sourced from `turm.action` (the action_registry's
+    /// completion fan-out — see `action_registry::COMPLETION_EVENT_SOURCE`)
+    /// can advance the state machine. An unrelated bus producer that
+    /// happens to publish `<something>.completed` with the same suffix
+    /// is ignored, so an event from outside the registry can't mutate
+    /// our await state.
+    ///
+    /// Match key is
+    /// the action name `X` ONLY — neither `<X>.completed` nor
+    /// `<X>.failed` carries the originating event/trigger id, so we
+    /// can't per-invocation correlate. **FIFO scope is "across ALL
+    /// preflights for action X — regardless of trigger AND
+    /// regardless of invocation"**:
+    ///
+    /// - Two different await-bearing triggers that share an action
+    ///   share a single FIFO queue at the action level. A completion
+    ///   from trigger B's invocation can promote trigger A's
+    ///   preflight if A queued first.
+    /// - Even a single trigger fired multiple times concurrently
+    ///   can mis-correlate. If trigger T fires three times in quick
+    ///   succession (preflights p1, p2, p3) and completions arrive
+    ///   in order c1, c2, c3, FIFO matches them correctly. If
+    ///   completions arrive c2, c1, c3, FIFO promotes p1 with c2's
+    ///   payload, p2 with c1's, p3 with c3's — wrong invocation
+    ///   correlation, but at least each preflight does end up
+    ///   promoted exactly once.
+    ///
+    /// In practice most use cases have at most one in-flight
+    /// invocation per action at a time (Slack-ask-and-wait, for
+    /// example, isn't repeatedly fired). The mis-correlation only
+    /// hurts when the SAME action is dispatched multiple times in
+    /// fast succession AND the awaited follow-up payloads need to
+    /// match the specific invocation.
+    ///
+    /// Closing this fully needs per-invocation correlation tokens in
+    /// `<X>.completed`/`.failed` payloads (action_registry change).
+    /// Tracked as a slice-2 follow-up.
+    fn try_promote_or_drop_preflight(&self, event: &Event) {
+        // Trust check: only the action_registry's synthesized
+        // completion fan-out can advance the state machine. An
+        // unrelated producer publishing a `.completed`-suffixed
+        // event would otherwise silently mutate await state.
+        if event.source != crate::action_registry::COMPLETION_EVENT_SOURCE {
+            return;
+        }
+        // Strip `.completed` / `.failed` suffix to recover the action
+        // name. Anything else is irrelevant to this stage.
+        let (action, success) = if let Some(action) = event.kind.strip_suffix(".completed") {
+            (action, true)
+        } else if let Some(action) = event.kind.strip_suffix(".failed") {
+            (action, false)
+        } else {
+            return;
+        };
+        let mut pre = self.preflight_awaits.write().unwrap();
+        let Some(idx) = pre.iter().position(|p| p.action == action) else {
+            return;
+        };
+        let removed = pre.remove(idx);
+        if !success {
+            // .failed: chain is broken at the action; don't promote.
+            log::debug!(
+                "trigger {:?} preflight dropped on {action}.failed",
+                removed.trigger_name
+            );
+            return;
+        }
+        // .completed: promote to pending. We DON'T re-set the deadline
+        // here — the original timeout window covers preflight + pending
+        // combined. If `.completed` arrived just before the deadline,
+        // the pending gets less time to match the awaited event; that's
+        // the user's contract for total wait.
+        self.pending_awaits.write().unwrap().push(PendingAwait {
+            trigger_name: removed.trigger_name,
+            await_event_kind: removed.await_event_kind,
+            payload_match: removed.payload_match,
+            original_payload: removed.original_payload,
+            deadline: removed.deadline,
+            on_timeout: removed.on_timeout,
+        });
+    }
+
+    /// Walk pending awaits and fire `<trigger_name>.awaited` for the
+    /// FIRST one whose `event_kind` + `payload_match` accept this
+    /// event. Single-consumption: one incoming event resolves at most
+    /// one pending entry. When two pendings share identical match
+    /// criteria (same Slack user filter, etc.), only the oldest fires
+    /// — the runner-up keeps waiting for its own follow-up. This is
+    /// the conservative choice; broadcasting one reply to multiple
+    /// concurrent prompts would silently double-fire downstream
+    /// chains, which is much harder to debug.
+    fn try_match_pending_awaits(&self, event: &Event) {
+        let mut to_emit: Option<(String, Value)> = None;
+        {
+            let mut pending = self.pending_awaits.write().unwrap();
+            let mut matched_idx: Option<usize> = None;
+            for (idx, p) in pending.iter().enumerate() {
+                if !pattern_matches(&p.await_event_kind, &event.kind) {
+                    continue;
+                }
+                let mut all_match = true;
+                for (k, expected) in &p.payload_match {
+                    match event.payload.get(k) {
+                        Some(actual) if actual == expected => continue,
+                        _ => {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                }
+                if all_match {
+                    matched_idx = Some(idx);
+                    break;
+                }
+            }
+            if let Some(idx) = matched_idx {
+                let p = pending.remove(idx);
+                let synthesized = build_awaited_payload(&p.original_payload, &event.payload);
+                // Don't publish under the lock — bus.publish may
+                // re-enter dispatch (subscribers receive synchronously
+                // today, but a subscriber calling back into the engine
+                // would deadlock against this write lock).
+                to_emit = Some((awaited_kind_for(&p.trigger_name), synthesized));
+            }
+        }
+        if let Some((kind, payload)) = to_emit
+            && let Some(bus) = &self.publish_bus
+        {
+            bus.publish(Event::new(kind, AWAITED_EVENT_SOURCE, payload));
+        }
+    }
+
+    /// Drop expired entries from BOTH preflight and pending await
+    /// pools. The deadline is set at preflight registration time and
+    /// carries unchanged through promotion to pending — total wait
+    /// (preflight + pending) shares one timeout window. For entries
+    /// with `on_timeout = FireWithDefault`, publish a synthesized
+    /// `<trigger_name>.awaited` event with `null` in the await slot
+    /// so downstream chains can run with a missing-data fallback.
+    /// A preflight that expires before `<action>.completed` arrives
+    /// (legacy match-arm action that doesn't fire `.completed`,
+    /// stalled action) is treated the same way as a timed-out
+    /// pending — Abort drops silently, FireWithDefault still emits
+    /// the synthesized event with `await: null`.
+    ///
+    /// Caller invokes this on a timer (e.g. turm-linux's GTK pump
+    /// every 50ms) — the engine has no thread of its own.
+    pub fn sweep_pending_awaits(&self) {
+        let now = Instant::now();
+        let mut to_emit: Vec<(String, Value)> = Vec::new();
+        {
+            let mut preflight = self.preflight_awaits.write().unwrap();
+            preflight.retain(|p| {
+                if p.deadline > now {
+                    return true;
+                }
+                if matches!(p.on_timeout, TimeoutPolicy::FireWithDefault) {
+                    let synthesized = build_awaited_payload(&p.original_payload, &Value::Null);
+                    to_emit.push((awaited_kind_for(&p.trigger_name), synthesized));
+                }
+                false
+            });
+        }
+        {
+            let mut pending = self.pending_awaits.write().unwrap();
+            pending.retain(|p| {
+                if p.deadline > now {
+                    return true;
+                }
+                if matches!(p.on_timeout, TimeoutPolicy::FireWithDefault) {
+                    let synthesized = build_awaited_payload(&p.original_payload, &Value::Null);
+                    to_emit.push((awaited_kind_for(&p.trigger_name), synthesized));
+                }
+                false
+            });
+        }
+        if let Some(bus) = &self.publish_bus {
+            for (kind, payload) in to_emit {
+                bus.publish(Event::new(kind, AWAITED_EVENT_SOURCE, payload));
+            }
+        }
+    }
+
+    /// Diagnostic accessor — number of pending await entries currently
+    /// armed (post-promotion). Used by tests; not load-bearing in
+    /// production.
+    pub fn pending_await_count(&self) -> usize {
+        self.pending_awaits.read().unwrap().len()
+    }
+
+    /// Diagnostic accessor — number of preflight entries currently
+    /// waiting for `<action>.completed`. Used by tests.
+    pub fn preflight_await_count(&self) -> usize {
+        self.preflight_awaits.read().unwrap().len()
+    }
+}
+
+/// Source label for synthesized `<trigger_name>.awaited` events.
+/// Distinct from action_registry's `turm.action` and bus producers'
+/// own kinds so consumers can identify origin if needed.
+const AWAITED_EVENT_SOURCE: &str = "turm.trigger.await";
+
+fn awaited_kind_for(trigger_name: &str) -> String {
+    format!("{trigger_name}.awaited")
+}
+
+/// Build the payload of a synthesized `<trigger_name>.awaited` event.
+/// Carries the originating trigger's event payload at top level (so
+/// `{event.<orig>}` interpolation keeps working in downstream
+/// triggers) and nests the matched event's payload under `await:`
+/// (so `{event.await.<field>}` reads the reply data via the dot-path
+/// interpolator).
+fn build_awaited_payload(original: &Value, awaited: &Value) -> Value {
+    let mut obj = match original {
+        Value::Object(m) => m.clone(),
+        _ => Map::new(),
+    };
+    obj.insert("await".to_string(), awaited.clone());
+    Value::Object(obj)
 }
 
 /// Reduce a set of trigger `event_kind` patterns to the minimal set that
@@ -300,6 +733,81 @@ fn interpolate_value(template: &Value, event: &Event, context: Option<&Context>)
     }
 }
 
+/// Type-preserving interpolation for `await.payload_match` values.
+/// Differs from `interpolate_value` (which is used for action params)
+/// in one place: when a string is exactly `{<token>}` with nothing
+/// else, the raw resolved JSON `Value` is returned instead of the
+/// string-coerced form. That's necessary because await match runs
+/// pure JSON-value equality against the awaited event's payload —
+/// `payload_match = { count = "{event.count}" }` against `event.count =
+/// 42` (a number) would otherwise compare `Value::String("42")` to
+/// `Value::Number(42)` and never match. Mixed templates like
+/// `{ "Hello {event.name}" }` still string-coerce because there's no
+/// single source value to preserve. Unresolved single-token cases
+/// fall back to the literal `{token}` string (same fail-loud posture
+/// as flat-token resolution).
+fn interpolate_value_typed(template: &Value, event: &Event, context: Option<&Context>) -> Value {
+    match template {
+        Value::String(s) => {
+            // Single-token-only path: extract `{...}` if the string is
+            // exactly one token wrapper and nothing else.
+            if let Some(token) = single_token(s)
+                && let Some(value) = resolve_token_value(token, event, context)
+            {
+                return value.clone();
+            }
+            Value::String(interpolate_string(s, event, context))
+        }
+        Value::Array(arr) => Value::Array(
+            arr.iter()
+                .map(|v| interpolate_value_typed(v, event, context))
+                .collect(),
+        ),
+        Value::Object(obj) => {
+            let mut out = Map::new();
+            for (k, v) in obj {
+                out.insert(k.clone(), interpolate_value_typed(v, event, context));
+            }
+            Value::Object(out)
+        }
+        _ => template.clone(),
+    }
+}
+
+/// If `s` is exactly `{<token>}` with no surrounding text and no
+/// embedded close-brace, return the inner token. Used by the typed
+/// payload_match interpolator to know when raw-value substitution is
+/// safe vs when string-coercion is the only viable path.
+fn single_token(s: &str) -> Option<&str> {
+    let inner = s.strip_prefix('{')?.strip_suffix('}')?;
+    if inner.contains('{') || inner.contains('}') {
+        return None;
+    }
+    Some(inner)
+}
+
+/// Like `resolve_token` but returns the raw JSON `Value` reference
+/// instead of stringifying. Only used by the typed payload_match
+/// interpolator.
+fn resolve_token_value<'a>(
+    token: &str,
+    event: &'a Event,
+    context: Option<&'a Context>,
+) -> Option<&'a Value> {
+    if let Some(field) = token.strip_prefix("event.") {
+        return resolve_dot_path(&event.payload, field);
+    }
+    // `context.X` resolution returns the raw payload field if we
+    // wrap it as a Value. ContextService doesn't expose a typed
+    // surface (it's just two Option<String>s today), so for context
+    // tokens we fall back to the string interpolator's view by
+    // returning None — caller will then string-coerce, which matches
+    // the existing context surface. Adding typed context resolution
+    // is a future extension when richer context data lands.
+    let _ = context;
+    None
+}
+
 fn interpolate_string(s: &str, event: &Event, context: Option<&Context>) -> String {
     let mut result = String::new();
     let mut rest = s;
@@ -331,7 +839,7 @@ fn interpolate_string(s: &str, event: &Event, context: Option<&Context>) -> Stri
 
 fn resolve_token(token: &str, event: &Event, context: Option<&Context>) -> Option<String> {
     if let Some(field) = token.strip_prefix("event.") {
-        return event.payload.get(field).map(json_scalar_to_string);
+        return resolve_dot_path(&event.payload, field).map(json_scalar_to_string);
     }
     if let Some(field) = token.strip_prefix("context.") {
         let ctx = context?;
@@ -345,6 +853,26 @@ fn resolve_token(token: &str, event: &Event, context: Option<&Context>) -> Optio
         };
     }
     None
+}
+
+/// Walk a dot-separated path (`foo.bar.baz`) into a JSON `Value`.
+/// Top-level field is a single segment (legacy shape: `event.id`);
+/// nested objects use additional dots (`event.payload.text`,
+/// `event.await.thread_ts`). Stops at the first non-object hop —
+/// e.g. `event.tags.0` won't index into an array, returning `None`
+/// instead. That keeps the surface intentionally narrow until a
+/// real call site asks for array/index access.
+fn resolve_dot_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = root;
+    for seg in path.split('.') {
+        match cur {
+            Value::Object(map) => {
+                cur = map.get(seg)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(cur)
 }
 
 fn json_scalar_to_string(v: &Value) -> String {
@@ -385,6 +913,7 @@ mod tests {
             action: "noop".into(),
             params: Value::Null,
             condition: None,
+            r#await: None,
         };
         assert!(t.matches(&evt("calendar.event_imminent", json!({}))));
         assert!(!t.matches(&evt("calendar.event_started", json!({}))));
@@ -401,6 +930,7 @@ mod tests {
             action: "noop".into(),
             params: Value::Null,
             condition: None,
+            r#await: None,
         };
         assert!(t.matches(&evt("calendar.event_imminent", json!({}))));
         assert!(t.matches(&evt("calendar.event_created", json!({}))));
@@ -422,6 +952,7 @@ mod tests {
             action: "noop".into(),
             params: Value::Null,
             condition: None,
+            r#await: None,
         };
         assert!(t.matches(&evt(
             "slack.mention",
@@ -445,6 +976,7 @@ mod tests {
                 "msg": "got {event.id} from {event.source}",
             }),
             condition: None,
+            r#await: None,
         };
         let result = t.interpolate(
             &evt(
@@ -460,6 +992,61 @@ mod tests {
     }
 
     #[test]
+    fn interpolates_nested_event_paths() {
+        // Phase 14.2 prep: dot-path access through nested objects so
+        // `{event.await.text}` and `{event.action_result.thread_ts}`
+        // can resolve. Pre-14.2 only top-level keys worked.
+        let t = Trigger {
+            name: "t".into(),
+            when: WhenSpec {
+                event_kind: "*".into(),
+                payload_match: Map::new(),
+            },
+            action: "noop".into(),
+            params: json!({
+                "answer": "{event.await.text}",
+                "deep": "{event.a.b.c}",
+            }),
+            condition: None,
+            r#await: None,
+        };
+        let result = t.interpolate(
+            &evt(
+                "todo-ask.awaited",
+                json!({
+                    "await": { "text": "PROJ-42" },
+                    "a": { "b": { "c": "ok" } },
+                }),
+            ),
+            None,
+        );
+        assert_eq!(result["answer"], json!("PROJ-42"));
+        assert_eq!(result["deep"], json!("ok"));
+    }
+
+    #[test]
+    fn dot_path_unresolved_keeps_literal_for_safety() {
+        // When a dot-path bottoms out (missing intermediate object,
+        // or non-object hop), the resolver returns None. The
+        // interpolator preserves the literal `{token}` so a
+        // misconfigured trigger surfaces as a visible action error
+        // rather than silently substituting empty.
+        let t = Trigger {
+            name: "t".into(),
+            when: WhenSpec {
+                event_kind: "*".into(),
+                payload_match: Map::new(),
+            },
+            action: "noop".into(),
+            params: json!({"v": "{event.missing.path}"}),
+            condition: None,
+            r#await: None,
+        };
+        let result = t.interpolate(&evt("any", json!({"present": 1})), None);
+        assert_eq!(result["v"], json!("{event.missing.path}"));
+    }
+
+    #[test]
     fn interpolates_context_fields() {
         let t = Trigger {
             name: "t".into(),
@@ -470,6 +1057,7 @@ mod tests {
             action: "noop".into(),
             params: json!({"cmd": "echo {context.active_cwd} :: {context.active_panel}"}),
             condition: None,
+            r#await: None,
         };
         let ctx = Context {
             active_panel: Some("panel-1".into()),
@@ -495,6 +1083,7 @@ mod tests {
                 "d": "unclosed {brace",
             }),
             condition: None,
+            r#await: None,
         };
         let result = t.interpolate(&evt("any", json!({})), None);
         assert_eq!(result["a"], json!("{event.missing}"));
@@ -518,6 +1107,7 @@ mod tests {
                 "b": true,
             }),
             condition: None,
+            r#await: None,
         };
         let result = t.interpolate(&evt("any", json!({"a": "A", "b": "B"})), None);
         assert_eq!(result["list"][0], json!("A"));
@@ -547,6 +1137,7 @@ mod tests {
             action: "record".into(),
             params: json!({"id": "{event.id}"}),
             condition: None,
+            r#await: None,
         }]);
         let fired = engine.dispatch(
             &evt("calendar.event_imminent", json!({"id": "evt-9"})),
@@ -578,6 +1169,7 @@ mod tests {
             action: "bump".into(),
             params: Value::Null,
             condition: None,
+            r#await: None,
         }]);
         engine.dispatch(&evt("calendar.event_imminent", json!({})), None);
         engine.dispatch(&evt("terminal.cwd_changed", json!({})), None);
@@ -599,6 +1191,7 @@ mod tests {
             action: "fail".into(),
             params: Value::Null,
             condition: None,
+            r#await: None,
         }]);
         // Should not panic. fired count is 0 because the action returned Err.
         let fired = engine.dispatch(&evt("any", json!({})), None);
@@ -617,6 +1210,7 @@ mod tests {
             action: "no_such_action".into(),
             params: Value::Null,
             condition: None,
+            r#await: None,
         }]);
         let fired = engine.dispatch(&evt("any", json!({})), None);
         assert_eq!(fired, 0);
@@ -634,6 +1228,7 @@ mod tests {
             action: "fire".into(),
             params: Value::Null,
             condition: condition.map(str::to_string),
+            r#await: None,
         }
     }
 
@@ -791,6 +1386,7 @@ mod tests {
             action: "bump".into(),
             params: Value::Null,
             condition: None,
+            r#await: None,
         };
         engine.set_triggers(vec![make("a"), make("b")]);
         assert_eq!(engine.count(), 2);
@@ -925,6 +1521,7 @@ mod tests {
                 action: "step1".into(),
                 params: json!({ "id": "{event.id}" }),
                 condition: None,
+                r#await: None,
             },
             Trigger {
                 name: "trigger-b".into(),
@@ -935,6 +1532,7 @@ mod tests {
                 action: "step2".into(),
                 params: json!({ "marker": "{event.marker}" }),
                 condition: None,
+                r#await: None,
             },
         ]);
 
@@ -998,6 +1596,7 @@ mod tests {
                 action: "flaky".into(),
                 params: Value::Null,
                 condition: None,
+                r#await: None,
             },
             Trigger {
                 name: "on-fail".into(),
@@ -1008,6 +1607,7 @@ mod tests {
                 action: "recovery".into(),
                 params: Value::Null,
                 condition: None,
+                r#await: None,
             },
         ]);
 
@@ -1133,6 +1733,7 @@ mod tests {
                     "sanitize_jira": true,
                 }),
                 condition: Some("event.linked_jira != null".to_string()),
+                r#await: None,
             },
             Trigger {
                 name: "without-jira".into(),
@@ -1146,6 +1747,7 @@ mod tests {
                     "branch": "todo-{event.id}",
                 }),
                 condition: Some("event.linked_jira == null".to_string()),
+                r#await: None,
             },
             Trigger {
                 name: "claude-after-worktree".into(),
@@ -1156,6 +1758,7 @@ mod tests {
                 action: "claude.start".into(),
                 params: json!({"workspace_path": "{event.path}"}),
                 condition: None,
+                r#await: None,
             },
         ]);
 
@@ -1261,6 +1864,7 @@ mod tests {
                     "branch": "{event.linked_jira}",
                 }),
                 condition: Some("event.linked_jira != null".to_string()),
+                r#await: None,
             },
             Trigger {
                 name: "without-jira".into(),
@@ -1274,6 +1878,7 @@ mod tests {
                     "branch": "todo-{event.id}",
                 }),
                 condition: Some("event.linked_jira == null".to_string()),
+                r#await: None,
             },
             Trigger {
                 name: "claude-after-worktree".into(),
@@ -1284,6 +1889,7 @@ mod tests {
                 action: "claude.start".into(),
                 params: json!({"workspace_path": "{event.path}"}),
                 condition: None,
+                r#await: None,
             },
         ]);
 
@@ -1397,6 +2003,7 @@ mod tests {
                 action: "git.worktree_add".into(),
                 params: json!({"workspace": "x", "branch": "y"}),
                 condition: None,
+                r#await: None,
             },
             Trigger {
                 name: "claude-after-worktree".into(),
@@ -1407,6 +2014,7 @@ mod tests {
                 action: "claude.start".into(),
                 params: Value::Null,
                 condition: None,
+                r#await: None,
             },
         ]);
 
@@ -1433,5 +2041,592 @@ mod tests {
         // claude.start never invoked.
         engine.dispatch(&failed, None);
         assert_eq!(claude_calls.load(Ordering::SeqCst), 0);
+    }
+
+    // -- Phase 14.2: await primitive --
+    //
+    // The shape under test: a trigger with `await` registers a pending
+    // entry on action success, then drains when an event matching the
+    // await's `event_kind` + interpolated `payload_match` arrives.
+    // The synthesized `<trigger_name>.awaited` payload exposes the
+    // matched event's payload under `await` for downstream interpolation.
+
+    fn mk_engine_with_bus() -> (
+        Arc<ActionRegistry>,
+        TriggerEngine,
+        Arc<crate::event_bus::EventBus>,
+    ) {
+        let reg = Arc::new(ActionRegistry::new());
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        let engine = TriggerEngine::with_publish_bus(reg.clone(), bus.clone());
+        (reg, engine, bus)
+    }
+
+    fn trig_with_await(name: &str, action: &str, when_kind: &str, aw: AwaitClause) -> Trigger {
+        Trigger {
+            name: name.into(),
+            when: WhenSpec {
+                event_kind: when_kind.into(),
+                payload_match: Map::new(),
+            },
+            action: action.into(),
+            params: Value::Null,
+            condition: None,
+            r#await: Some(aw),
+        }
+    }
+
+    #[test]
+    fn await_registers_preflight_on_dispatch_then_promotes_on_completed() {
+        // Two-phase: dispatch lands in preflight; `<action>.completed`
+        // promotes to pending. Without the `.completed` event the
+        // entry never arms (which is the whole point — sink Ok is
+        // unreliable for blocking actions).
+        // `mk_engine_with_bus` doesn't enable completion fan-out, so
+        // construct directly with a registry that has the bus wired.
+        let bus2 = Arc::new(crate::event_bus::EventBus::new());
+        let reg2 = Arc::new(ActionRegistry::with_completion_bus(bus2.clone()));
+        reg2.register("noop", |_p| Ok(json!({"ok": true})));
+        let engine = TriggerEngine::with_publish_bus(reg2, bus2.clone());
+        engine.set_triggers(vec![trig_with_await(
+            "ask",
+            "noop",
+            "todo.start_requested",
+            AwaitClause {
+                event_kind: "slack.dm".into(),
+                payload_match: Map::new(),
+                timeout_seconds: 60,
+                on_timeout: TimeoutPolicy::Abort,
+            },
+        )]);
+        // We need the engine to also see the `noop.completed` event
+        // that the registry publishes synchronously. Subscribe a
+        // receiver, drain it, and re-dispatch into the engine — same
+        // pattern turm-linux's pump uses.
+        let completed_rx = bus2.subscribe("noop.completed");
+        engine.dispatch(&evt("todo.start_requested", json!({"id": "T-1"})), None);
+        // Preflight registered, no pending yet.
+        assert_eq!(engine.preflight_await_count(), 1);
+        assert_eq!(engine.pending_await_count(), 0);
+        // The registry already published `noop.completed` on the bus.
+        // Drain it and feed back into engine.dispatch — that's how
+        // turm-linux's pump bridges between bus and engine.
+        let completed = match completed_rx.try_recv() {
+            Some(e) => e,
+            None => panic!("expected noop.completed on bus"),
+        };
+        engine.dispatch(&completed, None);
+        // Now pending is armed.
+        assert_eq!(engine.preflight_await_count(), 0);
+        assert_eq!(engine.pending_await_count(), 1);
+    }
+
+    #[test]
+    fn await_does_not_register_when_action_fails_synchronously() {
+        // Sync registry failure: sink returns Err immediately.
+        // Preflight never gets staged, pending never armed.
+        let (reg, engine, _bus) = mk_engine_with_bus();
+        reg.register("fails", |_p| Err(invalid_params("boom".to_string())));
+        engine.set_triggers(vec![trig_with_await(
+            "ask",
+            "fails",
+            "todo.start_requested",
+            AwaitClause {
+                event_kind: "slack.dm".into(),
+                payload_match: Map::new(),
+                timeout_seconds: 60,
+                on_timeout: TimeoutPolicy::Abort,
+            },
+        )]);
+        engine.dispatch(&evt("todo.start_requested", json!({"id": "T-1"})), None);
+        assert_eq!(engine.preflight_await_count(), 0);
+        assert_eq!(engine.pending_await_count(), 0);
+    }
+
+    #[test]
+    fn await_preflight_dropped_on_synthetic_failed_event() {
+        // Direct exercise of the `<X>.failed` drop branch: stage a
+        // preflight (success path), then dispatch a synthetic
+        // `<action>.failed` event. The preflight should be dropped.
+        // Models the behavior turm-linux's pump produces when a
+        // blocking action returns Ok({queued: true}) sync and later
+        // emits `<action>.failed` async via the supervisor.
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+        reg.register("noop", |_p| Ok(json!({})));
+        let engine = TriggerEngine::with_publish_bus(reg, bus.clone());
+        engine.set_triggers(vec![trig_with_await(
+            "ask",
+            "noop",
+            "todo.start_requested",
+            AwaitClause {
+                event_kind: "slack.dm".into(),
+                payload_match: Map::new(),
+                timeout_seconds: 60,
+                on_timeout: TimeoutPolicy::Abort,
+            },
+        )]);
+        // Drain the success completion the registry published (we
+        // don't want it to promote our preflight; we want to test
+        // the .failed drop path explicitly).
+        let _ = bus.subscribe("noop.completed").try_recv();
+        engine.dispatch(&evt("todo.start_requested", json!({})), None);
+        assert_eq!(engine.preflight_await_count(), 1);
+        // Dispatch a synthetic .failed sourced as the real registry
+        // would (action_registry::COMPLETION_EVENT_SOURCE) so the
+        // trust check accepts it.
+        let failed = Event::new(
+            "noop.failed",
+            crate::action_registry::COMPLETION_EVENT_SOURCE,
+            json!({}),
+        );
+        engine.dispatch(&failed, None);
+        assert_eq!(engine.preflight_await_count(), 0);
+        assert_eq!(engine.pending_await_count(), 0);
+    }
+
+    #[test]
+    fn awaited_event_fires_on_match_with_payload_namespaced() {
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+        reg.register("noop", |_p| Ok(json!({})));
+        let engine = TriggerEngine::with_publish_bus(reg, bus.clone());
+        engine.set_triggers(vec![trig_with_await(
+            "ask",
+            "noop",
+            "todo.start_requested",
+            AwaitClause {
+                event_kind: "slack.dm".into(),
+                payload_match: Map::new(),
+                timeout_seconds: 60,
+                on_timeout: TimeoutPolicy::Abort,
+            },
+        )]);
+        let rx = bus.subscribe("ask.awaited");
+        let completed_rx = bus.subscribe("noop.completed");
+        engine.dispatch(
+            &evt("todo.start_requested", json!({"id": "T-1", "title": "x"})),
+            None,
+        );
+        // Pump the registry's completion event into the engine.
+        let completed = completed_rx.try_recv().expect("noop.completed");
+        engine.dispatch(&completed, None);
+        // Awaited event arrives.
+        engine.dispatch(&evt("slack.dm", json!({"text": "PROJ-42"})), None);
+        // Synthesized event published.
+        let received = match rx.recv_timeout(Duration::from_millis(50)) {
+            crate::event_bus::RecvOutcome::Event(e) => e,
+            other => panic!("expected awaited event, got {other:?}"),
+        };
+        assert_eq!(received.kind, "ask.awaited");
+        assert_eq!(received.payload["id"], "T-1");
+        assert_eq!(received.payload["title"], "x");
+        assert_eq!(received.payload["await"]["text"], "PROJ-42");
+        assert_eq!(engine.pending_await_count(), 0);
+    }
+
+    #[test]
+    fn await_payload_match_interpolated_against_original_event() {
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+        reg.register("noop", |_p| Ok(json!({})));
+        let engine = TriggerEngine::with_publish_bus(reg, bus.clone());
+        let mut pm = Map::new();
+        pm.insert("user".into(), Value::String("{event.user}".into()));
+        engine.set_triggers(vec![trig_with_await(
+            "ask",
+            "noop",
+            "todo.start_requested",
+            AwaitClause {
+                event_kind: "slack.dm".into(),
+                payload_match: pm,
+                timeout_seconds: 60,
+                on_timeout: TimeoutPolicy::Abort,
+            },
+        )]);
+        let rx = bus.subscribe("ask.awaited");
+        let completed_rx = bus.subscribe("noop.completed");
+        engine.dispatch(&evt("todo.start_requested", json!({"user": "U_M"})), None);
+        let completed = completed_rx.try_recv().expect("noop.completed");
+        engine.dispatch(&completed, None);
+        // Wrong user — must NOT match.
+        engine.dispatch(
+            &evt("slack.dm", json!({"user": "U_OTHER", "text": "no"})),
+            None,
+        );
+        assert_eq!(
+            engine.pending_await_count(),
+            1,
+            "non-matching event must leave pending intact"
+        );
+        // Right user — must match.
+        engine.dispatch(
+            &evt("slack.dm", json!({"user": "U_M", "text": "yes"})),
+            None,
+        );
+        let received = match rx.recv_timeout(Duration::from_millis(50)) {
+            crate::event_bus::RecvOutcome::Event(e) => e,
+            other => panic!("expected awaited event, got {other:?}"),
+        };
+        assert_eq!(received.payload["await"]["text"], "yes");
+    }
+
+    #[test]
+    fn sweep_drops_expired_pendings_with_abort() {
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+        reg.register("noop", |_p| Ok(json!({})));
+        let engine = TriggerEngine::with_publish_bus(reg, bus.clone());
+        engine.set_triggers(vec![trig_with_await(
+            "ask",
+            "noop",
+            "todo.start_requested",
+            AwaitClause {
+                event_kind: "slack.dm".into(),
+                payload_match: Map::new(),
+                timeout_seconds: 0, // immediate expiry
+                on_timeout: TimeoutPolicy::Abort,
+            },
+        )]);
+        let completed_rx = bus.subscribe("noop.completed");
+        engine.dispatch(&evt("todo.start_requested", json!({})), None);
+        let completed = completed_rx.try_recv().expect("noop.completed");
+        engine.dispatch(&completed, None);
+        assert_eq!(engine.pending_await_count(), 1);
+        // Sleep a tick past the deadline so Instant::now() > deadline.
+        std::thread::sleep(Duration::from_millis(5));
+        engine.sweep_pending_awaits();
+        assert_eq!(engine.pending_await_count(), 0);
+    }
+
+    #[test]
+    fn sweep_fires_default_event_on_timeout_when_policy_set() {
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+        reg.register("noop", |_p| Ok(json!({})));
+        let engine = TriggerEngine::with_publish_bus(reg, bus.clone());
+        engine.set_triggers(vec![trig_with_await(
+            "ask",
+            "noop",
+            "todo.start_requested",
+            AwaitClause {
+                event_kind: "slack.dm".into(),
+                payload_match: Map::new(),
+                timeout_seconds: 0,
+                on_timeout: TimeoutPolicy::FireWithDefault,
+            },
+        )]);
+        let rx = bus.subscribe("ask.awaited");
+        let completed_rx = bus.subscribe("noop.completed");
+        engine.dispatch(&evt("todo.start_requested", json!({"id": "T-9"})), None);
+        let completed = completed_rx.try_recv().expect("noop.completed");
+        engine.dispatch(&completed, None);
+        std::thread::sleep(Duration::from_millis(5));
+        engine.sweep_pending_awaits();
+        let received = match rx.recv_timeout(Duration::from_millis(50)) {
+            crate::event_bus::RecvOutcome::Event(e) => e,
+            other => panic!("expected awaited timeout event, got {other:?}"),
+        };
+        assert_eq!(received.payload["id"], "T-9");
+        assert!(
+            received.payload["await"].is_null(),
+            "fire_with_default sets await to null"
+        );
+    }
+
+    #[test]
+    fn sweep_drops_preflight_when_action_never_completes() {
+        // A trigger fires its action, but `<action>.completed` never
+        // arrives (legacy match-arm action that doesn't go through
+        // the registry, or stalled action). Preflight expires and
+        // is dropped.
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        // No completion bus on this registry so noop.completed is
+        // never published — simulates the legacy/stalled case.
+        let reg = Arc::new(ActionRegistry::new());
+        reg.register("noop", |_p| Ok(json!({})));
+        let engine = TriggerEngine::with_publish_bus(reg, bus.clone());
+        engine.set_triggers(vec![trig_with_await(
+            "ask",
+            "noop",
+            "todo.start_requested",
+            AwaitClause {
+                event_kind: "slack.dm".into(),
+                payload_match: Map::new(),
+                timeout_seconds: 0,
+                on_timeout: TimeoutPolicy::Abort,
+            },
+        )]);
+        engine.dispatch(&evt("todo.start_requested", json!({})), None);
+        assert_eq!(engine.preflight_await_count(), 1);
+        std::thread::sleep(Duration::from_millis(5));
+        engine.sweep_pending_awaits();
+        assert_eq!(engine.preflight_await_count(), 0);
+        assert_eq!(engine.pending_await_count(), 0);
+    }
+
+    #[test]
+    fn one_event_satisfies_only_one_pending_when_criteria_overlap() {
+        // Two preflights with identical match criteria: a single
+        // matching event should resolve only ONE of them. Broadcasting
+        // one reply to multiple concurrent prompts would silently
+        // double-fire downstream chains.
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+        reg.register("noop", |_p| Ok(json!({})));
+        let engine = TriggerEngine::with_publish_bus(reg, bus.clone());
+        let mut pm = Map::new();
+        pm.insert("user".into(), Value::String("U_M".into()));
+        engine.set_triggers(vec![
+            trig_with_await(
+                "ask-1",
+                "noop",
+                "todo.a",
+                AwaitClause {
+                    event_kind: "reply".into(),
+                    payload_match: pm.clone(),
+                    timeout_seconds: 60,
+                    on_timeout: TimeoutPolicy::Abort,
+                },
+            ),
+            trig_with_await(
+                "ask-2",
+                "noop",
+                "todo.b",
+                AwaitClause {
+                    event_kind: "reply".into(),
+                    payload_match: pm,
+                    timeout_seconds: 60,
+                    on_timeout: TimeoutPolicy::Abort,
+                },
+            ),
+        ]);
+        let rx_1 = bus.subscribe("ask-1.awaited");
+        let rx_2 = bus.subscribe("ask-2.awaited");
+        let completed_rx = bus.subscribe("noop.completed");
+        engine.dispatch(&evt("todo.a", json!({})), None);
+        engine.dispatch(&evt("todo.b", json!({})), None);
+        let c1 = completed_rx.try_recv().expect("completion 1");
+        engine.dispatch(&c1, None);
+        let c2 = completed_rx.try_recv().expect("completion 2");
+        engine.dispatch(&c2, None);
+        assert_eq!(engine.pending_await_count(), 2);
+        // ONE matching event arrives.
+        engine.dispatch(&evt("reply", json!({"user": "U_M", "text": "hi"})), None);
+        // First-staged pending fires; second remains.
+        let received = match rx_1.recv_timeout(Duration::from_millis(50)) {
+            crate::event_bus::RecvOutcome::Event(e) => e,
+            other => panic!("expected ask-1.awaited, got {other:?}"),
+        };
+        assert_eq!(received.payload["await"]["text"], "hi");
+        match rx_2.recv_timeout(Duration::from_millis(20)) {
+            crate::event_bus::RecvOutcome::Timeout => {}
+            other => panic!("ask-2.awaited should NOT fire on the same event: {other:?}"),
+        }
+        assert_eq!(engine.pending_await_count(), 1);
+    }
+
+    #[test]
+    fn promote_drop_ignores_events_not_sourced_from_action_registry() {
+        // An event with kind `noop.completed` but source != "turm.action"
+        // (e.g. a user-published event mimicking the suffix) must NOT
+        // advance the await state machine. Only the registry's
+        // synthetic completion fan-out is trusted.
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+        reg.register("noop", |_p| Ok(json!({})));
+        let engine = TriggerEngine::with_publish_bus(reg, bus.clone());
+        engine.set_triggers(vec![trig_with_await(
+            "ask",
+            "noop",
+            "todo.start_requested",
+            AwaitClause {
+                event_kind: "slack.dm".into(),
+                payload_match: Map::new(),
+                timeout_seconds: 60,
+                on_timeout: TimeoutPolicy::Abort,
+            },
+        )]);
+        // Drain the real completion the registry will publish.
+        let _ = bus.subscribe("noop.completed").try_recv();
+        engine.dispatch(&evt("todo.start_requested", json!({})), None);
+        assert_eq!(engine.preflight_await_count(), 1);
+        // Synthetic event with the right kind but WRONG source.
+        let spoofed = evt("noop.completed", json!({}));
+        // `evt` helper sets source = "test", so this is the spoof shape.
+        assert_eq!(spoofed.source, "test");
+        engine.dispatch(&spoofed, None);
+        assert_eq!(
+            engine.preflight_await_count(),
+            1,
+            "spoofed completion must not advance the state machine"
+        );
+        assert_eq!(engine.pending_await_count(), 0);
+    }
+
+    #[test]
+    fn await_payload_match_preserves_numeric_types() {
+        // payload_match = { count = "{event.count}" } where event.count
+        // is a number (not a string) must compare against awaited.count
+        // as a number. interpolate_value would have coerced to
+        // Value::String("42") and missed Value::Number(42) on the
+        // awaited side. interpolate_value_typed unwraps the single
+        // token and preserves the raw JSON Value.
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+        reg.register("noop", |_p| Ok(json!({})));
+        let engine = TriggerEngine::with_publish_bus(reg, bus.clone());
+        let mut pm = Map::new();
+        pm.insert("count".into(), Value::String("{event.count}".into()));
+        engine.set_triggers(vec![trig_with_await(
+            "ask-num",
+            "noop",
+            "todo.start_requested",
+            AwaitClause {
+                event_kind: "reply".into(),
+                payload_match: pm,
+                timeout_seconds: 60,
+                on_timeout: TimeoutPolicy::Abort,
+            },
+        )]);
+        let rx = bus.subscribe("ask-num.awaited");
+        let completed_rx = bus.subscribe("noop.completed");
+        engine.dispatch(&evt("todo.start_requested", json!({"count": 42})), None);
+        let completed = completed_rx.try_recv().expect("noop.completed");
+        engine.dispatch(&completed, None);
+        // Awaited event with count=42 (number, not string) — must match.
+        engine.dispatch(&evt("reply", json!({"count": 42, "text": "ok"})), None);
+        let received = match rx.recv_timeout(Duration::from_millis(50)) {
+            crate::event_bus::RecvOutcome::Event(e) => e,
+            other => panic!("expected ask-num.awaited, got {other:?}"),
+        };
+        assert_eq!(received.payload["await"]["text"], "ok");
+    }
+
+    #[test]
+    fn dispatching_completion_does_not_consume_freshly_registered_preflight() {
+        // Round-3 ordering fix: a dispatch event of `X.completed` that
+        // also matches a trigger which fires action X must NOT have
+        // its newly-registered preflight consumed by the same event.
+        // The preflight should wait for a FUTURE completion.
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+        reg.register("noop", |_p| Ok(json!({})));
+        let engine = TriggerEngine::with_publish_bus(reg, bus.clone());
+        engine.set_triggers(vec![trig_with_await(
+            "chained-ask",
+            "noop",
+            "noop.completed", // fires ON a completion event
+            AwaitClause {
+                event_kind: "slack.dm".into(),
+                payload_match: Map::new(),
+                timeout_seconds: 60,
+                on_timeout: TimeoutPolicy::Abort,
+            },
+        )]);
+        // Manually feed a `noop.completed` event in. Trigger fires
+        // (action = noop), registers preflight. The same event must
+        // NOT immediately promote its own preflight.
+        let synthetic_completed = evt("noop.completed", json!({"ok": true}));
+        engine.dispatch(&synthetic_completed, None);
+        assert_eq!(
+            engine.preflight_await_count(),
+            1,
+            "preflight registered by current dispatch must survive — promotion should wait for the NEXT completion"
+        );
+        assert_eq!(engine.pending_await_count(), 0);
+    }
+
+    #[test]
+    fn set_triggers_clears_in_flight_await_state() {
+        // Round-3 hot-reload contract: replacing the trigger list
+        // must also drop preflight + pending entries that referenced
+        // the old config. Otherwise a removed trigger could still
+        // emit `<old_name>.awaited` after reload.
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+        reg.register("noop", |_p| Ok(json!({})));
+        let engine = TriggerEngine::with_publish_bus(reg, bus.clone());
+        engine.set_triggers(vec![trig_with_await(
+            "old-trigger",
+            "noop",
+            "todo.start_requested",
+            AwaitClause {
+                event_kind: "slack.dm".into(),
+                payload_match: Map::new(),
+                timeout_seconds: 60,
+                on_timeout: TimeoutPolicy::Abort,
+            },
+        )]);
+        let completed_rx = bus.subscribe("noop.completed");
+        engine.dispatch(&evt("todo.start_requested", json!({})), None);
+        let completed = completed_rx.try_recv().expect("noop.completed");
+        engine.dispatch(&completed, None);
+        assert_eq!(engine.pending_await_count(), 1);
+        // Reload with a different trigger set.
+        engine.set_triggers(vec![]);
+        assert_eq!(engine.preflight_await_count(), 0);
+        assert_eq!(engine.pending_await_count(), 0);
+    }
+
+    #[test]
+    fn multiple_pendings_only_matched_one_fires() {
+        let bus = Arc::new(crate::event_bus::EventBus::new());
+        let reg = Arc::new(ActionRegistry::with_completion_bus(bus.clone()));
+        reg.register("noop", |_p| Ok(json!({})));
+        let engine = TriggerEngine::with_publish_bus(reg, bus.clone());
+        let mut pm_a = Map::new();
+        pm_a.insert("id".into(), Value::String("{event.id}".into()));
+        let mut pm_b = Map::new();
+        pm_b.insert("id".into(), Value::String("{event.id}".into()));
+        engine.set_triggers(vec![
+            trig_with_await(
+                "ask-a",
+                "noop",
+                "todo.a",
+                AwaitClause {
+                    event_kind: "reply".into(),
+                    payload_match: pm_a,
+                    timeout_seconds: 60,
+                    on_timeout: TimeoutPolicy::Abort,
+                },
+            ),
+            trig_with_await(
+                "ask-b",
+                "noop",
+                "todo.b",
+                AwaitClause {
+                    event_kind: "reply".into(),
+                    payload_match: pm_b,
+                    timeout_seconds: 60,
+                    on_timeout: TimeoutPolicy::Abort,
+                },
+            ),
+        ]);
+        let rx_a = bus.subscribe("ask-a.awaited");
+        let rx_b = bus.subscribe("ask-b.awaited");
+        let completed_rx = bus.subscribe("noop.completed");
+        engine.dispatch(&evt("todo.a", json!({"id": "A"})), None);
+        engine.dispatch(&evt("todo.b", json!({"id": "B"})), None);
+        // Both preflights staged; promote both via two completed events.
+        let c1 = completed_rx.try_recv().expect("first noop.completed");
+        engine.dispatch(&c1, None);
+        let c2 = completed_rx.try_recv().expect("second noop.completed");
+        engine.dispatch(&c2, None);
+        assert_eq!(engine.pending_await_count(), 2);
+        // Reply matching B's id only.
+        engine.dispatch(&evt("reply", json!({"id": "B", "text": "ok-B"})), None);
+        match rx_b.recv_timeout(Duration::from_millis(50)) {
+            crate::event_bus::RecvOutcome::Event(e) => {
+                assert_eq!(e.payload["await"]["text"], "ok-B");
+            }
+            other => panic!("expected ask-b.awaited, got {other:?}"),
+        }
+        // ask-a should NOT have fired.
+        match rx_a.recv_timeout(Duration::from_millis(20)) {
+            crate::event_bus::RecvOutcome::Timeout => {}
+            other => panic!("ask-a.awaited should NOT fire: {other:?}"),
+        }
+        assert_eq!(engine.pending_await_count(), 1);
     }
 }

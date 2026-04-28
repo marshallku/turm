@@ -124,7 +124,12 @@ impl TurmWindow {
         // frequency unrelated kinds cannot flood the bounded ctx queues.
         let sink: Arc<dyn TriggerSink> =
             Arc::new(LiveTriggerSink::new(actions.clone(), dispatch_tx.clone()));
-        let triggers = Arc::new(TriggerEngine::new(sink));
+        // Phase 14.2: engine needs a bus handle to publish synthesized
+        // `<trigger_name>.awaited` events when an `await` clause's
+        // payload-match arrives. Without `with_publish_bus` the await
+        // primitive degrades to no-ops (pendings register but never
+        // emit downstream events).
+        let triggers = Arc::new(TriggerEngine::with_publish_bus(sink, event_bus.clone()));
         triggers.set_triggers(config.triggers.clone());
         let pump_state = Rc::new(RefCell::new(PumpState {
             ctx_focused: event_bus.subscribe("panel.focused"),
@@ -239,6 +244,14 @@ impl TurmWindow {
             // events with per-event context snapshot. Single helper used by
             // both this timer and the hot-reload callback so semantics match.
             pump_state_timer.borrow().pump_all(&ctx_pump, &trg_pump);
+
+            // Phase 14.2: drop expired pending awaits and emit
+            // `<trigger_name>.awaited` with null payload for any
+            // entry whose `on_timeout = "fire_with_default"`. Cheap
+            // enough to run on every 50ms tick — pending list is
+            // typically single-digit entries; iteration cost
+            // dominated by Instant::now() per entry.
+            trg_pump.sweep_pending_awaits();
 
             // Process socket commands. After each, drain ONLY context
             // receivers (not trigger queues — those are handled at the start
@@ -467,7 +480,25 @@ impl TriggerSubscriptions {
     /// new patterns get fresh `subscribe_unbounded` receivers (lossless for
     /// matched kinds).
     pub fn reconcile(&mut self, bus: &Arc<CoreEventBus>, triggers: &[Trigger]) {
-        let raw: Vec<String> = triggers.iter().map(|t| t.when.event_kind.clone()).collect();
+        // The pump needs to drive THREE flavors of event into the engine:
+        //   1. `when.event_kind` — the originating event a trigger matches.
+        //   2. `await.event_kind` — the follow-up the engine waits for after
+        //      a trigger with `await` has fired (Phase 14.2).
+        //   3. `<action>.completed` / `.failed` for any trigger with
+        //      `await` — the engine promotes preflight → pending on
+        //      `<X>.completed` and drops on `<X>.failed`. Without these
+        //      subscriptions the await primitive degrades to "registers
+        //      preflight, never promotes" and the documented flow doesn't
+        //      work in the live app.
+        let mut raw: Vec<String> = Vec::with_capacity(triggers.len() * 3);
+        for t in triggers {
+            raw.push(t.when.event_kind.clone());
+            if let Some(aw) = &t.r#await {
+                raw.push(aw.event_kind.clone());
+                raw.push(format!("{}.completed", t.action));
+                raw.push(format!("{}.failed", t.action));
+            }
+        }
         let needed: std::collections::HashSet<String> =
             covering_patterns(raw).into_iter().collect();
         self.receivers.retain(|pattern, _| needed.contains(pattern));
@@ -478,14 +509,38 @@ impl TriggerSubscriptions {
         }
     }
 
-    /// Drain every receiver fully, calling `f` for each event. Order across
-    /// receivers is not significant for trigger semantics — every event is
-    /// matched against the full trigger list.
+    /// Drain every receiver fully, calling `f` for each event. Order
+    /// matters for Phase 14.2: `<X>.completed` and `<X>.failed`
+    /// events MUST be processed before any `await.event_kind` events
+    /// queued in the same tick, otherwise an awaited reply that
+    /// arrived alongside the completion would be discarded
+    /// (preflight not yet promoted to pending → match attempt fails
+    /// → reply dropped → workflow times out). HashMap iteration
+    /// order is unspecified, so we explicitly drain into a Vec and
+    /// sort: `.completed`/`.failed` first, then everything else.
     pub fn drain_into<F: FnMut(BusEvent)>(&self, mut f: F) {
+        let mut events: Vec<BusEvent> = Vec::new();
         for rx in self.receivers.values() {
             while let Some(event) = rx.try_recv() {
-                f(event);
+                events.push(event);
             }
+        }
+        // Stable sort so events with identical priority keep insertion
+        // order. Priority 0 (run first) is reserved for `turm.action`-
+        // sourced completion fan-out events ONLY — that's the same
+        // trust boundary `try_promote_or_drop_preflight` enforces. A
+        // user-published event with `kind = "todo.completed"` (Todo
+        // plugin's watcher emits this) is NOT a completion fan-out
+        // and gets normal priority, so it doesn't end up reordered
+        // ahead of other awaited follow-ups in unspecified ways.
+        events.sort_by_key(|e| {
+            let is_completion_fan_out = e.source
+                == turm_core::action_registry::COMPLETION_EVENT_SOURCE
+                && (e.kind.ends_with(".completed") || e.kind.ends_with(".failed"));
+            if is_completion_fan_out { 0u8 } else { 1u8 }
+        });
+        for event in events {
+            f(event);
         }
     }
 }

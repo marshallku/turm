@@ -75,12 +75,16 @@ type Result<T> = std::result::Result<T, TurmError>;
 Config-driven `event → action` automation. Pure primitive — no bus subscription, no config loading; the platform layer pumps events into `dispatch()`. See [workflow-runtime.md](./workflow-runtime.md) for the broader trigger model.
 
 ```rust
-Trigger { name, when: WhenSpec, action, params: Value, condition: Option<String> }
+Trigger { name, when: WhenSpec, action, params: Value, condition: Option<String>, await: Option<AwaitClause> }
 WhenSpec { event_kind: String, payload_match: Map<String, Value> }
-TriggerEngine::new(sink: Arc<dyn TriggerSink>)  // ActionRegistry impls TriggerSink
-TriggerEngine::set_triggers(Vec<Trigger>)        // hot-reloadable; conditions parsed once here
-TriggerEngine::dispatch(&Event, Option<&Context>) -> usize  // returns # fired
-TriggerEngine::count() / names()
+AwaitClause { event_kind: String, payload_match: Map<String, Value>, timeout_seconds: u64, on_timeout: TimeoutPolicy }
+TimeoutPolicy = Abort | FireWithDefault
+TriggerEngine::new(sink)                           // ActionRegistry impls TriggerSink
+TriggerEngine::with_publish_bus(sink, Arc<EventBus>)  // Phase 14.2: required for await semantics
+TriggerEngine::set_triggers(Vec<Trigger>)          // hot-reload; ALSO clears in-flight await state (preflight + pending)
+TriggerEngine::dispatch(&Event, Option<&Context>) -> usize
+TriggerEngine::sweep_pending_awaits()              // periodic timeout sweep, caller invokes from a timer
+TriggerEngine::count() / names() / pending_await_count() / preflight_await_count()
 ```
 
 **`when` matching:**
@@ -91,10 +95,36 @@ TriggerEngine::count() / names()
 
 **Param interpolation (`{token}` in any string in `params`):**
 - `{event.foo}` → `event.payload["foo"]` value (scalar JSON → string; null → "null"; objects/arrays → `Display` of `serde_json::Value`).
+- **Dot-path access** (Phase 14.2): `{event.foo.bar.baz}` walks nested JSON objects. Used by `await`-driven workflows where the matched payload lands under `event.await.<field>` on the synthesized `<trigger_name>.awaited` event. Non-object hops return `None`, leaving the literal `{token}` in place — same fail-loud posture as flat tokens.
 - `{context.active_panel}` / `{context.active_cwd}` → from the `Context` snapshot the dispatcher passes in.
 - Unresolvable tokens are kept as literal `{token}` so misconfigured triggers fail loudly in their target action rather than silently substituting empty.
 - Unclosed `{` is preserved verbatim.
 - Walks nested arrays/objects; non-string scalars pass through unchanged.
+
+**`await` (Phase 14.2 slice 1):** turns a single trigger into a multi-step state machine.
+
+```toml
+[[triggers]]
+name = "ask-jira"
+action = "slack.post_message"
+params = { channel = "U_USER", text = "Jira key for {event.title}?" }
+[triggers.when]
+event_kind = "todo.start_requested"
+[triggers.await]
+event_kind = "slack.dm"
+payload_match = { user = "{event.user}" }
+timeout_seconds = 300
+on_timeout = "abort"   # or "fire_with_default"
+```
+
+When the trigger fires its action, the engine registers a **preflight** entry. On `<action>.completed` (Phase 14.1 fan-out) the preflight promotes to **pending**; on `<action>.failed` it drops. While pending, every dispatched event is checked against `await.event_kind` + interpolated `payload_match`. On match, the engine publishes a synthesized `<trigger_name>.awaited` event whose payload is the original event's payload PLUS the matched event's payload nested under `await:`. Downstream triggers reference `<trigger_name>.awaited` to continue the chain.
+
+Important constraints:
+- **Subscriptions** (turm-linux's `TriggerSubscriptions::reconcile`) must subscribe to `await.event_kind`, `<action>.completed`, and `<action>.failed` for await-bearing triggers — otherwise the engine never sees those events. Done automatically in turm-linux.
+- **Pump ordering** (turm-linux's `drain_into`) drains receivers into a Vec then stable-sorts so `.completed` / `.failed` events run BEFORE `await.event_kind` events queued in the same tick. Without this, an awaited reply in the same tick as the completion that should promote it could be dropped.
+- **FIFO scope is per action name only** — neither per-trigger nor per-invocation. Two triggers using the same action share a queue; even repeated firings of one trigger may mis-correlate completions to preflights if completions arrive out of dispatch order. Closing fully needs per-invocation correlation tokens on `<X>.completed`/`.failed` (slice-2 follow-up).
+- **Volatile state**: both `preflight_awaits` and `pending_awaits` clear on `set_triggers()` (all-or-nothing hot reload) and on process restart. Acceptable for typical minute-scale awaits.
+- **Legacy match-arm actions** that don't fire `<action>.completed` (turm-internal socket actions outside `ActionRegistry`) leave preflights stranded; they expire via `sweep_pending_awaits` and either drop silently (Abort) or emit the awaited event with `await: null` (FireWithDefault).
 
 **Error handling:** registry-action failures (sync `Err` returned by the sink) are logged via `log::warn!` inside `dispatch` and never propagate. Fallthrough-action failures (sink returns `Ok` synchronously but the legacy command later fails) are surfaced ASYNCHRONOUSLY — see the `LiveTriggerSink` reply-consumer thread. One bad trigger cannot poison the dispatcher or block other triggers.
 
