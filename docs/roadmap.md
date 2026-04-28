@@ -584,11 +584,21 @@ User-explicit gap. Same shape as Slack (Phase 11) — a long-lived WebSocket plu
 - [x] **Cross-plugin trigger examples** in `examples/plugins/discord/triggers.example.toml`: raw archive (kb.ensure dedup), mention → personal-tasks file with `condition` to skip @everyone, DM → llm.complete → reply (Phase 14.2 await chain sketch), single-channel subscription via `payload_match { channel_id = "..." }`.
 - [x] **24 unit tests** across `events`, `gateway`, `config` covering message classification (raw/message/dm/mention), credential resolution, URL normalization, label validation.
 
+**Phase 20.2.5 — Reaction events + get_message** (shipped on top of slice 2):
+
+- [x] `MESSAGE_REACTION_ADD` DISPATCH parsed in `events.rs` → emits `discord.reaction { message_id, channel_id, guild_id, user_id, message_author_id, emoji_name, emoji_id, emoji_animated }`. Self-reactions filtered (avoids the "bot adds starter emoji that triggers its own pipeline" feedback loop).
+- [x] Gateway intents extended to `0xB600` (adds `GUILD_MESSAGE_REACTIONS = 1<<10` and `DIRECT_MESSAGE_REACTIONS = 1<<13`; non-privileged so no Bot-tab toggle needed).
+- [x] `discord.get_message` action: `GET /channels/{channel_id}/messages/{message_id}`. Returns the verbatim Discord message JSON so triggers can access object fields like `content` / `author.id` via the dot-path interpolator. (Array fields like `attachments` / `mentions` come through under the same key, but the current dot-path resolver doesn't index — `attachments[0].url` is not supported. Wait for a `[N]` extension or surface specific scalars in `events.rs` if that becomes load-bearing.) Both `channel_id` and `message_id` validated as snowflakes (decimal-only, non-empty) before path interpolation, closing the same trust-boundary gap that `discord.send_message` carries.
+- [x] `api.rs::classify_response_error` shared between every REST helper so the failure surface (rate_limited / discord_<numeric> / io_error) stays uniform.
+- [x] `examples/plugins/discord/triggers.example.toml` adds the canonical "react with 📝 → Todo" recipe using Phase 14.2 `await` to correlate the `get_message.completed` reply with the originating reaction trigger (without correlation, every `get_message` would trigger every reaction-driven todo).
+- [x] **8 unit tests** for reactions: unicode/custom/animated emoji, DM-vs-guild, self-filter, missing user_id / emoji guards, MESSAGE_REACTION_REMOVE returns empty, payload_json round-trip.
+
 **Phase 20.X — open follow-ups (slice 3 candidates)**:
 
 - [ ] `discord.add_reaction` / `discord.edit_message` / `discord.delete_message` — convenience write actions.
-- [ ] `discord.list_channels` / `discord.list_guilds` — read actions for plugin pages / interactive UIs.
-- [ ] MESSAGE_UPDATE / MESSAGE_DELETE event emission (drop-in to `events::from_dispatch` allowlist).
+- [ ] `discord.list_channels` / `discord.list_guilds` / `discord.list_messages` — read actions for plugin pages / interactive UIs / catch-up triggers.
+- [ ] MESSAGE_UPDATE / MESSAGE_DELETE / MESSAGE_REACTION_REMOVE event emission (drop-in to `events::from_dispatch` allowlist).
+- [ ] **Slack reaction parity** — `slack.reaction_added` event (Slack Events API delivers `reaction_added` with `item.channel` + `item.ts` + `user` + `reaction`). Plus `slack.read_history` / `slack.get_message` for chained body fetch.
 - [ ] Slack/Discord plugin-page UI panels (`panel.html`) — auth status, recent events, send-message form. Tracked separately from slice 3 because it spans both messengers.
 
 - [ ] OAuth redirect flow as alternative to bot-token paste — needs a localhost listener; defer until env+keyring proves insufficient (same posture as Slack).

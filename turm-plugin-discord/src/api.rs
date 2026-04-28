@@ -32,34 +32,14 @@ pub struct ApiError {
     pub message: String,
 }
 
-/// Post a plain-text message to a channel or DM. Returns
-/// `(message_id, channel_id)` on success — `message_id` is the
-/// canonical handle for follow-up edits/reactions.
-///
-/// `content` must be ≤ 2000 chars (Discord's hard limit). Caller is
-/// responsible for truncation; the API rejects over-length with
-/// HTTP 400 `BASE_TYPE_MAX_LENGTH`.
-pub fn post_message(
-    bot_token: &str,
-    channel_id: &str,
-    content: &str,
-) -> Result<(String, String), ApiError> {
-    let body = json!({
-        "content": content,
-    });
-    let resp = match ureq::post(&format!(
-        "{DISCORD_API_BASE}/channels/{channel_id}/messages"
-    ))
-    .set("Authorization", &format!("Bot {bot_token}"))
-    .set("User-Agent", "turm-plugin-discord (turm, 0.1)")
-    .timeout(HTTP_TIMEOUT)
-    .send_json(body)
-    {
-        Ok(r) => r,
-        // 429 carries Retry-After (seconds, fractional) AND a JSON body
-        // with `retry_after` (ms). We surface both so callers get the
-        // human-friendly seconds figure and structured remediation.
-        Err(ureq::Error::Status(429, r)) => {
+/// Map a non-success response into a structured ApiError. Shared
+/// between every REST helper so the failure surface stays uniform —
+/// `rate_limited` for 429 with Retry-After, `discord_<numeric>` when
+/// the body parses as Discord's `{code, message}` shape, `io_error`
+/// otherwise.
+fn classify_response_error(err: ureq::Error) -> ApiError {
+    match err {
+        ureq::Error::Status(429, r) => {
             let header_retry = r
                 .header("Retry-After")
                 .map(str::to_string)
@@ -70,7 +50,7 @@ pub fn post_message(
                 .and_then(|v| v.get("retry_after").and_then(Value::as_f64))
                 .map(|s| format!("{s:.3}"))
                 .unwrap_or_default();
-            return Err(ApiError {
+            ApiError {
                 code: "rate_limited".to_string(),
                 message: format!(
                     "Retry-After: {}; body retry_after: {}",
@@ -85,16 +65,10 @@ pub fn post_message(
                         &body_retry
                     }
                 ),
-            });
+            }
         }
-        Err(ureq::Error::Status(http_code, r)) => {
+        ureq::Error::Status(http_code, r) => {
             let body = r.into_string().unwrap_or_default();
-            // Discord error bodies are JSON like
-            // {"code": 50001, "message": "Missing Access"}. Surface
-            // the numeric code as the top-level error code so trigger
-            // conditions can branch on it structurally
-            // (`error.code == "discord_50001"`) instead of parsing
-            // the message string.
             if let Ok(v) = serde_json::from_str::<Value>(&body)
                 && let Some(dc) = v.get("code").and_then(Value::as_u64)
             {
@@ -102,23 +76,44 @@ pub fn post_message(
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("(no message)");
-                return Err(ApiError {
+                return ApiError {
                     code: format!("discord_{dc}"),
                     message: format!("HTTP {http_code}: {dm}"),
-                });
+                };
             }
-            return Err(ApiError {
+            ApiError {
                 code: "io_error".to_string(),
                 message: format!("HTTP {http_code}: {body}"),
-            });
+            }
         }
-        Err(e) => {
-            return Err(ApiError {
-                code: "io_error".to_string(),
-                message: format!("send_message: {e}"),
-            });
-        }
-    };
+        e => ApiError {
+            code: "io_error".to_string(),
+            message: format!("transport: {e}"),
+        },
+    }
+}
+
+/// Post a plain-text message to a channel or DM. Returns
+/// `(message_id, channel_id)` on success — `message_id` is the
+/// canonical handle for follow-up edits/reactions.
+///
+/// `content` must be ≤ 2000 chars (Discord's hard limit). Caller is
+/// responsible for truncation; the API rejects over-length with
+/// HTTP 400 `BASE_TYPE_MAX_LENGTH`.
+pub fn post_message(
+    bot_token: &str,
+    channel_id: &str,
+    content: &str,
+) -> Result<(String, String), ApiError> {
+    let body = json!({ "content": content });
+    let resp = ureq::post(&format!(
+        "{DISCORD_API_BASE}/channels/{channel_id}/messages"
+    ))
+    .set("Authorization", &format!("Bot {bot_token}"))
+    .set("User-Agent", "turm-plugin-discord (turm, 0.1)")
+    .timeout(HTTP_TIMEOUT)
+    .send_json(body)
+    .map_err(classify_response_error)?;
     let v: Value = resp.into_json().map_err(|e| ApiError {
         code: "io_error".to_string(),
         message: format!("send_message response parse: {e}"),
@@ -137,4 +132,24 @@ pub fn post_message(
         .unwrap_or(channel_id)
         .to_string();
     Ok((message_id, posted_channel))
+}
+
+/// `GET /channels/{channel_id}/messages/{message_id}` — fetch a
+/// single message. Used by reaction-capture triggers to pull the
+/// original message body (reactions don't carry it). Returns the
+/// verbatim JSON object so callers can interpolate any field
+/// (`content`, `author.id`, `attachments[]`, etc.).
+pub fn get_message(bot_token: &str, channel_id: &str, message_id: &str) -> Result<Value, ApiError> {
+    let resp = ureq::get(&format!(
+        "{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}"
+    ))
+    .set("Authorization", &format!("Bot {bot_token}"))
+    .set("User-Agent", "turm-plugin-discord (turm, 0.1)")
+    .timeout(HTTP_TIMEOUT)
+    .call()
+    .map_err(classify_response_error)?;
+    resp.into_json().map_err(|e| ApiError {
+        code: "io_error".to_string(),
+        message: format!("get_message response parse: {e}"),
+    })
 }

@@ -1,17 +1,19 @@
-# Example triggers driven by the Discord plugin (slice 2).
+# Example triggers driven by the Discord plugin (slice 2 + 2.5).
 #
-# The plugin emits FOUR event kinds, all derived from MESSAGE_CREATE
-# DISPATCH frames:
-#   - `discord.mention` — message that @-mentions the bot, OR
-#                         @everyone (mention_everyone=true). Wins
-#                         priority over .message and .dm — a single
-#                         MESSAGE_CREATE produces ONE filtered event.
-#   - `discord.dm`      — DM-channel message (no guild_id) that does
-#                         NOT mention the bot.
-#   - `discord.message` — guild-channel message (has guild_id) that
-#                         does NOT mention the bot.
-#   - `discord.raw`     — every MESSAGE_CREATE (unfiltered firehose,
-#                         intended for the archive trigger below).
+# The plugin emits FIVE event kinds:
+#   - `discord.mention`  — MESSAGE_CREATE @-mentioning the bot or
+#                          @everyone. Wins priority over .message and
+#                          .dm — a single MESSAGE_CREATE produces ONE
+#                          filtered event.
+#   - `discord.dm`       — DM-channel MESSAGE_CREATE (no guild_id)
+#                          that does NOT mention the bot.
+#   - `discord.message`  — guild-channel MESSAGE_CREATE (has guild_id)
+#                          that does NOT mention the bot.
+#   - `discord.reaction` — MESSAGE_REACTION_ADD. Doesn't carry the
+#                          original message body; chain
+#                          `discord.get_message` to fetch it.
+#   - `discord.raw`      — every MESSAGE_CREATE (unfiltered firehose,
+#                          intended for the archive trigger below).
 #
 # Filtered payload shape (mention / dm / message):
 #   { message_id, channel_id, guild_id, author_id, author_username,
@@ -125,3 +127,82 @@ event_kind = "discord.mention"
 #    so use a passthrough action that re-dispatches with parsed
 #    params. Sketch only — needs a small command-router action.
 # ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# 6. Emoji-react → Todo capture (slice 2.5)
+#
+# Use case: see something in Discord, react with 📝 (or :memo:), and
+# turm captures the message as a Todo. Uses Phase 14.2 `await` to
+# correlate the get_message reply specifically to THIS trigger
+# instance — without correlation, every successful get_message would
+# trigger a Todo regardless of who initiated it.
+#
+# Two-trigger chain:
+#   - `discord-memo-capture-fetch` fires on `discord.reaction`,
+#     filtered to emoji_name="📝", and dispatches `discord.get_message`.
+#     Its `[triggers.await]` block waits for the matching
+#     `discord.get_message.completed` and publishes a synthesized
+#     `discord-memo-capture-fetch.awaited` event carrying the original
+#     reaction data at top level + the message data nested under
+#     `await:` (via Phase 14.2 build_awaited_payload).
+#   - `discord-memo-capture-create` listens ONLY for that synthesized
+#     event (its name is unique per trigger), so it doesn't fire for
+#     other unrelated `get_message` calls.
+#
+# `event.await.content` reads the fetched message body. `event.await`
+# carries the verbatim Discord message JSON, so object-key accesses
+# like `event.await.author.id` work via the dot-path interpolator.
+# Note the resolver doesn't index arrays today — fields like
+# `attachments[0].url` are NOT expressible; nest the access through a
+# scalar surfaced explicitly by the plugin (or handle it from a
+# follow-up trigger that reads the captured Todo body).
+# ---------------------------------------------------------------------
+# [[triggers]]
+# name = "discord-memo-capture-fetch"
+# action = "discord.get_message"
+# params = { channel_id = "{event.channel_id}", message_id = "{event.message_id}" }
+# condition = """event.emoji_name == "📝" """
+# [triggers.when]
+# event_kind = "discord.reaction"
+# [triggers.await]
+# event_kind = "discord.get_message.completed"
+# timeout_seconds = 10
+# on_timeout = "abort"
+#
+# [[triggers]]
+# name = "discord-memo-capture-create"
+# action = "todo.create"
+# params = { title = "{event.await.content}", workspace = "default" }
+# [triggers.when]
+# event_kind = "discord-memo-capture-fetch.awaited"
+
+# ---------------------------------------------------------------------
+# 7. Star-react → archive a message
+#    Same shape as #6 but a different emoji and `kb.append` instead of
+#    `todo.create`. Multiple memo emojis are handled by repeating the
+#    pair with a different `condition` and unique trigger names.
+# ---------------------------------------------------------------------
+# [[triggers]]
+# name = "discord-star-archive-fetch"
+# action = "discord.get_message"
+# params = { channel_id = "{event.channel_id}", message_id = "{event.message_id}" }
+# condition = """event.emoji_name == "⭐" """
+# [triggers.when]
+# event_kind = "discord.reaction"
+# [triggers.await]
+# event_kind = "discord.get_message.completed"
+# timeout_seconds = 10
+# on_timeout = "abort"
+#
+# [[triggers]]
+# name = "discord-star-archive-write"
+# action = "kb.append"
+# params = { id = "starred/discord.md", content = """
+#
+# ## from {event.await.author.global_name}
+#
+# {event.await.content}
+#
+# """, ensure = true }
+# [triggers.when]
+# event_kind = "discord-star-archive-fetch.awaited"

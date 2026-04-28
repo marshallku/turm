@@ -57,12 +57,18 @@ use crate::events::{DiscordEvent, from_dispatch};
 use crate::store::TokenStore;
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
-/// Gateway intents bitfield. Privileged MESSAGE_CONTENT (1<<15) must
-/// be toggled on at <https://discord.com/developers/applications> →
-/// the application's Bot tab. Without it, message `content` arrives
-/// empty for messages that don't directly mention the bot, and
-/// keyword/payload triggers can't match.
-const GATEWAY_INTENTS: u64 = (1 << 9) | (1 << 12) | (1 << 15);
+/// Gateway intents bitfield (37376 + 8192 + 1024 = 46592 = 0xB600):
+///   GUILD_MESSAGES (1<<9) | GUILD_MESSAGE_REACTIONS (1<<10) |
+///   DIRECT_MESSAGES (1<<12) | DIRECT_MESSAGE_REACTIONS (1<<13) |
+///   MESSAGE_CONTENT (1<<15).
+///
+/// Privileged MESSAGE_CONTENT (1<<15) must be toggled on at
+/// <https://discord.com/developers/applications> → the application's
+/// Bot tab. Without it, message `content` arrives empty for messages
+/// that don't directly mention the bot, and keyword/payload triggers
+/// can't match. The reaction intents are NON-privileged but must
+/// still be in the bitfield or MESSAGE_REACTION_ADD never dispatches.
+const GATEWAY_INTENTS: u64 = (1 << 9) | (1 << 10) | (1 << 12) | (1 << 13) | (1 << 15);
 /// Wait period when no credentials are available — same posture as
 /// the Slack plugin so a `turm-plugin-discord auth` invocation while
 /// the plugin is already running gets picked up without restart.

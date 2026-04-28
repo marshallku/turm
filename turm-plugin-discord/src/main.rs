@@ -231,7 +231,11 @@ fn handle_frame(
                 id,
                 json!({
                     "service_version": env!("CARGO_PKG_VERSION"),
-                    "provides": ["discord.auth_status", "discord.send_message"],
+                    "provides": [
+                        "discord.auth_status",
+                        "discord.send_message",
+                        "discord.get_message",
+                    ],
                     "subscribes": [],
                 }),
             );
@@ -313,6 +317,7 @@ fn handle_action(
             }))
         }
         "discord.send_message" => handle_send_message(params, config, store),
+        "discord.get_message" => handle_get_message(params, config, store),
         _ if config.fatal_error.is_some() => {
             Err(("config_error".into(), config.fatal_error.clone().unwrap()))
         }
@@ -339,24 +344,7 @@ fn handle_send_message(
         "no Discord credentials available — run `turm-plugin-discord auth` or set TURM_DISCORD_BOT_TOKEN"
             .to_string(),
     ))?;
-    let channel_id = params.get("channel_id").and_then(Value::as_str).ok_or((
-        "invalid_params".to_string(),
-        "missing 'channel_id' (string)".to_string(),
-    ))?;
-    // Discord snowflakes are decimal-only — validate before
-    // interpolating into the URL path. Without this guard a
-    // malicious or buggy trigger could pass `../users/@me` or
-    // `123/messages?` and steer the authenticated POST at a
-    // different Discord API endpoint. Empty strings would also slip
-    // through `as_str().ok_or(...)` since "" is a valid &str.
-    if channel_id.is_empty() || !channel_id.bytes().all(|b| b.is_ascii_digit()) {
-        return Err((
-            "invalid_params".to_string(),
-            format!(
-                "'channel_id' must be a Discord snowflake (decimal digits only); got {channel_id:?}"
-            ),
-        ));
-    }
+    let channel_id = require_snowflake(params, "channel_id")?;
     let content = params.get("content").and_then(Value::as_str).ok_or((
         "invalid_params".to_string(),
         "missing 'content' (string)".to_string(),
@@ -387,6 +375,60 @@ fn handle_send_message(
         // "discord_50001"` rather than parsing the message string.
         Err(api::ApiError { code, message }) => Err((code, message)),
     }
+}
+
+fn handle_get_message(
+    params: &Value,
+    config: &Config,
+    store: &Arc<dyn TokenStore>,
+) -> Result<Value, (String, String)> {
+    if config.fatal_error.is_some() {
+        return Err((
+            "not_authenticated".into(),
+            "discord plugin is in fatal-config state — see discord.auth_status".into(),
+        ));
+    }
+    let creds = gateway::current_credentials(config, &**store).ok_or((
+        "not_authenticated".to_string(),
+        "no Discord credentials available — run `turm-plugin-discord auth` or set TURM_DISCORD_BOT_TOKEN"
+            .to_string(),
+    ))?;
+    let channel_id = require_snowflake(params, "channel_id")?;
+    let message_id = require_snowflake(params, "message_id")?;
+    match api::get_message(&creds.bot_token, channel_id, message_id) {
+        // Pass through Discord's full message JSON. Trigger
+        // interpolation sees object-key fields like
+        // `event.await.content` and `event.await.author.id` via the
+        // dot-path interpolator. Array fields (`attachments`,
+        // `mentions`) are present in the value but not indexable from
+        // the DSL today — no `[0]` syntax. Wrapping it under a known
+        // key would force users to know our wrapper shape and break
+        // the symmetry with `discord.message`'s `event_json` raw
+        // field.
+        Ok(value) => Ok(value),
+        Err(api::ApiError { code, message }) => Err((code, message)),
+    }
+}
+
+/// Validate that `params[key]` is a Discord snowflake (non-empty
+/// decimal-only string). Returns the validated &str. Used for every
+/// path-parameter interpolation point so a malicious or buggy
+/// trigger can't redirect an authenticated request at a different
+/// Discord API endpoint.
+fn require_snowflake<'a>(params: &'a Value, key: &str) -> Result<&'a str, (String, String)> {
+    let s = params.get(key).and_then(Value::as_str).ok_or_else(|| {
+        (
+            "invalid_params".to_string(),
+            format!("missing '{key}' (string)"),
+        )
+    })?;
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return Err((
+            "invalid_params".to_string(),
+            format!("'{key}' must be a Discord snowflake (decimal digits only); got {s:?}"),
+        ));
+    }
+    Ok(s)
 }
 
 fn send_response(stdout: &StdoutHandle, id: &str, result: Value) {

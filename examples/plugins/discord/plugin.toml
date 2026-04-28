@@ -1,18 +1,22 @@
 [plugin]
 name = "discord"
 title = "Discord"
-version = "0.2.0"
-description = "Discord Gateway plugin: emits discord.message / discord.mention / discord.dm / discord.raw events and provides discord.send_message for replies."
+version = "0.3.0"
+description = "Discord Gateway plugin: emits discord.message / discord.mention / discord.dm / discord.reaction / discord.raw events; provides discord.send_message + discord.get_message for write actions and reaction-driven body fetch."
 
 [[services]]
 name = "main"
 exec = "turm-plugin-discord"
 # onStartup so the Gateway WebSocket lives whenever turm is running.
-# Lazy `onAction:discord.*` activation would lose mention/DM events
-# between turm starts. Same posture as the Slack plugin.
+# Lazy `onAction:discord.*` activation would lose mention/DM/reaction
+# events between turm starts. Same posture as the Slack plugin.
 activation = "onStartup"
 restart = "on-crash"
-provides = ["discord.auth_status", "discord.send_message"]
+provides = [
+    "discord.auth_status",
+    "discord.send_message",
+    "discord.get_message",
+]
 subscribes = []
 # Required env: TURM_DISCORD_BOT_TOKEN (only for the one-time `auth`
 #   subcommand; the runtime reads from the keyring).
