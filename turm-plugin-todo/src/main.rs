@@ -153,6 +153,7 @@ fn handle_frame(
                     "provides": [
                         "todo.create",
                         "todo.list",
+                        "todo.update",
                         "todo.set_status",
                         "todo.start",
                         "todo.delete",
@@ -226,6 +227,7 @@ fn handle_action(
             })
         }),
         "todo.list" => action_list(params, store),
+        "todo.update" => action_update(params, config, store),
         "todo.set_status" => action_set_status(params, config, store),
         "todo.start" => action_start(params, config, store, tx),
         "todo.delete" => action_delete(params, config, store),
@@ -331,6 +333,112 @@ fn action_list(params: &Value, store: &Arc<Store>) -> Result<Value, (String, Str
     });
     Ok(json!({
         "todos": todos.iter().map(crate::todo::Todo::to_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// Edit arbitrary fields on an existing Todo. Each optional input
+/// follows the "absent ⇒ leave alone" rule — pass only the fields
+/// you intend to change. Empty-string due/linked_jira/prompt clear
+/// the field; null for those values is also accepted as "clear".
+/// Status is intentionally NOT here — keep `todo.set_status` as
+/// the single high-frequency status path so the panel's drag/drop
+/// keeps preserving user-edited frontmatter ordering. `update`
+/// regenerates frontmatter via `render_new`, which reorders /
+/// drops comments, which is the right tradeoff for form edits but
+/// wrong for the status toggle.
+fn action_update(
+    params: &Value,
+    config: &Config,
+    store: &Arc<Store>,
+) -> Result<Value, (String, String)> {
+    let workspace = string_param_or_default(params, "workspace", &config.default_workspace)?;
+    let id = required_string(params, "id")?;
+    let title = optional_present_string(params, "title")?;
+    let body = match params.get("body") {
+        None => None,
+        Some(Value::Null) => Some(String::new()),
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(other) => {
+            return Err((
+                "invalid_params".into(),
+                format!("'body' must be a string, got {other}"),
+            ));
+        }
+    };
+    let priority = match optional_string(params, "priority")? {
+        Some(s) => Some(Priority::parse(&s).ok_or_else(|| {
+            (
+                "invalid_params".to_string(),
+                format!("priority {s:?} not in {{low, normal, high}}"),
+            )
+        })?),
+        None => None,
+    };
+    let due = optional_clearable_string(params, "due")?;
+    let linked_jira = optional_clearable_string(params, "linked_jira")?;
+    let linked_kb = match params.get("linked_kb") {
+        None => None,
+        Some(Value::Null) => Some(Vec::new()),
+        Some(Value::Array(arr)) => Some(
+            arr.iter()
+                .map(|v| {
+                    v.as_str().map(str::to_string).ok_or((
+                        "invalid_params".to_string(),
+                        "'linked_kb' entries must be strings".to_string(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Some(other) => {
+            return Err((
+                "invalid_params".into(),
+                format!("'linked_kb' must be an array, got {other}"),
+            ));
+        }
+    };
+    let tags = match params.get("tags") {
+        None => None,
+        Some(Value::Null) => Some(Vec::new()),
+        Some(Value::Array(arr)) => Some(
+            arr.iter()
+                .map(|v| {
+                    v.as_str().map(str::to_string).ok_or((
+                        "invalid_params".to_string(),
+                        "'tags' entries must be strings".to_string(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Some(other) => {
+            return Err((
+                "invalid_params".into(),
+                format!("'tags' must be an array, got {other}"),
+            ));
+        }
+    };
+    let prompt = optional_clearable_string(params, "prompt")?;
+
+    let updated = store
+        .update(
+            &workspace,
+            &id,
+            title,
+            body,
+            priority,
+            due,
+            linked_jira,
+            linked_kb,
+            tags,
+            prompt,
+        )
+        .map_err(|e| {
+            let (c, m) = e.code_message();
+            (c.to_string(), m)
+        })?;
+    Ok(json!({
+        "id": id,
+        "workspace": workspace,
+        "todo": updated.to_json(),
     }))
 }
 
@@ -457,6 +565,44 @@ fn optional_string(params: &Value, key: &str) -> Result<Option<String>, (String,
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) if s.is_empty() => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err((
+            "invalid_params".into(),
+            format!("{key:?} must be a string, got {other}"),
+        )),
+    }
+}
+
+/// Like `optional_string` but distinguishes "field absent" (None)
+/// from "field present and empty" (Some("")). Used by `todo.update`
+/// to tell "don't touch title" apart from "you said empty title,
+/// reject" (handled at the store layer for title; for due / jira /
+/// prompt the empty value means "clear", see `optional_clearable_string`).
+fn optional_present_string(params: &Value, key: &str) -> Result<Option<String>, (String, String)> {
+    match params.get(key) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(String::new())),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err((
+            "invalid_params".into(),
+            format!("{key:?} must be a string, got {other}"),
+        )),
+    }
+}
+
+/// `Option<Option<String>>` for clearable optional fields. Outer
+/// None = "field absent, don't touch". Outer Some(None) or
+/// Some(Some("")) = "clear it". Outer Some(Some(value)) = "set
+/// to value". Maps from JSON: missing key → None, null or empty
+/// string → Some(None), non-empty string → Some(Some(s)).
+fn optional_clearable_string(
+    params: &Value,
+    key: &str,
+) -> Result<Option<Option<String>>, (String, String)> {
+    match params.get(key) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(s)) if s.is_empty() => Ok(Some(None)),
+        Some(Value::String(s)) => Ok(Some(Some(s.clone()))),
         Some(other) => Err((
             "invalid_params".into(),
             format!("{key:?} must be a string, got {other}"),
@@ -633,6 +779,79 @@ mod tests {
         let frame: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
         assert_eq!(frame["method"], "event.publish");
         assert_eq!(frame["params"]["kind"], "todo.start_requested");
+    }
+
+    #[test]
+    fn update_changes_specific_fields_and_leaves_others() {
+        let (_d, config, store, _tx, _rx) = fixture();
+        let t = action_create(
+            &json!({"title": "old title", "body": "old body", "tags": ["a", "b"]}),
+            &config,
+            &store,
+        )
+        .unwrap();
+        // Touch only title + tags. body, priority, due, jira, kb, prompt absent ⇒ untouched.
+        let r = action_update(
+            &json!({"id": t.id, "title": "new title", "tags": ["a", "b", "c"]}),
+            &config,
+            &store,
+        )
+        .unwrap();
+        assert_eq!(r["todo"]["title"], "new title");
+        // body round-trips with a trailing newline normalization from render_new.
+        assert_eq!(r["todo"]["body"].as_str().unwrap().trim(), "old body");
+        assert_eq!(r["todo"]["tags"], json!(["a", "b", "c"]));
+        assert_eq!(r["todo"]["status"], "open");
+    }
+
+    #[test]
+    fn update_clears_due_and_linked_jira_via_empty_string() {
+        let (_d, config, store, _tx, _rx) = fixture();
+        let t = action_create(
+            &json!({
+                "title": "x",
+                "due": "2026-05-01",
+                "linked_jira": "PROJ-1",
+                "prompt": "do the thing",
+            }),
+            &config,
+            &store,
+        )
+        .unwrap();
+        let r = action_update(
+            &json!({"id": t.id, "due": "", "linked_jira": null, "prompt": ""}),
+            &config,
+            &store,
+        )
+        .unwrap();
+        assert!(r["todo"]["due"].is_null());
+        assert!(r["todo"]["linked_jira"].is_null());
+        assert!(r["todo"]["prompt"].is_null());
+    }
+
+    #[test]
+    fn update_rejects_empty_title_when_provided() {
+        let (_d, config, store, _tx, _rx) = fixture();
+        let t = action_create(&json!({"title": "x"}), &config, &store).unwrap();
+        let err = action_update(&json!({"id": t.id, "title": "   "}), &config, &store).unwrap_err();
+        assert_eq!(err.0, "invalid_params");
+    }
+
+    #[test]
+    fn update_rejects_unknown_priority() {
+        let (_d, config, store, _tx, _rx) = fixture();
+        let t = action_create(&json!({"title": "x"}), &config, &store).unwrap();
+        let err =
+            action_update(&json!({"id": t.id, "priority": "urgent"}), &config, &store).unwrap_err();
+        assert_eq!(err.0, "invalid_params");
+    }
+
+    #[test]
+    fn update_returns_not_found_for_missing_todo() {
+        let (_d, config, store, _tx, _rx) = fixture();
+        let err =
+            action_update(&json!({"id": "T-missing", "title": "x"}), &config, &store).unwrap_err();
+        assert_eq!(err.0, "not_found");
     }
 
     #[test]

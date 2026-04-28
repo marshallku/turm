@@ -163,6 +163,99 @@
 
   .err { color: var(--turm-red); padding: 12px; }
   .loading { color: var(--turm-subtext0); padding: 12px; font-style: italic; }
+
+  /* Edit modal — opens on card click (not on Start, not after drag).
+     A backdrop layer + a centered panel; Esc / backdrop click cancel.
+     The board scrolls beneath but is not interactive while open. */
+  .modal-backdrop {
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: none;
+    align-items: flex-start; justify-content: center;
+    padding: 6vh 16px;
+    z-index: 10000;
+    overflow-y: auto;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    width: min(720px, 100%);
+    background: var(--turm-bg);
+    border: 1px solid var(--turm-surface2);
+    border-radius: 6px;
+    padding: 18px 20px 16px;
+    display: flex; flex-direction: column; gap: 12px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  }
+  .modal h2 {
+    margin: 0; font-size: 0.95rem; color: var(--turm-subtext1);
+    font-weight: 500; letter-spacing: 0.02em;
+  }
+  .modal .meta-line {
+    color: var(--turm-subtext0); font-size: 0.75em;
+    font-family: ui-monospace, monospace;
+  }
+  .modal label {
+    display: flex; flex-direction: column; gap: 4px;
+    font-size: 0.78em; color: var(--turm-subtext1);
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .modal input[type="text"],
+  .modal select,
+  .modal textarea {
+    background: var(--turm-surface0); color: var(--turm-text);
+    border: 1px solid var(--turm-surface2);
+    border-radius: 4px;
+    padding: 6px 10px;
+    font: inherit;
+    text-transform: none; letter-spacing: 0;
+  }
+  .modal textarea { resize: vertical; min-height: 60px; font-family: ui-monospace, monospace; font-size: 0.85em; }
+  .modal textarea[name="body"], .modal textarea[name="prompt"] { min-height: 100px; }
+  .modal input[type="text"]:focus,
+  .modal select:focus,
+  .modal textarea:focus {
+    border-color: var(--turm-accent); outline: none;
+  }
+  .modal .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .modal .actions-bar {
+    display: flex; justify-content: space-between; gap: 8px;
+    margin-top: 6px;
+    padding-top: 12px;
+    border-top: 1px solid var(--turm-surface1);
+  }
+  .modal .actions-bar .right { display: flex; gap: 8px; }
+  .modal button {
+    height: 30px; padding: 0 14px;
+    border-radius: 4px; font: inherit; line-height: 1; cursor: pointer;
+  }
+  .modal button.primary {
+    background: var(--turm-accent); color: var(--turm-bg); border: 0;
+    font-weight: 500;
+  }
+  .modal button.primary:hover { filter: brightness(1.1); }
+  .modal button:disabled {
+    opacity: 0.4; cursor: wait; filter: none;
+  }
+  .modal button:disabled:hover { filter: none; }
+  .modal button.ghost {
+    background: transparent; color: var(--turm-subtext1);
+    border: 1px solid var(--turm-surface2);
+  }
+  .modal button.ghost:hover { color: var(--turm-text); border-color: var(--turm-overlay0); }
+  .modal button.danger {
+    background: transparent; color: var(--turm-red);
+    border: 1px solid var(--turm-red);
+  }
+  .modal button.danger:hover { background: var(--turm-red); color: var(--turm-bg); }
+  .modal .delete-confirm {
+    display: none; align-items: center; gap: 8px;
+    color: var(--turm-red); font-size: 0.85em;
+  }
+  .modal.confirming-delete .delete-confirm { display: flex; }
+  .modal.confirming-delete .danger-launch { display: none; }
+  .modal .err {
+    color: var(--turm-red); font-size: 0.85em; padding: 0;
+  }
 </style>
 </head>
 <body>
@@ -189,6 +282,58 @@
     <div class="col-head"><span>Done</span><span class="count" data-count>0</span></div>
     <div class="col-body" data-status="done"></div>
   </div>
+</div>
+
+<div id="modal-backdrop" class="modal-backdrop" hidden>
+  <form id="edit-modal" class="modal" autocomplete="off">
+    <h2>Edit todo</h2>
+    <div class="meta-line" id="modal-meta"></div>
+    <label>title
+      <input name="title" type="text" required />
+    </label>
+    <div class="row">
+      <label>priority
+        <select name="priority">
+          <option value="low">low</option>
+          <option value="normal">normal</option>
+          <option value="high">high</option>
+        </select>
+      </label>
+      <label>due (YYYY-MM-DD)
+        <input name="due" type="text" placeholder="2026-05-01" />
+      </label>
+    </div>
+    <div class="row">
+      <label>linked_jira
+        <input name="linked_jira" type="text" placeholder="PROJ-456" />
+      </label>
+      <label>tags (comma-separated)
+        <input name="tags" type="text" placeholder="feature, api" />
+      </label>
+    </div>
+    <label>linked_kb (one path per line, relative to ~/docs)
+      <textarea name="linked_kb" placeholder="meetings/abc.md&#10;decisions/x.md"></textarea>
+    </label>
+    <label>body (markdown — human-readable description)
+      <textarea name="body"></textarea>
+    </label>
+    <label>prompt (claude instruction — overrides body when set)
+      <textarea name="prompt" placeholder="If empty, claude.start gets `# title\n\nbody` as the per-Todo layer."></textarea>
+    </label>
+    <div id="modal-err" class="err" hidden></div>
+    <div class="actions-bar">
+      <button type="button" class="danger danger-launch">delete</button>
+      <span class="delete-confirm">
+        really delete? this is irreversible.
+        <button type="button" class="danger" id="confirm-delete">yes, delete</button>
+        <button type="button" class="ghost" id="cancel-delete">no</button>
+      </span>
+      <span class="right">
+        <button type="button" class="ghost" id="modal-cancel">cancel</button>
+        <button type="submit" class="primary">save</button>
+      </span>
+    </div>
+  </form>
 </div>
 
 <script>
@@ -357,7 +502,11 @@ function onCardPointerDown(e) {
     dragging: false,
   };
   // Capture so we keep getting moves even if the cursor leaves the card.
-  card.setPointerCapture(e.pointerId);
+  // try/catch matches releasePointerCapture below — synthetic events
+  // dispatched without a real pointer (test harness, programmatic
+  // triggers) throw InvalidStateError here, which would otherwise
+  // skip the listener attachments and break click→modal entirely.
+  try { card.setPointerCapture(e.pointerId); } catch {}
   card.addEventListener("pointermove", onCardPointerMove);
   card.addEventListener("pointerup", onCardPointerUp);
   card.addEventListener("pointercancel", onCardPointerCancel);
@@ -400,7 +549,15 @@ function onCardPointerUp(e) {
   if (!dragState || e.pointerId !== dragState.pointerId) return;
   const { card, ghost, dragging } = dragState;
   cleanupDrag();
-  if (!dragging) return;
+  if (!dragging) {
+    // No drag promotion ⇒ this was a click. Open the edit modal —
+    // unless the click landed on the action buttons (those have
+    // their own handlers and stopPropagation).
+    if (!e.target || !e.target.closest(".actions")) {
+      openEditModal(card.dataset.id, card.dataset.workspace);
+    }
+    return;
+  }
   const targetBody = columnBodyAt(e.clientX, e.clientY);
   if (!targetBody) return;
   const targetStatus = targetBody.dataset.status;
@@ -533,6 +690,158 @@ turm.on("todo.created", () => load());
 turm.on("todo.changed", () => load());
 turm.on("todo.completed", () => load());
 turm.on("todo.deleted", () => load());
+
+// --- Edit modal ---
+const modalBackdrop = $("#modal-backdrop");
+const modalForm = $("#edit-modal");
+const modalErr = $("#modal-err");
+let modalContext = null; // { id, workspace } of the Todo being edited
+
+// `form.elements.namedItem(name)` reads from the FormControlsCollection
+// (an indexed accessor scoped to controls), avoiding the property
+// collision that shadows e.g. `<form>.title` with HTMLElement.title.
+const field = (name) => modalForm.elements.namedItem(name);
+
+function openEditModal(id, workspace) {
+  // We only have the lightweight payload from `todo.list` cached in
+  // the DOM (id + workspace). Pull the fresh full record so the form
+  // shows whatever's currently on disk — the panel might be a few
+  // seconds stale relative to a vim edit. While that's in flight,
+  // Save and Delete are disabled so a quick keystroke can't submit
+  // form-default values over real data.
+  modalErr.hidden = true;
+  modalForm.classList.remove("confirming-delete");
+  modalForm.classList.add("hydrating");
+  modalContext = { id, workspace };
+  // Reset all fields BEFORE optimistic fill so prior modal state
+  // can't leak into the new one (priority select especially —
+  // `reset()` returns it to its first <option>, which would let a
+  // pre-hydration Save persist as that default).
+  modalForm.reset();
+  // Fill `title` optimistically from the DOM card so the user sees
+  // something while hydrate is in flight. Match BOTH id AND
+  // workspace — IDs are not globally unique across workspaces.
+  const card = $(`.card[data-id="${CSS.escape(id)}"][data-workspace="${CSS.escape(workspace)}"]`);
+  if (card) {
+    field("title").value = card.querySelector(".title")?.textContent || "";
+  }
+  // Disable submit/delete until hydration succeeds — see CSS
+  // `.modal.hydrating button[type="submit"]`.
+  setModalReady(false);
+  modalBackdrop.classList.add("open");
+  modalBackdrop.hidden = false;
+  field("title").focus();
+
+  turm.call("todo.list", { workspace }).then(({ todos }) => {
+    // Stale-response guard: compare BOTH id AND workspace. The user
+    // could have closed-then-reopened on a different todo before the
+    // first list returned, and IDs aren't globally unique.
+    if (
+      !modalContext ||
+      modalContext.id !== id ||
+      modalContext.workspace !== workspace
+    ) return;
+    const t = todos.find(x => x.id === id && x.workspace === workspace);
+    if (!t) {
+      modalErr.textContent = `todo ${id} not found in workspace ${workspace}`;
+      modalErr.hidden = false;
+      return;
+    }
+    populateModal(t);
+    setModalReady(true);
+  }).catch(e => {
+    if (!modalContext || modalContext.id !== id || modalContext.workspace !== workspace) return;
+    modalErr.textContent = `load failed: ${e.message} (Save/Delete disabled — try again)`;
+    modalErr.hidden = false;
+  });
+}
+
+function setModalReady(ready) {
+  modalForm.classList.toggle("hydrating", !ready);
+  const submitBtn = modalForm.querySelector('button[type="submit"]');
+  const dangerBtn = modalForm.querySelector('.danger-launch');
+  if (submitBtn) submitBtn.disabled = !ready;
+  if (dangerBtn) dangerBtn.disabled = !ready;
+}
+
+function populateModal(t) {
+  $("#modal-meta").textContent = `${t.workspace}/${t.id}  ·  status: ${t.status}  ·  created: ${t.created || "—"}`;
+  field("title").value = t.title || "";
+  field("priority").value = t.priority || "normal";
+  field("due").value = t.due || "";
+  field("linked_jira").value = t.linked_jira || "";
+  field("tags").value = (t.tags || []).join(", ");
+  field("linked_kb").value = (t.linked_kb || []).join("\n");
+  field("body").value = t.body || "";
+  field("prompt").value = t.prompt || "";
+}
+
+function closeModal() {
+  modalBackdrop.classList.remove("open");
+  modalBackdrop.hidden = true;
+  modalContext = null;
+  modalForm.reset();
+}
+
+$("#modal-cancel").addEventListener("click", closeModal);
+modalBackdrop.addEventListener("click", (e) => {
+  if (e.target === modalBackdrop) closeModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && modalBackdrop.classList.contains("open")) closeModal();
+});
+
+modalForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!modalContext) return;
+  const tagsText = field("tags").value.trim();
+  const kbText = field("linked_kb").value;
+  const params = {
+    id: modalContext.id,
+    workspace: modalContext.workspace,
+    title: field("title").value.trim(),
+    priority: field("priority").value,
+    // Empty strings are interpreted as "clear" by the action.
+    due: field("due").value.trim(),
+    linked_jira: field("linked_jira").value.trim(),
+    tags: tagsText ? tagsText.split(",").map(s => s.trim()).filter(Boolean) : [],
+    linked_kb: kbText
+      ? kbText.split("\n").map(s => s.trim()).filter(Boolean)
+      : [],
+    body: field("body").value,
+    prompt: field("prompt").value,
+  };
+  modalErr.hidden = true;
+  try {
+    await turm.call("todo.update", params);
+    closeModal();
+    load();
+  } catch (err) {
+    modalErr.textContent = `save failed: ${err.message}`;
+    modalErr.hidden = false;
+  }
+});
+
+$(".danger-launch").addEventListener("click", () => {
+  modalForm.classList.add("confirming-delete");
+});
+$("#cancel-delete").addEventListener("click", () => {
+  modalForm.classList.remove("confirming-delete");
+});
+$("#confirm-delete").addEventListener("click", async () => {
+  if (!modalContext) return;
+  modalErr.hidden = true;
+  try {
+    await turm.call("todo.delete", {
+      id: modalContext.id, workspace: modalContext.workspace,
+    });
+    closeModal();
+    load();
+  } catch (err) {
+    modalErr.textContent = `delete failed: ${err.message}`;
+    modalErr.hidden = false;
+  }
+});
 
 // Initial load DOES retry — covers the startup-race where the panel
 // opens before the dispatch wiring / plugin handshake is ready.

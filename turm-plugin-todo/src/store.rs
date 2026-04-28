@@ -252,6 +252,80 @@ impl Store {
         Ok((prev, new_status))
     }
 
+    /// Read-modify-rewrite for arbitrary fields. Status updates go
+    /// through `set_status` instead because they preserve the
+    /// user's frontmatter ordering / comments via in-place line
+    /// rewrite — `update` regenerates the file via `render_new`,
+    /// which canonicalizes ordering and drops comments. That's the
+    /// right tradeoff when the user is editing through the UI
+    /// (regenerated frontmatter is what they expect from a form),
+    /// but wrong for the high-frequency status-toggle path.
+    ///
+    /// Each `Option` field follows the "None means don't touch"
+    /// rule; pass `Some(value)` to set, `Some("")` to clear (caller
+    /// translates empty form fields to `Some("")`). Body and prompt
+    /// follow the same convention via `Option<String>`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(
+        &self,
+        workspace: &str,
+        id: &str,
+        title: Option<String>,
+        body: Option<String>,
+        priority: Option<Priority>,
+        due: Option<Option<String>>,
+        linked_jira: Option<Option<String>>,
+        linked_kb: Option<Vec<String>>,
+        tags: Option<Vec<String>>,
+        prompt: Option<Option<String>>,
+    ) -> Result<Todo, Err> {
+        let path = self.todo_path(workspace, id)?;
+        let mut f = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|e| match e.kind() {
+                io::ErrorKind::NotFound => Err::NotFound(format!("todo {workspace}/{id}")),
+                _ => Err::Io(format!("open {}: {e}", path.display())),
+            })?;
+        let mut content = String::new();
+        f.read_to_string(&mut content)
+            .map_err(|e| Err::Io(format!("read {}: {e}", path.display())))?;
+        drop(f);
+        let mut t = todo::parse(&content, id, workspace);
+        if let Some(s) = title {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() {
+                return Err(Err::InvalidParams("title cannot be empty".into()));
+            }
+            t.title = trimmed;
+        }
+        if let Some(b) = body {
+            t.body = b;
+        }
+        if let Some(p) = priority {
+            t.priority = p;
+        }
+        if let Some(d) = due {
+            t.due = d.filter(|s| !s.is_empty());
+        }
+        if let Some(j) = linked_jira {
+            t.linked_jira = j.filter(|s| !s.is_empty());
+        }
+        if let Some(kb) = linked_kb {
+            t.linked_kb = kb;
+        }
+        if let Some(tg) = tags {
+            t.tags = tg;
+        }
+        if let Some(pr) = prompt {
+            t.prompt = pr.filter(|s| !s.is_empty());
+        }
+        let new_content = todo::render_new(&t);
+        atomic_replace(&path, new_content.as_bytes())?;
+        Ok(t)
+    }
+
     /// Delete a todo file. NotFound is OK (idempotent).
     pub fn delete(&self, workspace: &str, id: &str) -> Result<(), Err> {
         let path = self.todo_path(workspace, id)?;
