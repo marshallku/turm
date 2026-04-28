@@ -49,13 +49,14 @@
 #   (Jira plugin) + Phase 14.2 (async correlation) to join a fresh
 #   `jira.get_ticket {key=linked_jira}` result back into the
 #   prompt. Until then `linked_jira` shows up only as the raw key.
-# - **Re-clicking Start on the same Todo currently fails** at
-#   trigger 1/2 because `git.worktree_add` returns `branch_exists`
-#   when the worktree is already present. claude.start never runs,
-#   the prompt is never re-seeded. Tracked as a small follow-up
-#   (make `git.worktree_add` idempotent on existing worktrees).
-#   Workaround for now: open the worktree directory yourself and
-#   re-attach the existing tmux session manually.
+# - **Re-clicking Start on the same Todo IS supported.**
+#   `git.worktree_add` is idempotent — it scans existing worktrees
+#   for the target branch first and echoes the recorded path
+#   without re-running `git worktree add`. The chain proceeds to
+#   claude.start as usual; tmux re-attaches the existing session;
+#   if a `prompt` is supplied it gets re-pasted (claude treats the
+#   second paste as a new turn, useful when re-starting a Todo to
+#   ask claude to redo something).
 #
 # What you get end-to-end today:
 #   click Start in Todo panel
@@ -110,18 +111,12 @@ condition = "event.linked_jira == null"
 event_kind = "todo.start_requested"
 
 # ---------------------------------------------------------------------
-# Trigger 3 — Once the worktree exists, drop a Claude session there
+# Trigger 3 — Once the worktree exists (newly created OR matched by
+# git.worktree_add's idempotent-scan), drop a Claude session there
 # with the layered prompt pre-seeded. session_name auto-derived from
-# the worktree path's last 2 components.
-#
-# CAVEAT: clicking Start again on the same Todo CURRENTLY fails at
-# trigger 1/2 because `git.worktree_add` errors with `branch_exists`
-# when the worktree is already present — claude.start never runs.
-# To resume work today, open the worktree directory yourself and
-# attach the existing tmux session manually. Making
-# `git.worktree_add` idempotent (return the existing path on a
-# pre-existing worktree, fall through to claude.start) is a small
-# follow-up that would close the resume-work UX.
+# the worktree path's last 2 components, so re-clicking the same
+# Todo re-attaches the existing tmux session and re-pastes the
+# prompt as a fresh turn.
 # ---------------------------------------------------------------------
 [[triggers]]
 name = "vision3-claude-after-worktree"

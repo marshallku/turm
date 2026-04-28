@@ -243,6 +243,113 @@ fn action_worktree_add(params: &Value, config: &Config) -> Result<Value, (String
         git::validate_branch_name(&raw_branch).map_err(git_err_to_action)?;
         raw_branch
     };
+    // Optional opaque passthrough for chained triggers. Until Phase
+    // 14.2's async-correlation lands, the `git.worktree_add.completed`
+    // event payload is the only way for a downstream trigger
+    // (typically `claude.start`) to see fields the upstream event
+    // (e.g. `todo.start_requested`) carried. We don't interpret
+    // these fields — just echo them on the result so trigger 3 can
+    // reference `{event.prompt}` etc. without us coupling
+    // worktree_add to any specific consumer's schema. Documented
+    // first-class fields take precedence on collision (`prompt`
+    // here cannot shadow `path`, etc.) so future native fields stay
+    // safe.
+    let prompt_passthrough = optional_string(params, "prompt")?;
+
+    // Idempotent fast-path. If the branch already has a worktree
+    // registered in this repo, echo its recorded path so a re-click
+    // on the same Todo can flow straight to claude.start. We bypass
+    // the candidate `target` computation (the existing path might
+    // not match our current `worktree_root` formula at all) but we
+    // still validate the EXISTING path is under the configured
+    // `worktree_root` and has no symlink ancestors — without that,
+    // a registered worktree that's later been replaced with a
+    // symlink to `/etc` would canonicalize through claude.start and
+    // open a tab in the redirected directory. If the existing path
+    // is outside the current `worktree_root` (user reconfigured
+    // since the original create) we surface that as `invalid_state`
+    // rather than silently honoring it; the user resolves by
+    // moving the worktree or running `git worktree remove`. Stale
+    // registry entries (`prunable`, or directory rm'd) fall through
+    // to the create path, where `git worktree add` emits a clear
+    // error pointing at `git worktree prune`.
+    if let Ok(existing) = git::list_worktrees(&ws.path)
+        && let Some(w) = existing.into_iter().find(|w| {
+            if w.branch.as_deref() != Some(&branch) || w.prunable || !w.path.is_dir() {
+                return false;
+            }
+            // Skip the primary checkout (the repo root itself).
+            // `git worktree list` includes it as a normal entry, so
+            // a request like `git.worktree_add {branch: "main"}` on
+            // a repo currently checked out to `main` would otherwise
+            // intercept here and fail the worktree_root guard
+            // (primary checkout is at `ws.path`, not under
+            // `worktree_root`). Letting it fall through gives the
+            // user the same `branch_exists` they got before
+            // idempotency landed.
+            canonicalize_existing_or_self(&w.path) != ws.path
+        })
+    {
+        // Mirror the create path's full validation chain so the
+        // idempotent return doesn't become a weaker trust gate.
+        // Order matters:
+        //
+        // 1. `canonicalize_existing_or_self` + `path_starts_with`
+        //    on the canonical path FIRST — closes the
+        //    `<root>/../etc` bypass and surfaces the
+        //    user-debuggable case (worktree_root reconfigured,
+        //    registered path now outside the new root) as
+        //    `invalid_state`. This must run before the symlink
+        //    walker, because that walker errors with `forbidden`
+        //    when its lexical strip_prefix fails — which would
+        //    swallow the more accurate invalid_state.
+        // 2. `check_no_symlink_ancestors` on the ORIGINAL `w.path`
+        //    — must run against the unresolved path because
+        //    canonicalize follows symlinks and would silently
+        //    render the check vacuous. Surfaces `forbidden` for
+        //    symlink-injection inside the allowed tree.
+        // 3. `validate_base_ref` on the supplied `base` — the
+        //    create path validates this and we keep request
+        //    validation independent of repo state, even when base
+        //    isn't used to invoke git on this path.
+        let canon = canonicalize_existing_or_self(&w.path);
+        if !path_starts_with(&canon, &ws.worktree_root) {
+            return Err((
+                "invalid_state".into(),
+                format!(
+                    "registered worktree at {} (canonical {}) is outside worktree_root {} — \
+                     reconfigure the workspace or remove the worktree",
+                    w.path.display(),
+                    canon.display(),
+                    ws.worktree_root.display()
+                ),
+            ));
+        }
+        check_no_symlink_ancestors(&ws.worktree_root, &w.path)?;
+        let base = optional_string(params, "base")?.unwrap_or_else(|| ws.default_base.clone());
+        if base.is_empty() {
+            return Err(("invalid_params".into(), "base cannot be empty".into()));
+        }
+        git::validate_base_ref(&base).map_err(git_err_to_action)?;
+        // `event.base` echoes the current request's base, not the
+        // historical base the existing worktree was created from —
+        // `git worktree list --porcelain` doesn't record that, and
+        // no in-tree consumer reads `event.base` today. Documented
+        // here in case a future trigger interpolates it.
+        let mut payload = json!({
+            "workspace": ws.name,
+            "path": w.path.display().to_string(),
+            "branch": branch,
+            "base": base,
+        });
+        if let Some(p) = prompt_passthrough
+            && let Some(obj) = payload.as_object_mut()
+        {
+            obj.insert("prompt".to_string(), Value::String(p));
+        }
+        return Ok(payload);
+    }
+
     let base = optional_string(params, "base")?.unwrap_or_else(|| ws.default_base.clone());
     let target = compute_worktree_target(ws, &branch);
     // Lexical prefix guard catches `..`-style escapes that slipped
@@ -267,18 +374,6 @@ fn action_worktree_add(params: &Value, config: &Config) -> Result<Value, (String
     // reject if any component is a symlink. Same posture as
     // KB's `check_no_symlink_ancestors`.
     check_no_symlink_ancestors(&ws.worktree_root, &target)?;
-    // Optional opaque passthrough for chained triggers. Until Phase
-    // 14.2's async-correlation lands, the `git.worktree_add.completed`
-    // event payload is the only way for a downstream trigger
-    // (typically `claude.start`) to see fields the upstream event
-    // (e.g. `todo.start_requested`) carried. We don't interpret
-    // these fields — just echo them on the result so trigger 3 can
-    // reference `{event.prompt}` etc. without us coupling
-    // worktree_add to any specific consumer's schema. Documented
-    // first-class fields take precedence on collision (`prompt`
-    // here cannot shadow `path`, etc.) so future native fields stay
-    // safe.
-    let prompt_passthrough = optional_string(params, "prompt")?;
     let result = git::worktree_add(&ws.path, &target, &branch, &base).map_err(git_err_to_action)?;
     let mut payload = json!({
         "workspace": ws.name,
@@ -795,6 +890,90 @@ default_base = "main"
         let listed2 = action_list_worktrees(&json!({"workspace": "myrepo"}), &cfg).unwrap();
         let arr2 = listed2["worktrees"].as_array().unwrap();
         assert!(arr2.iter().all(|w| w["branch"] != "feature/x"));
+    }
+
+    #[test]
+    fn worktree_add_is_idempotent_and_preserves_prompt_passthrough() {
+        let (_d, cfg) = fixture_with_one_workspace();
+        let first = action_worktree_add(
+            &json!({
+                "workspace": "myrepo",
+                "branch": "feature/again",
+                "prompt": "do the thing",
+            }),
+            &cfg,
+        )
+        .unwrap();
+        let first_path = first["path"].as_str().unwrap().to_string();
+        // Re-click: same params, fresh prompt. Should NOT error and
+        // should echo the same path back so the trigger chain reaches
+        // claude.start with the new prompt.
+        let second = action_worktree_add(
+            &json!({
+                "workspace": "myrepo",
+                "branch": "feature/again",
+                "prompt": "do the thing again",
+            }),
+            &cfg,
+        )
+        .unwrap();
+        assert_eq!(second["branch"], "feature/again");
+        assert_eq!(second["path"].as_str().unwrap(), first_path);
+        assert_eq!(second["prompt"], "do the thing again");
+        // Cleanup.
+        action_worktree_remove(&json!({"path": first_path}), &cfg).unwrap();
+    }
+
+    #[test]
+    fn worktree_add_falls_through_when_branch_is_primary_checkout() {
+        // `git worktree list --porcelain` includes the primary
+        // checkout as a regular branch-bearing entry. The
+        // idempotent scan must NOT intercept it, otherwise a request
+        // like `worktree_add {branch: "main"}` on a fresh repo would
+        // try to validate the primary checkout against worktree_root
+        // and surface invalid_state. Letting it fall through gives
+        // the same branch_exists error users got before idempotency
+        // existed.
+        let (_d, cfg) = fixture_with_one_workspace();
+        // The fixture's primary checkout is on "main" (init_repo).
+        let err = action_worktree_add(&json!({"workspace": "myrepo", "branch": "main"}), &cfg)
+            .unwrap_err();
+        assert!(
+            matches!(err.0.as_str(), "branch_exists" | "git_error"),
+            "expected branch_exists/git_error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn worktree_add_falls_through_to_create_when_existing_dir_is_gone() {
+        // Stale registry: the worktree directory was rm-rf'd without
+        // `git worktree prune`. The action layer's idempotent fast
+        // path filters `!is_dir()` so we don't echo a dead path; the
+        // create call then surfaces git's own collision error which
+        // points the user at `git worktree prune`.
+        let (_d, cfg) = fixture_with_one_workspace();
+        let first = action_worktree_add(
+            &json!({"workspace": "myrepo", "branch": "feature/stale"}),
+            &cfg,
+        )
+        .unwrap();
+        let first_path = std::path::PathBuf::from(first["path"].as_str().unwrap());
+        std::fs::remove_dir_all(&first_path).unwrap();
+        let err = action_worktree_add(
+            &json!({"workspace": "myrepo", "branch": "feature/stale"}),
+            &cfg,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err.0.as_str(), "branch_exists" | "git_error"),
+            "expected branch_exists/git_error from create-path, got {err:?}"
+        );
+        // Cleanup the stale registration so the tempdir doesn't trip
+        // future runs in the same fixture.
+        let ws = &cfg.workspaces[0];
+        let _ = std::process::Command::new("git")
+            .args(["-C", ws.path.to_str().unwrap(), "worktree", "prune"])
+            .output();
     }
 
     #[test]

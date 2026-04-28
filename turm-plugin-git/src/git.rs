@@ -144,12 +144,18 @@ pub struct WorktreeAddResult {
 
 /// `git -C <repo> worktree add <target> -b <branch> <base>`.
 ///
+/// Pure create primitive — fails if `branch` already exists, by
+/// design. Idempotency for the vision-flow-3 re-click flow lives at
+/// the action layer (`action_worktree_add`), where it can apply
+/// the same containment / symlink-ancestor / canonicalization gates
+/// that protect a fresh create. Putting idempotency here too would
+/// give the action a second unvalidated return path (action-layer
+/// scan misses → fall through → git-module scan hits → emits
+/// unverified path), which is the failure mode codex flagged.
+///
 /// Branch is created from `base` (or `default_base` per workspace).
 /// If a branch with the same name already exists, git refuses with
-/// a clear error which we surface as `branch_exists`. The target
-/// path is constructed by the caller (typically `worktree_root`
-/// joined with the sanitized branch name) — we don't pick paths
-/// here so the caller controls the layout.
+/// a clear error which we surface as `branch_exists`.
 pub fn worktree_add(
     repo: &Path,
     target: &Path,
@@ -393,7 +399,7 @@ pub fn validate_branch_name(s: &str) -> Result<(), GitError> {
 ///    argv string git sees)
 /// 4. no whitespace (commit-ish refs never contain spaces; if
 ///    the user gave us "HEAD --force" they're trying something)
-fn validate_base_ref(s: &str) -> Result<(), GitError> {
+pub fn validate_base_ref(s: &str) -> Result<(), GitError> {
     if s.is_empty() {
         return Err(GitError::new("invalid_params", "base cannot be empty"));
     }
@@ -531,7 +537,12 @@ mod tests {
     }
 
     #[test]
-    fn worktree_add_rejects_existing_branch() {
+    fn worktree_add_rejects_existing_branch_at_module_layer() {
+        // git::worktree_add is the pure create primitive — idempotency
+        // for re-click flows lives in action_worktree_add (see its
+        // own test in main.rs). Direct callers that hit a branch
+        // collision here get branch_exists / git_error, same as
+        // before.
         let dir = tempdir().unwrap();
         init_repo(dir.path());
         let target = dir.path().join("..").join(format!(
@@ -541,16 +552,14 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        worktree_add(dir.path(), &target, "feature/dup", "main").unwrap();
-        // Try to add the same branch again at a different path.
+        let first = worktree_add(dir.path(), &target, "feature/dup", "main").unwrap();
         let target2 = target.with_extension("again");
         let err = worktree_add(dir.path(), &target2, "feature/dup", "main").unwrap_err();
         assert!(
             matches!(err.code, "branch_exists" | "git_error"),
             "got {err:?}"
         );
-        // Cleanup.
-        let _ = worktree_remove(dir.path(), &target, false);
+        let _ = worktree_remove(dir.path(), &first.path, false);
     }
 
     #[test]
