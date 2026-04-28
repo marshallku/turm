@@ -70,6 +70,11 @@ impl WebViewPanel {
 
         webview.set_hexpand(true);
         webview.set_vexpand(true);
+        // Match plugin webviews — composite transparently so the
+        // window-level BackgroundLayer shows through. Most external
+        // pages paint their own solid bg so this is a no-op visually
+        // for them; the consistency only matters for blank/about: pages.
+        webview.set_background_color(&gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
         webview.load_uri(url);
 
         // -- Toolbar --

@@ -16,9 +16,9 @@ CLI flags handled before GTK launch:
 ## Window (`window.rs`)
 
 - Default size: 1200x800
-- CSS: `window { background-color: #1e1e2e; }` (Catppuccin Mocha base)
-- Creates a single `TerminalTab` and sets it as window child
-- Initializes `BackgroundManager` and applies first random background if directory is configured
+- CSS: `window { background-color: <theme.background>; }` (theme-driven; falls back to Catppuccin Mocha base)
+- Creates a `BackgroundLayer` (window-level bg image + tint) and wraps `[statusbar, notebook, statusbar?]` in a `gtk4::Overlay`. Stack: `bg_picture` (base) → `tint_overlay` (overlay) → layout (overlay). Every panel above renders transparently so the same image shows through every tab.
+- Creates a single `TerminalTab` and adds it to the notebook
 - Registers D-Bus service and polls for commands every 50ms via `glib::timeout_add_local`
 
 ### D-Bus Command Loop
@@ -29,21 +29,31 @@ D-Bus callback (any thread) → mpsc::channel → glib::timeout_add_local (GTK m
 
 This pattern is required because GTK widgets are not `Send+Sync` and can only be accessed from the main thread.
 
+## Background (`background.rs`)
+
+`BackgroundLayer` owns the window-level image + tint. Lives once per window and is shared via `Rc`. Mounted as the base child of the root `gtk4::Overlay` in `window.rs`.
+
+```rust
+pub struct BackgroundLayer {
+    pub bg_picture: gtk4::Picture,   // GtkPicture, content-fit: cover, can_target=false
+    pub tint_overlay: gtk4::Box,     // CSS rgba, can_target=false
+    // … private state cells
+}
+```
+
+API: `set_image(path)`, `clear_image()`, `set_tint(opacity)`, `apply_config(cfg)`.
+
+`can_target=false` on both layers so clicks pass through to the panels above them. The socket `background.*` commands operate on this single layer (no longer on the active terminal panel), and `apply_config` is invoked once from `watch_config` on hot reload.
+
 ## Terminal (`terminal.rs`)
 
 ### TerminalPanel Struct
 
 ```rust
 pub struct TerminalPanel {
-    pub overlay: gtk4::Overlay,
+    pub overlay: gtk4::Overlay,      // hosts the search bar above the terminal
     pub terminal: vte4::Terminal,
-    pub bg_picture: gtk4::Picture,
-    pub tint_overlay: gtk4::Box,
-    pub tint_css: gtk4::CssProvider,
-    pub tint_opacity: Rc<Cell<f64>>,
-    pub tint_color: Rc<Cell<gdk::RGBA>>,
-    pub image_opacity: Rc<Cell<f64>>,
-    pub has_background: Rc<Cell<bool>>,
+    pub child_pid: Rc<Cell<i32>>,
     pub search_bar: SearchBar,
 }
 ```
@@ -51,13 +61,11 @@ pub struct TerminalPanel {
 ### Overlay Stack (bottom to top)
 
 ```
-bg_picture (GtkPicture, content-fit: cover)  ← child of overlay
-  └─ tint_overlay (Box, CSS rgba)            ← overlay
-      └─ terminal (VTE Terminal)             ← overlay (set_measure_overlay=true)
-          └─ search_bar (Box, valign=End)    ← overlay (hidden by default)
+terminal (VTE Terminal)        ← child of overlay
+  └─ search_bar (Box, valign=End) ← overlay (hidden by default)
 ```
 
-**Critical:** `overlay.set_measure_overlay(&terminal, true)` ensures the terminal contributes to overlay size measurement. Without this, when `bg_picture` is hidden (no background image), the overlay collapses to zero height since the child has no natural size.
+The terminal is **always** transparent (`set_clear_background(false)` + `RGBA(0,0,0,0)` bg color) so the window-level `BackgroundLayer` shows through whether or not an image is set. Solid theme background still appears via the window's CSS when no image is loaded.
 
 ### Font Scaling
 
@@ -65,32 +73,13 @@ bg_picture (GtkPicture, content-fit: cover)  ← child of overlay
 - Range: 0.3x to 3.0x, step 0.1
 - Uses `terminal.set_font_scale()`
 
-### Background Image Compositing
-
-**`set_background(path)`:**
-
-1. Sets `bg_picture` file and makes it visible
-2. Shows `tint_overlay`
-3. Calls `terminal.set_clear_background(false)` — **critical**: stops VTE from painting opaque bg
-4. Sets VTE background color to fully transparent `RGBA(0, 0, 0, 0)`
-
-**`clear_background()`:**
-
-1. Hides `bg_picture` and `tint_overlay`
-2. Calls `terminal.set_clear_background(true)` — re-enables VTE opaque bg
-3. Restores opaque Catppuccin Mocha background color
-
-**`set_tint(opacity)`:**
-
-- Updates `tint_opacity` Rc<Cell> and queues redraw
-
 ### Color Palette
 
-Catppuccin Mocha 16-color palette:
+Theme palette (Catppuccin Mocha by default), 16-color:
 
 - Foreground: `#cdd6f4`
-- Background: `#1e1e2e` (opaque) / `rgba(0,0,0,0)` (with bg image)
-- See `PALETTE` constant and `parse_color()` function
+- Background: forced `rgba(0,0,0,0)`; the `BackgroundLayer` (or window CSS fallback) supplies the visible color
+- See `parse_color()` function
 
 ### Shell Spawn
 

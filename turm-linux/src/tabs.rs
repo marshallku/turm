@@ -726,16 +726,6 @@ impl TabManager {
 
         *widget_holder.borrow_mut() = Some(panel.widget().clone());
 
-        // Apply background
-        if let Some(ref path) = config.background.image {
-            let p = std::path::Path::new(path);
-            if p.exists()
-                && let Some(term) = panel.as_terminal()
-            {
-                term.set_background(p);
-            }
-        }
-
         // Hook terminal output events
         if let Some(term) = panel.as_terminal() {
             let bus = self.event_bus.clone();
@@ -1668,7 +1658,6 @@ fn setup_tab_actions(manager: &Rc<TabManager>, window: &gtk4::ApplicationWindow)
 
 fn build_tab_css(tab_width: u32, theme: &turm_core::theme::Theme) -> String {
     let bg = &theme.background;
-    let surface0 = &theme.surface0;
     let surface1 = &theme.surface1;
     let surface2 = &theme.surface2;
     let overlay0 = &theme.overlay0;
@@ -1687,7 +1676,7 @@ notebook > stack {{
 }}
 
 notebook header {{
-    background-color: {surface0};
+    background-color: transparent;
     padding: 0;
 }}
 

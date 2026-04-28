@@ -1,4 +1,5 @@
 mod app;
+mod background;
 mod panel;
 mod plugin_panel;
 mod search;

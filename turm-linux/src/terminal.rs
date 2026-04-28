@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::path::Path;
 use std::rc::Rc;
 
 use gtk4::gdk;
@@ -45,15 +44,7 @@ pub struct TerminalPanel {
     pub overlay: gtk4::Overlay,
     pub terminal: Terminal,
     pub child_pid: Rc<Cell<i32>>,
-    pub bg_picture: gtk4::Picture,
-    pub tint_overlay: gtk4::Box,
-    pub tint_css: gtk4::CssProvider,
-    pub tint_opacity: Rc<Cell<f64>>,
-    pub tint_color: Rc<Cell<gdk::RGBA>>,
-    pub image_opacity: Rc<Cell<f64>>,
-    pub has_background: Rc<Cell<bool>>,
     pub search_bar: SearchBar,
-    pub theme: Box<Theme>,
 }
 
 impl TerminalPanel {
@@ -82,13 +73,18 @@ impl TerminalPanel {
         terminal.set_font(Some(&font_desc));
         terminal.set_font_scale(DEFAULT_FONT_SCALE);
 
-        // Colors from theme
+        // Colors from theme. Background is forced transparent (and
+        // `set_clear_background(false)` skips the GL clear) so the
+        // window-level `BackgroundLayer` shows through every terminal,
+        // image or no image. The window's own CSS supplies the solid
+        // theme color when no background image is set.
         let theme = Theme::by_name(&config.theme.name).unwrap_or_default();
         let fg = parse_color(&theme.foreground);
-        let bg = parse_color(&theme.background);
+        let bg = gdk::RGBA::new(0.0, 0.0, 0.0, 0.0);
         let palette: Vec<gdk::RGBA> = theme.palette.iter().map(|c| parse_color(c)).collect();
         let palette_refs: Vec<&gdk::RGBA> = palette.iter().collect();
         terminal.set_colors(Some(&fg), Some(&bg), &palette_refs);
+        terminal.set_clear_background(false);
 
         terminal.set_cursor_blink_mode(vte4::CursorBlinkMode::On);
         terminal.set_cursor_shape(vte4::CursorShape::Block);
@@ -179,36 +175,8 @@ impl TerminalPanel {
             on_exit();
         });
 
-        // Background image layer (GPU-rendered)
-        let image_opacity = Rc::new(Cell::new(config.background.opacity));
-        let bg_picture = gtk4::Picture::new();
-        bg_picture.set_content_fit(gtk4::ContentFit::Cover);
-        bg_picture.set_hexpand(true);
-        bg_picture.set_vexpand(true);
-        bg_picture.set_visible(false);
-        bg_picture.set_opacity(config.background.opacity);
-
-        // Tint overlay (CSS-driven)
-        let tint_opacity = Rc::new(Cell::new(config.background.tint));
-        let tint_color = Rc::new(Cell::new(parse_color(&config.background.tint_color)));
-        let tint_overlay = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        tint_overlay.set_hexpand(true);
-        tint_overlay.set_vexpand(true);
-        tint_overlay.set_visible(false);
-        let tint_css = gtk4::CssProvider::new();
-        update_tint_css(
-            &tint_css,
-            &config.background.tint_color,
-            config.background.tint,
-        );
-        gtk4::style_context_add_provider_for_display(
-            &gdk::Display::default().unwrap(),
-            &tint_css,
-            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 2,
-        );
-        tint_overlay.add_css_class("turm-tint");
-
-        // VTE transparent CSS
+        // VTE transparent CSS — required so the GTK widget composites
+        // its content against the window-level `BackgroundLayer`.
         let css_provider = gtk4::CssProvider::new();
         css_provider.load_from_string("vte-terminal { background-color: transparent; }");
         gtk4::style_context_add_provider_for_display(
@@ -220,13 +188,13 @@ impl TerminalPanel {
         // Search bar
         let search_bar = SearchBar::new(&terminal, &theme);
 
-        // Stack: bg_picture → tint → terminal → search bar
+        // Overlay only exists to host the search bar above the terminal.
+        // The background image moved to `BackgroundLayer` at the window
+        // level so every panel (terminals, plugins, webviews) sits over
+        // the same image instead of each terminal owning its own copy.
         let overlay = gtk4::Overlay::new();
-        overlay.set_child(Some(&bg_picture));
-        overlay.add_overlay(&tint_overlay);
-        overlay.add_overlay(&terminal);
+        overlay.set_child(Some(&terminal));
         overlay.add_overlay(&search_bar.container);
-        overlay.set_measure_overlay(&terminal, true);
         overlay.set_hexpand(true);
         overlay.set_vexpand(true);
 
@@ -234,87 +202,9 @@ impl TerminalPanel {
             id: uuid::Uuid::new_v4().to_string(),
             overlay,
             terminal,
-            bg_picture,
-            tint_overlay,
-            tint_css,
-            tint_opacity,
-            tint_color,
-            image_opacity,
             child_pid,
-            has_background: Rc::new(Cell::new(false)),
             search_bar,
-            theme: Box::new(theme),
         }
-    }
-
-    pub fn set_background(&self, path: &Path) {
-        eprintln!("[turm] set_background: {}", path.display());
-
-        if !path.exists() {
-            eprintln!("[turm] file does not exist: {}", path.display());
-            return;
-        }
-
-        let file = gtk4::gio::File::for_path(path);
-        match gdk::Texture::from_file(&file) {
-            Ok(texture) => {
-                eprintln!(
-                    "[turm] loaded texture: {}x{}",
-                    texture.width(),
-                    texture.height()
-                );
-                self.bg_picture.set_paintable(Some(&texture));
-            }
-            Err(e) => {
-                eprintln!("[turm] FAILED to load image {}: {}", path.display(), e);
-                return;
-            }
-        }
-
-        self.bg_picture.set_visible(true);
-        self.bg_picture.set_opacity(self.image_opacity.get());
-        self.tint_overlay.set_visible(true);
-        self.has_background.set(true);
-
-        self.terminal.set_clear_background(false);
-        let fg = parse_color(&self.theme.foreground);
-        let bg = gdk::RGBA::new(0.0, 0.0, 0.0, 0.0);
-        let palette: Vec<gdk::RGBA> = self.theme.palette.iter().map(|c| parse_color(c)).collect();
-        let palette_refs: Vec<&gdk::RGBA> = palette.iter().collect();
-        self.terminal
-            .set_colors(Some(&fg), Some(&bg), &palette_refs);
-        self.terminal.set_color_background(&bg);
-    }
-
-    pub fn clear_background(&self) {
-        eprintln!("[turm] clear_background");
-        self.bg_picture.set_visible(false);
-        self.tint_overlay.set_visible(false);
-        self.has_background.set(false);
-
-        self.terminal.set_clear_background(true);
-
-        let fg = parse_color(&self.theme.foreground);
-        let bg = parse_color(&self.theme.background);
-        let palette: Vec<gdk::RGBA> = self.theme.palette.iter().map(|c| parse_color(c)).collect();
-        let palette_refs: Vec<&gdk::RGBA> = palette.iter().collect();
-        self.terminal
-            .set_colors(Some(&fg), Some(&bg), &palette_refs);
-    }
-
-    pub fn set_tint(&self, opacity: f64) {
-        self.tint_opacity.set(opacity);
-        let c = self.tint_color.get();
-        update_tint_css(
-            &self.tint_css,
-            &format!(
-                "#{:02x}{:02x}{:02x}",
-                (c.red() * 255.0) as u8,
-                (c.green() * 255.0) as u8,
-                (c.blue() * 255.0) as u8,
-            ),
-            opacity,
-        );
     }
 
     /// Read visible terminal screen text
@@ -379,34 +269,6 @@ impl TerminalPanel {
             config.terminal.font_family, config.terminal.font_size
         ));
         self.terminal.set_font(Some(&font_desc));
-
-        self.tint_opacity.set(config.background.tint);
-        self.tint_color
-            .set(parse_color(&config.background.tint_color));
-        update_tint_css(
-            &self.tint_css,
-            &config.background.tint_color,
-            config.background.tint,
-        );
-
-        self.image_opacity.set(config.background.opacity);
-        if self.has_background.get() {
-            self.bg_picture.set_opacity(config.background.opacity);
-        }
-
-        match &config.background.image {
-            Some(image) => {
-                let path = Path::new(image);
-                if path.exists() {
-                    self.set_background(path);
-                }
-            }
-            None => {
-                if self.has_background.get() {
-                    self.clear_background();
-                }
-            }
-        }
     }
 }
 
@@ -433,18 +295,6 @@ impl Panel for TerminalPanel {
     fn id(&self) -> &str {
         &self.id
     }
-}
-
-fn update_tint_css(provider: &gtk4::CssProvider, hex_color: &str, opacity: f64) {
-    let c = parse_color(hex_color);
-    let css = format!(
-        ".turm-tint {{ background-color: rgba({},{},{},{}); }}",
-        (c.red() * 255.0) as u8,
-        (c.green() * 255.0) as u8,
-        (c.blue() * 255.0) as u8,
-        opacity,
-    );
-    provider.load_from_string(&css);
 }
 
 pub fn parse_color(hex: &str) -> gdk::RGBA {

@@ -1,4 +1,5 @@
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use gtk4::prelude::*;
 use webkit6::prelude::*;
@@ -9,6 +10,20 @@ use turm_core::theme::Theme;
 
 use crate::panel::Panel;
 use crate::socket::{EventBus, SocketCommand};
+
+/// Backstop for `poll_reply` so a wedged dispatch path can't leave a
+/// panel's `await turm.call(...)` hung forever. Without this the 5ms
+/// glib re-arm runs indefinitely and the UI sticks at "loading…"
+/// with no error to recover from.
+///
+/// MUST be longer than `service_supervisor::DEFAULT_ACTION_TIMEOUT`
+/// (currently 120s — see service_supervisor.rs:54). The supervisor
+/// already enforces per-action deadlines and replies with a
+/// `timeout` error well before this fires, so this only triggers
+/// when something deeper than the supervisor's own timer is broken.
+/// 130s = 120s upper bound + 10s headroom for reply scheduling.
+/// Bump in lockstep if the supervisor's action timeout grows.
+const BRIDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(130);
 
 pub struct PluginPanel {
     pub id: String,
@@ -34,8 +49,8 @@ fn build_theme_css(theme: &Theme) -> String {
     --turm-accent: {accent};
     --turm-red: {red};
 }}
-body {{
-    background-color: {bg};
+html, body {{
+    background-color: transparent;
     color: {text};
     font-family: system-ui, -apple-system, sans-serif;
     margin: 0;
@@ -171,6 +186,12 @@ impl PluginPanel {
 
         webview.set_hexpand(true);
         webview.set_vexpand(true);
+        // Make the webview composite transparently so the window-level
+        // BackgroundLayer shows through plugin panels (todo, etc.)
+        // when the page itself doesn't paint a solid bg. Plugin authors
+        // who want an opaque card UI add the bg themselves on inner
+        // elements.
+        webview.set_background_color(&gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
 
         // Register JS bridge message handler with reply
         let tx = dispatch_tx;
@@ -201,10 +222,11 @@ impl PluginPanel {
                         if tx.send(cmd).is_ok() {
                             let reply_clone = reply.clone();
                             let ctx_clone = ctx.clone();
+                            let deadline = Instant::now() + BRIDGE_REQUEST_TIMEOUT;
                             gtk4::glib::timeout_add_local_once(
                                 std::time::Duration::from_millis(1),
                                 move || {
-                                    poll_reply(reply_rx, reply_clone, ctx_clone);
+                                    poll_reply(reply_rx, reply_clone, ctx_clone, deadline);
                                 },
                             );
                         } else {
@@ -273,14 +295,27 @@ fn poll_reply(
     rx: mpsc::Receiver<Response>,
     reply: webkit6::ScriptMessageReply,
     ctx: javascriptcore6::Context,
+    deadline: Instant,
 ) {
     match rx.try_recv() {
         Ok(response) => {
             reply_json(&reply, &ctx, &response);
         }
         Err(mpsc::TryRecvError::Empty) => {
-            gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(5), move || {
-                poll_reply(rx, reply, ctx);
+            if Instant::now() >= deadline {
+                let resp = Response::error(
+                    String::new(),
+                    "bridge_timeout",
+                    &format!(
+                        "no reply within {}s — dispatcher stalled or action wedged",
+                        BRIDGE_REQUEST_TIMEOUT.as_secs()
+                    ),
+                );
+                reply_json(&reply, &ctx, &resp);
+                return;
+            }
+            gtk4::glib::timeout_add_local_once(Duration::from_millis(5), move || {
+                poll_reply(rx, reply, ctx, deadline);
             });
         }
         Err(mpsc::TryRecvError::Disconnected) => {

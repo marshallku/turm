@@ -86,7 +86,7 @@ fn apply_theme_css(theme: &Theme, height: u32) {
     let css = format!(
         r#"
         .turm-statusbar {{
-            background-color: {surface0};
+            background-color: transparent;
             border-top: 1px solid {overlay0};
             min-height: {height}px;
             padding: 0 10px;
@@ -97,7 +97,6 @@ fn apply_theme_css(theme: &Theme, height: u32) {
             font-size: 12px;
         }}
         "#,
-        surface0 = theme.surface0,
         overlay0 = theme.overlay0,
         subtext0 = theme.subtext0,
         height = height,

@@ -65,8 +65,9 @@ turm/
 │   ├── src/
 │   │   ├── main.rs          # Entry point, CLI flags (--init-config, --config-path)
 │   │   ├── app.rs           # GtkApplication setup, dark theme
-│   │   ├── window.rs        # ApplicationWindow, D-Bus polling, bg init
-│   │   ├── terminal.rs      # VTE terminal + background overlay compositing
+│   │   ├── window.rs        # ApplicationWindow, root Overlay, D-Bus polling
+│   │   ├── background.rs    # Window-level BackgroundLayer (image + tint)
+│   │   ├── terminal.rs      # VTE terminal (always transparent, composites over BackgroundLayer)
 │   │   ├── tabs.rs          # Tab manager (Notebook, tab bar, keyboard shortcuts)
 │   │   ├── split.rs         # Split pane tree (SplitNode, TabContent)
 │   │   ├── search.rs        # In-terminal search bar (Ctrl+Shift+F, VTE regex search)

@@ -14,6 +14,7 @@ use turm_core::context::ContextService;
 use turm_core::event_bus::{Event as BusEvent, EventBus as CoreEventBus, EventReceiver};
 use turm_core::trigger::{Trigger, TriggerEngine, TriggerSink, covering_patterns};
 
+use crate::background::BackgroundLayer;
 use crate::service_supervisor::ServiceSupervisor;
 use crate::trigger_sink::LiveTriggerSink;
 
@@ -27,6 +28,8 @@ pub struct TurmWindow {
     pub tab_manager: Rc<TabManager>,
     #[allow(dead_code)]
     statusbar: Rc<StatusBar>,
+    #[allow(dead_code)]
+    background: Rc<BackgroundLayer>,
     /// `connect_destroy` calls `service_supervisor.shutdown_all()` to
     /// tear down service plugins (send the documented `shutdown`
     /// notification, drop writer-channel sender, SIGKILL stragglers
@@ -179,8 +182,16 @@ impl TurmWindow {
         // Status bar
         let statusbar = Rc::new(StatusBar::new(config, &plugins));
 
+        // Window-level background layer. Sits as the base child of an
+        // Overlay so every tab/panel above it (notebook, statusbar,
+        // terminals, plugin webviews) renders on top of the same image
+        // — no more "background only on the first terminal" surprise.
+        let background = BackgroundLayer::new(config);
+
         // Layout: vertical box with notebook + statusbar
         let layout = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        layout.set_hexpand(true);
+        layout.set_vexpand(true);
         if config.statusbar.position == "top" {
             layout.append(&statusbar.container);
             layout.append(&tab_manager.notebook);
@@ -188,12 +199,22 @@ impl TurmWindow {
             layout.append(&tab_manager.notebook);
             layout.append(&statusbar.container);
         }
-        window.set_child(Some(&layout));
+
+        let root_overlay = gtk4::Overlay::new();
+        root_overlay.set_child(Some(&background.bg_picture));
+        root_overlay.add_overlay(&background.tint_overlay);
+        root_overlay.add_overlay(&layout);
+        // Use the layout's natural size to drive the overlay so the bg
+        // image stretches/letterboxes against the real UI footprint
+        // rather than the picture's intrinsic size.
+        root_overlay.set_measure_overlay(&layout, true);
+        window.set_child(Some(&root_overlay));
 
         // Config hot-reload (also reloads triggers atomically)
         watch_config(
             &tab_manager,
             &statusbar,
+            &background,
             &plugins,
             &triggers,
             &event_bus,
@@ -205,6 +226,7 @@ impl TurmWindow {
         let win = window.clone();
         let sp = socket_path.clone();
         let sb = statusbar.clone();
+        let bg = background.clone();
         let act = actions.clone();
         let ctx_pump = context.clone();
         let trg_pump = triggers.clone();
@@ -222,11 +244,11 @@ impl TurmWindow {
             // same batch (e.g. `context.snapshot`) must see those events
             // applied to ContextService.
             while let Ok(cmd) = socket_rx.try_recv() {
-                socket::dispatch(cmd, &mgr, &win, &sp, &sb, &act);
+                socket::dispatch(cmd, &mgr, &win, &sp, &sb, &bg, &act);
                 pump_state_timer.borrow().drain_context_only(&ctx_pump);
             }
             while let Ok(cmd) = plugin_dispatch_rx.try_recv() {
-                socket::dispatch(cmd, &mgr, &win, &sp, &sb, &act);
+                socket::dispatch(cmd, &mgr, &win, &sp, &sb, &bg, &act);
                 pump_state_timer.borrow().drain_context_only(&ctx_pump);
             }
             glib::ControlFlow::Continue
@@ -248,6 +270,7 @@ impl TurmWindow {
             window,
             tab_manager,
             statusbar,
+            background,
             service_supervisor,
         }
     }
@@ -264,9 +287,11 @@ impl TurmWindow {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn watch_config(
     tab_manager: &Rc<TabManager>,
     statusbar: &Rc<StatusBar>,
+    background: &Rc<BackgroundLayer>,
     plugins: &[turm_core::plugin::LoadedPlugin],
     triggers: &Arc<TriggerEngine>,
     event_bus: &Arc<CoreEventBus>,
@@ -286,6 +311,7 @@ fn watch_config(
 
     let mgr = tab_manager.clone();
     let sb = statusbar.clone();
+    let bg = background.clone();
     let pl = plugins.to_vec();
     let trg = triggers.clone();
     let bus = event_bus.clone();
@@ -310,6 +336,7 @@ fn watch_config(
         eprintln!("[turm] config reloaded");
         mgr.update_config(&config);
         sb.reload(&config, &pl);
+        bg.apply_config(&config);
         // `set_triggers` swaps the list atomically so a concurrent dispatch
         // sees either the old full list or the new full list, never a mix.
         trg.set_triggers(config.triggers.clone());

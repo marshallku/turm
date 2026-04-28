@@ -14,6 +14,7 @@ use turm_core::protocol::{Event, Request, Response};
 
 use vte4::prelude::*;
 
+use crate::background::BackgroundLayer;
 use crate::panel::Panel;
 use crate::tabs::TabManager;
 
@@ -225,6 +226,7 @@ pub fn dispatch(
     window: &ApplicationWindow,
     socket_path: &str,
     statusbar: &Rc<crate::statusbar::StatusBar>,
+    background: &Rc<BackgroundLayer>,
     actions: &Arc<ActionRegistry>,
 ) {
     let req = &cmd.request;
@@ -264,27 +266,27 @@ pub fn dispatch(
 
     match req.method.as_str() {
         "background.set" => {
-            let resp = handle_bg_set(req, mgr);
+            let resp = handle_bg_set(req, background);
             let _ = cmd.reply.send(resp);
         }
 
         "background.clear" => {
-            let resp = handle_bg_clear(req, mgr);
+            let resp = handle_bg_clear(req, background);
             let _ = cmd.reply.send(resp);
         }
 
         "background.next" => {
-            let resp = handle_bg_next(req, mgr);
+            let resp = handle_bg_next(req, background);
             let _ = cmd.reply.send(resp);
         }
 
         "background.toggle" => {
-            let resp = handle_bg_toggle(req, mgr);
+            let resp = handle_bg_toggle(req, background);
             let _ = cmd.reply.send(resp);
         }
 
         "background.set_tint" => {
-            let resp = handle_bg_set_tint(req, mgr);
+            let resp = handle_bg_set_tint(req, background);
             let _ = cmd.reply.send(resp);
         }
 
@@ -604,33 +606,9 @@ pub fn dispatch(
     }
 }
 
-// -- Background helpers (with terminal panel type check) --
+// -- Background helpers --
 
-fn active_terminal_panel(
-    req: &Request,
-    mgr: &Rc<TabManager>,
-) -> Result<Rc<crate::panel::PanelVariant>, Response> {
-    match mgr.active_panel() {
-        Some(panel) => {
-            if panel.as_terminal().is_some() {
-                Ok(panel)
-            } else {
-                Err(Response::error(
-                    req.id.clone(),
-                    "wrong_panel_type",
-                    "Active panel is not a terminal",
-                ))
-            }
-        }
-        None => Err(Response::error(
-            req.id.clone(),
-            "no_panel",
-            "No active panel",
-        )),
-    }
-}
-
-fn handle_bg_set(req: &Request, mgr: &Rc<TabManager>) -> Response {
+fn handle_bg_set(req: &Request, bg: &Rc<BackgroundLayer>) -> Response {
     let path = req.params.get("path").and_then(|v| v.as_str());
     match path {
         Some(p) => {
@@ -642,29 +620,19 @@ fn handle_bg_set(req: &Request, mgr: &Rc<TabManager>) -> Response {
                     &format!("File not found: {p}"),
                 );
             }
-            match active_terminal_panel(req, mgr) {
-                Ok(panel) => {
-                    panel.as_terminal().unwrap().set_background(path);
-                    Response::success(req.id.clone(), json!({ "status": "ok" }))
-                }
-                Err(e) => e,
-            }
+            bg.set_image(path);
+            Response::success(req.id.clone(), json!({ "status": "ok" }))
         }
         None => Response::error(req.id.clone(), "invalid_params", "Missing 'path' param"),
     }
 }
 
-fn handle_bg_clear(req: &Request, mgr: &Rc<TabManager>) -> Response {
-    match active_terminal_panel(req, mgr) {
-        Ok(panel) => {
-            panel.as_terminal().unwrap().clear_background();
-            Response::success(req.id.clone(), json!({ "status": "ok" }))
-        }
-        Err(e) => e,
-    }
+fn handle_bg_clear(req: &Request, bg: &Rc<BackgroundLayer>) -> Response {
+    bg.clear_image();
+    Response::success(req.id.clone(), json!({ "status": "ok" }))
 }
 
-fn handle_bg_next(req: &Request, mgr: &Rc<TabManager>) -> Response {
+fn handle_bg_next(req: &Request, bg: &Rc<BackgroundLayer>) -> Response {
     if !is_bg_active() {
         return Response::success(
             req.id.clone(),
@@ -681,45 +649,33 @@ fn handle_bg_next(req: &Request, mgr: &Rc<TabManager>) -> Response {
                     &format!("File not found: {img}"),
                 );
             }
-            match active_terminal_panel(req, mgr) {
-                Ok(panel) => {
-                    panel.as_terminal().unwrap().set_background(path);
-                    Response::success(req.id.clone(), json!({ "status": "ok", "path": img }))
-                }
-                Err(e) => e,
-            }
+            bg.set_image(path);
+            Response::success(req.id.clone(), json!({ "status": "ok", "path": img }))
         }
         None => Response::error(req.id.clone(), "no_images", "No images in wallpaper cache"),
     }
 }
 
-fn handle_bg_toggle(req: &Request, mgr: &Rc<TabManager>) -> Response {
+fn handle_bg_toggle(req: &Request, bg: &Rc<BackgroundLayer>) -> Response {
     let now_active = toggle_bg_mode();
-    if let Some(panel) = mgr.active_panel()
-        && let Some(term) = panel.as_terminal()
-    {
-        if now_active {
-            if let Some(img) = select_random_image() {
-                term.set_background(Path::new(&img));
-            }
-        } else {
-            term.clear_background();
+    if now_active {
+        if let Some(img) = select_random_image() {
+            bg.set_image(Path::new(&img));
         }
+    } else {
+        bg.clear_image();
     }
     let mode = if now_active { "active" } else { "deactive" };
     Response::success(req.id.clone(), json!({ "status": "ok", "mode": mode }))
 }
 
-fn handle_bg_set_tint(req: &Request, mgr: &Rc<TabManager>) -> Response {
+fn handle_bg_set_tint(req: &Request, bg: &Rc<BackgroundLayer>) -> Response {
     let opacity = req.params.get("opacity").and_then(|v| v.as_f64());
     match opacity {
-        Some(o) => match active_terminal_panel(req, mgr) {
-            Ok(panel) => {
-                panel.as_terminal().unwrap().set_tint(o);
-                Response::success(req.id.clone(), json!({ "status": "ok" }))
-            }
-            Err(e) => e,
-        },
+        Some(o) => {
+            bg.set_tint(o);
+            Response::success(req.id.clone(), json!({ "status": "ok" }))
+        }
         None => Response::error(req.id.clone(), "invalid_params", "Missing 'opacity' param"),
     }
 }

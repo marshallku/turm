@@ -48,11 +48,11 @@ Failed to create GBM buffer of size 841x1352: Invalid argument
 
 ### Terminal shows in light mode
 
-**Cause:** Transparent VTE background with no image loaded shows system theme underneath.
+**Cause:** Transparent VTE background with no image loaded shows the system theme underneath.
 **Fix:**
 
 1. Force dark theme: `settings.set_gtk_application_prefer_dark_theme(true)` in `app.rs`
-2. Set opaque VTE bg by default, only go transparent when bg image is applied
+2. Window CSS `window { background-color: <theme.background> }` provides the solid fallback color now that VTE is permanently transparent (no more conditional opaque bg).
 
 ### Background images not showing (solid color only)
 
@@ -60,7 +60,7 @@ Multiple possible causes:
 
 1. **Config `directory` is commented out**: Check `~/.config/turm/config.toml`. The `directory` field must be uncommented. A `#` before the key comments it out.
 
-2. **VTE paints opaque background**: Call `terminal.set_clear_background(false)` in `set_background()`. Without this, VTE covers the image layer.
+2. **Surface is opaque**: the window-level `BackgroundLayer` paints behind everything, so any opaque widget above it hides the image. Required transparent surfaces: VTE (`set_clear_background(false)` + `RGBA(0,0,0,0)`), WebKit (`webview.set_background_color(RGBA(0,0,0,0))`), notebook header / statusbar / `html, body` in plugin CSS — all transparent. If you add a new chrome widget and the image disappears under it, that widget needs the same treatment.
 
 3. **Image loading fails silently**: The original `GtkPicture::set_file()` loads asynchronously and fails silently. Fixed by using `gdk::Texture::from_file()` for synchronous loading with error reporting.
 
@@ -80,8 +80,8 @@ Multiple possible causes:
 
 ### Terminal shows only one line (collapsed height)
 
-**Cause:** `GtkOverlay` sizes based on its child widget (`bg_picture`). When no background image is set, `bg_picture` is hidden and has zero natural size, collapsing the entire overlay.
-**Fix:** Call `overlay.set_measure_overlay(&terminal, true)` so the terminal overlay widget contributes to size measurement even when `bg_picture` is hidden. Also set `overlay.set_hexpand(true)` and `overlay.set_vexpand(true)`.
+**Cause:** `GtkOverlay` sizes based on its child widget. The window-level root overlay's child is the (hideable) `bg_picture` from `BackgroundLayer`, so when no image is set the base child has zero natural size and the overlay collapses unless an overlay is marked as size-driver.
+**Fix:** Call `root_overlay.set_measure_overlay(&layout, true)` so the actual UI layout drives the overlay's measurement regardless of bg image state. The `TerminalPanel`'s own (search-bar) overlay is already measured by its terminal child.
 
 ### WebKit web process crashes on many sites
 

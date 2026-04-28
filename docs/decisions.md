@@ -25,16 +25,22 @@
 
 **GTK thread safety:** Socket server threads use `mpsc::channel` + `glib::timeout_add_local(50ms)` polling to safely dispatch commands on the GTK main thread.
 
-## 4. GtkOverlay for Background Compositing
+## 4. Window-level Background Compositing
 
-**Stack:** `bg_picture` (child) → `tint_overlay` (overlay) → `terminal` (overlay)
+**Stack:** `bg_picture` (window-overlay child) → `tint_overlay` (overlay) → layout box (overlay) → notebook → panels (terminal / plugin webview / external webview, all transparent)
 
-**Critical detail:** VTE paints its own opaque background by default. To see the image layers beneath, you must:
+`BackgroundLayer` (in `turm-linux/src/background.rs`) lives at the window level. The root `gtk4::Overlay` has the `bg_picture` as its base child and adds the tint plus the actual UI layout as overlays. Every panel sits over this single image so the background is consistent across tabs (terminals, todo, etc.) instead of being painted per-terminal.
 
-1. Call `terminal.set_clear_background(false)`
-2. Set VTE background color to transparent `RGBA(0,0,0,0)`
+**Critical details to keep the layer visible through every panel:**
 
-Without step 1, VTE covers the entire overlay with its own background color.
+1. VTE: `terminal.set_clear_background(false)` + bg color `RGBA(0,0,0,0)` (always — not conditional on whether an image is loaded). VTE otherwise paints its own opaque background and hides the layer.
+2. WebKit (plugin + external webview): `webview.set_background_color(RGBA(0,0,0,0))` so blank pages don't paint opaque white over the layer.
+3. CSS: `notebook header`, `notebook > stack`, `.turm-statusbar` are all `background-color: transparent`. Plugin user CSS sets `html, body { background-color: transparent }`.
+4. `bg_picture` and `tint_overlay` use `set_can_target(false)` so input events pass through to the panels above.
+
+When no image is configured, `bg_picture` is hidden and the window's CSS `window { background-color: <theme.background> }` provides the solid theme color underneath.
+
+**Why moved here from per-`TerminalPanel`:** the previous design only rendered the image inside the first terminal's overlay, so opening a non-terminal panel (todo plugin, webview) hid the image entirely, and split terminals each rendered their own copy with independent positioning. Window-level layer fixes both.
 
 ## 5. Binary Names: turm + turmctl
 
