@@ -137,6 +137,19 @@
   .card.drag-ghost .actions { display: none !important; }
   .card .title { line-height: 1.3; word-break: break-word; padding-right: 70px; }
   .card.done .title { color: var(--turm-subtext0); text-decoration: line-through; }
+  .card .body-preview {
+    color: var(--turm-subtext0);
+    font-size: 0.78rem; line-height: 1.4;
+    /* Two-line clamp. -webkit-line-clamp is supported in WebKit,
+       which is the only renderer that runs panel.html — turm is
+       linux/webkit6 today, macos webkit later. */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+  }
+  .card.done .body-preview { color: var(--turm-overlay0); }
   .card .meta { display: flex; flex-wrap: wrap; gap: 4px; font-size: 0.75em; }
   /* Actions are always visible (not hover-revealed) — Start is the
      primary workflow trigger; hiding it behind hover wrecked
@@ -469,6 +482,24 @@ function buildCard(t) {
   title.className = "title";
   title.textContent = t.title;
   card.appendChild(title);
+
+  // Body preview: first non-empty line of `body` (markdown). Two-
+  // line clamp via CSS `-webkit-line-clamp`. Skipped when body is
+  // empty or matches the title (common pattern: title-only Todos).
+  if (t.body) {
+    const firstLines = t.body
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#"))
+      .slice(0, 3)
+      .join(" ");
+    if (firstLines && firstLines !== t.title) {
+      const preview = document.createElement("div");
+      preview.className = "body-preview";
+      preview.textContent = firstLines;
+      card.appendChild(preview);
+    }
+  }
 
   const badges = [];
   if (t.priority && t.priority !== "normal") badges.push(badge(t.priority, t.priority));
