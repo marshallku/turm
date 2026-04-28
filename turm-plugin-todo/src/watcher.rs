@@ -37,7 +37,6 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
 
@@ -46,6 +45,7 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::store::{Store, validate_id};
 use crate::todo::{self, Status};
+use crate::{Writer, emit};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Snapshot {
@@ -59,27 +59,37 @@ struct Snapshot {
 pub struct Watcher {
     config: Arc<Config>,
     store: Arc<Store>,
-    tx: Sender<String>,
+    writer: Writer,
     initialized: Arc<AtomicBool>,
+    /// Set to `true` from main when stdin EOF / `shutdown` arrives.
+    /// Watcher checks this between scans and during its sleep so the
+    /// loop can exit promptly, drop its `writer` clone, and unblock the
+    /// writer thread's `rx.iter()` for a clean drain.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl Watcher {
     pub fn new(
         config: Arc<Config>,
         store: Arc<Store>,
-        tx: Sender<String>,
+        writer: Writer,
         initialized: Arc<AtomicBool>,
+        shutdown: Arc<AtomicBool>,
     ) -> Self {
         Self {
             config,
             store,
-            tx,
+            writer,
             initialized,
+            shutdown,
         }
     }
 
     pub fn run(&self) {
         while !self.initialized.load(Ordering::SeqCst) {
+            if self.shutdown.load(Ordering::SeqCst) {
+                return;
+            }
             thread::sleep(Duration::from_millis(100));
         }
         if self.config.fatal_error.is_some() {
@@ -95,8 +105,21 @@ impl Watcher {
                 HashMap::new()
             }
         };
-        loop {
-            thread::sleep(self.config.poll_interval);
+        while !self.shutdown.load(Ordering::SeqCst) {
+            // Sleep in 100ms chunks so a shutdown signal mid-poll
+            // is noticed within ~100ms instead of waiting for the
+            // full poll_interval (default 2s). Without this,
+            // graceful shutdown would block the writer drain for
+            // up to one full poll cycle.
+            let mut elapsed = Duration::ZERO;
+            while elapsed < self.config.poll_interval {
+                if self.shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
+                let chunk = Duration::from_millis(100).min(self.config.poll_interval - elapsed);
+                thread::sleep(chunk);
+                elapsed += chunk;
+            }
             let next = match self.scan() {
                 Ok(s) => s,
                 Err(e) => {
@@ -167,9 +190,7 @@ impl Watcher {
                 "payload": payload,
             }
         });
-        if let Err(e) = self.tx.send(frame.to_string()) {
-            eprintln!("[todo] failed to enqueue {kind}: {e}");
-        }
+        emit(&self.writer, &frame.to_string());
     }
 
     fn scan(&self) -> Result<HashMap<(String, String), Snapshot>, String> {
@@ -265,15 +286,24 @@ fn scan_root(root: &std::path::Path) -> Result<HashMap<(String, String), Snapsho
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::channel;
+    use std::sync::Mutex;
     use tempfile::tempdir;
 
-    fn mk_watcher() -> (
-        tempfile::TempDir,
-        Arc<Store>,
-        Watcher,
-        std::sync::mpsc::Receiver<String>,
-    ) {
+    /// `Writer` impl that captures bytes into a shared `Vec<u8>`.
+    /// Mirrors the test sink in main.rs so watcher unit tests can
+    /// read back the line-delimited frames the watcher emitted.
+    struct TestSink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for TestSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn mk_watcher() -> (tempfile::TempDir, Arc<Store>, Watcher, Arc<Mutex<Vec<u8>>>) {
         let dir = tempdir().unwrap();
         let store = Arc::new(Store::new(dir.path().join("todos")).unwrap());
         let cfg = Arc::new(Config {
@@ -282,14 +312,21 @@ mod tests {
             poll_interval: Duration::from_millis(50),
             fatal_error: None,
         });
-        let (tx, rx) = channel();
-        let w = Watcher::new(cfg, store.clone(), tx, Arc::new(AtomicBool::new(true)));
-        (dir, store, w, rx)
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer: Writer = Arc::new(Mutex::new(Box::new(TestSink(captured.clone()))));
+        let w = Watcher::new(
+            cfg,
+            store.clone(),
+            writer,
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        (dir, store, w, captured)
     }
 
     #[test]
     fn diff_emits_created_for_new_keys() {
-        let (_d, store, w, rx) = mk_watcher();
+        let (_d, store, w, captured) = mk_watcher();
         store
             .create(
                 "default",
@@ -307,7 +344,13 @@ mod tests {
             .unwrap();
         let next = scan_root(store.root()).unwrap();
         w.diff_and_emit(&HashMap::new(), &next);
-        let frame: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        let bytes = captured.lock().unwrap().clone();
+        let line = std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .next()
+            .expect("expected at least one frame");
+        let frame: Value = serde_json::from_str(line).unwrap();
         assert_eq!(frame["method"], "event.publish");
         assert_eq!(frame["params"]["kind"], "todo.created");
         assert_eq!(frame["params"]["payload"]["id"], "T-1");
@@ -315,7 +358,7 @@ mod tests {
 
     #[test]
     fn diff_emits_completed_on_status_done_transition() {
-        let (_d, store, w, rx) = mk_watcher();
+        let (_d, store, w, captured) = mk_watcher();
         store
             .create(
                 "default",
@@ -340,9 +383,14 @@ mod tests {
             .unwrap();
         let next = scan_root(store.root()).unwrap();
         w.diff_and_emit(&prev, &next);
-        let mut kinds = Vec::new();
-        while let Ok(line) = rx.try_recv() {
-            let v: Value = serde_json::from_str(&line).unwrap();
+        let bytes = captured.lock().unwrap().clone();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        let mut kinds: Vec<String> = Vec::new();
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let v: Value = serde_json::from_str(line).unwrap();
             kinds.push(v["params"]["kind"].as_str().unwrap().to_string());
         }
         assert!(kinds.contains(&"todo.changed".to_string()));
@@ -351,7 +399,7 @@ mod tests {
 
     #[test]
     fn diff_emits_deleted_for_missing_keys() {
-        let (_d, store, w, rx) = mk_watcher();
+        let (_d, store, w, captured) = mk_watcher();
         store
             .create(
                 "default",
@@ -371,14 +419,20 @@ mod tests {
         store.delete("default", "T-3").unwrap();
         let next = scan_root(store.root()).unwrap();
         w.diff_and_emit(&prev, &next);
-        let frame: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        let bytes = captured.lock().unwrap().clone();
+        let line = std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .next()
+            .expect("expected at least one frame");
+        let frame: Value = serde_json::from_str(line).unwrap();
         assert_eq!(frame["params"]["kind"], "todo.deleted");
         assert_eq!(frame["params"]["payload"]["id"], "T-3");
     }
 
     #[test]
     fn brand_new_done_todo_does_not_emit_completed() {
-        let (_d, store, w, rx) = mk_watcher();
+        let (_d, store, w, captured) = mk_watcher();
         store
             .create(
                 "default",
@@ -399,9 +453,14 @@ mod tests {
             .unwrap();
         let next = scan_root(store.root()).unwrap();
         w.diff_and_emit(&HashMap::new(), &next);
-        let mut kinds = Vec::new();
-        while let Ok(line) = rx.try_recv() {
-            let v: Value = serde_json::from_str(&line).unwrap();
+        let bytes = captured.lock().unwrap().clone();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        let mut kinds: Vec<String> = Vec::new();
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let v: Value = serde_json::from_str(line).unwrap();
             kinds.push(v["params"]["kind"].as_str().unwrap().to_string());
         }
         assert_eq!(kinds, vec!["todo.created".to_string()]);

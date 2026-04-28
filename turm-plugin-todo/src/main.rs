@@ -35,8 +35,8 @@ mod watcher;
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Sender, channel};
 use std::thread;
 
 use serde_json::{Value, json};
@@ -75,24 +75,37 @@ fn main() {
     };
 
     let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let (tx, rx) = channel::<String>();
-    let writer_tx = tx.clone();
-    thread::spawn(move || {
-        let mut out = stdout.lock();
-        for line in rx.iter() {
-            if writeln!(out, "{line}").is_err() || out.flush().is_err() {
-                break;
-            }
-        }
-    });
+    // Direct-write Stdout wrapped in a Mutex. Replaces the previous
+    // mpsc + writer-thread design — that pattern leaked frames on
+    // shutdown because the writer thread had no bounded drain
+    // window inside the supervisor's 200ms SIGKILL grace. Each
+    // producer (handle_frame, Watcher) now acquires the Mutex,
+    // writes, flushes, and releases. There's no queue, so a hard
+    // process::exit doesn't have any "in-flight" frames to lose —
+    // every emit is fully committed to the stdout buffer +
+    // flushed to the parent pipe before its caller returns.
+    let writer: Writer = Arc::new(Mutex::new(Box::new(std::io::stdout())));
 
     let initialized = Arc::new(AtomicBool::new(false));
+    // `shutdown` lets the watcher exit promptly on stdin EOF /
+    // `shutdown` method, instead of one full poll cycle later.
+    // Cooperative shutdown semantics; on hard SIGKILL we still
+    // exit immediately, but no frames are lost because nothing is
+    // queued.
+    let shutdown = Arc::new(AtomicBool::new(false));
 
-    if let Some(s) = &store {
-        let watcher = Watcher::new(config.clone(), s.clone(), tx.clone(), initialized.clone());
-        thread::spawn(move || watcher.run());
-    }
+    let watcher_handle = if let Some(s) = &store {
+        let watcher = Watcher::new(
+            config.clone(),
+            s.clone(),
+            writer.clone(),
+            initialized.clone(),
+            shutdown.clone(),
+        );
+        Some(thread::spawn(move || watcher.run()))
+    } else {
+        None
+    };
 
     let reader = BufReader::new(stdin.lock());
     for line in reader.lines() {
@@ -112,19 +125,71 @@ fn main() {
         };
         handle_frame(
             &frame,
-            &writer_tx,
+            &writer,
             &initialized,
+            &shutdown,
             &config,
             store.as_ref(),
             store_error.as_deref(),
         );
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+    }
+
+    // Cooperative shutdown: signal + JOIN. The direct-write model
+    // means each `emit()` call commits its frame end-to-end before
+    // returning, but a watcher mid-emit (between writeln and flush
+    // — yes, our lock spans both, but at the syscall-issued layer
+    // there's still a brief window) when main returns would be
+    // killed by the OS process tear-down. Joining the watcher
+    // ensures its current iteration (sleep poll + optional scan +
+    // any emits) fully completes before we return. The watcher
+    // notices the flag within ~100ms during its chunked sleep, so
+    // worst-case shutdown is ~100ms + one scan duration — well
+    // inside the supervisor's 200ms SIGKILL grace for typical
+    // workspaces.
+    shutdown.store(true, Ordering::SeqCst);
+    if let Some(h) = watcher_handle {
+        let _ = h.join();
+    }
+}
+
+/// Thread-safe writer. Production uses `std::io::Stdout`; tests inject
+/// `Vec<u8>` to capture emitted frames for assertion. Plain `Stdout`
+/// already serializes `write_all` per-call (it owns an internal
+/// Mutex), but an explicit outer Mutex around a boxed `dyn Write`
+/// lets us hold the lock across `writeln!` + `flush` so a frame is
+/// committed atomically — without that, a producer preempted
+/// between writeln and flush could interleave with another thread's
+/// writeln and corrupt the line-delimited protocol.
+pub type Writer = Arc<Mutex<Box<dyn std::io::Write + Send>>>;
+
+/// Write one protocol frame as a single line + flush. Errors are
+/// logged but never propagated — there's nothing the caller can do
+/// if stdout has died, and the supervisor will detect via EOF on
+/// the read side. Holding the lock across writeln+flush guarantees
+/// atomic line emission against concurrent producers (action
+/// responses + watcher events).
+pub fn emit(writer: &Writer, line: &str) {
+    let mut out = match writer.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if let Err(e) = writeln!(out, "{line}") {
+        eprintln!("[todo] writeln failed: {e}");
+        return;
+    }
+    if let Err(e) = out.flush() {
+        eprintln!("[todo] flush failed: {e}");
     }
 }
 
 fn handle_frame(
     frame: &Value,
-    tx: &Sender<String>,
+    writer: &Writer,
     initialized: &AtomicBool,
+    shutdown: &AtomicBool,
     config: &Config,
     store: Option<&Arc<Store>>,
     store_error: Option<&str>,
@@ -138,7 +203,7 @@ fn handle_frame(
             let proto = params.get("protocol_version").and_then(Value::as_u64);
             if proto != Some(PROTOCOL_VERSION as u64) {
                 send_error(
-                    tx,
+                    writer,
                     id,
                     "protocol_mismatch",
                     &format!("todo plugin speaks protocol {PROTOCOL_VERSION}; got {proto:?}"),
@@ -146,7 +211,7 @@ fn handle_frame(
                 return;
             }
             send_response(
-                tx,
+                writer,
                 id,
                 json!({
                     "service_version": env!("CARGO_PKG_VERSION"),
@@ -172,20 +237,27 @@ fn handle_frame(
                 .unwrap_or("")
                 .to_string();
             let action_params = params.get("params").cloned().unwrap_or(Value::Null);
-            let result = handle_action(&name, &action_params, config, store, store_error, tx);
+            let result = handle_action(&name, &action_params, config, store, store_error, writer);
             match result {
-                Ok(v) => send_response(tx, id, v),
-                Err((code, msg)) => send_error(tx, id, &code, &msg),
+                Ok(v) => send_response(writer, id, v),
+                Err((code, msg)) => send_error(writer, id, &code, &msg),
             }
         }
         "event.dispatch" => {
             // No subscriptions — quietly ignore.
         }
-        "shutdown" => std::process::exit(0),
+        "shutdown" => {
+            // Don't process::exit here — that hard-kills the
+            // writer thread mid-flush and loses queued frames. Set
+            // the rendezvous flag and let the read loop break, so
+            // main's drain path joins the writer cleanly. Process
+            // exits naturally when main returns.
+            shutdown.store(true, Ordering::SeqCst);
+        }
         other if !other.is_empty() => {
             if !id.is_empty() {
                 send_error(
-                    tx,
+                    writer,
                     id,
                     "unknown_method",
                     &format!("todo plugin: unknown method {other}"),
@@ -202,7 +274,7 @@ fn handle_action(
     config: &Config,
     store: Option<&Arc<Store>>,
     store_error: Option<&str>,
-    tx: &Sender<String>,
+    writer: &Writer,
 ) -> Result<Value, (String, String)> {
     if let Some(err) = &config.fatal_error {
         return Err(("config_error".into(), err.clone()));
@@ -229,7 +301,7 @@ fn handle_action(
         "todo.list" => action_list(params, store),
         "todo.update" => action_update(params, config, store),
         "todo.set_status" => action_set_status(params, config, store),
-        "todo.start" => action_start(params, config, store, tx),
+        "todo.start" => action_start(params, config, store, writer),
         "todo.delete" => action_delete(params, config, store),
         other => Err((
             "action_not_found".into(),
@@ -479,7 +551,7 @@ fn action_start(
     params: &Value,
     config: &Config,
     store: &Arc<Store>,
-    tx: &Sender<String>,
+    writer: &Writer,
 ) -> Result<Value, (String, String)> {
     let workspace = string_param_or_default(params, "workspace", &config.default_workspace)?;
     let id = required_string(params, "id")?;
@@ -515,9 +587,7 @@ fn action_start(
             "payload": payload.clone(),
         }
     });
-    if let Err(e) = tx.send(frame.to_string()) {
-        eprintln!("[todo] failed to enqueue todo.start_requested: {e}");
-    }
+    emit(writer, &frame.to_string());
     Ok(json!({
         "id": id,
         "workspace": workspace,
@@ -648,33 +718,49 @@ fn optional_string_array(params: &Value, key: &str) -> Result<Vec<String>, (Stri
     }
 }
 
-fn send_response(tx: &Sender<String>, id: &str, result: Value) {
+fn send_response(writer: &Writer, id: &str, result: Value) {
     let frame = json!({ "id": id, "ok": true, "result": result });
-    let _ = tx.send(frame.to_string());
+    emit(writer, &frame.to_string());
 }
 
-fn send_error(tx: &Sender<String>, id: &str, code: &str, message: &str) {
+fn send_error(writer: &Writer, id: &str, code: &str, message: &str) {
     let frame = json!({
         "id": id,
         "ok": false,
         "error": { "code": code, "message": message },
     });
-    let _ = tx.send(frame.to_string());
+    emit(writer, &frame.to_string());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::channel;
     use tempfile::tempdir;
 
-    fn fixture() -> (
+    /// `Writer` impl that captures everything written into a shared
+    /// `Vec<u8>` so tests can read back the line-delimited frames for
+    /// assertion. Production `Stdout` doesn't allow read-back; this is
+    /// the test-only seam since `Writer = Arc<Mutex<Box<dyn Write + Send>>>`.
+    struct TestSink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for TestSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    type Fixture = (
         tempfile::TempDir,
         Config,
         Arc<Store>,
-        Sender<String>,
-        std::sync::mpsc::Receiver<String>,
-    ) {
+        Writer,
+        Arc<Mutex<Vec<u8>>>,
+    );
+
+    fn fixture() -> Fixture {
         let dir = tempdir().unwrap();
         let config = Config {
             root: dir.path().join("todos"),
@@ -683,8 +769,9 @@ mod tests {
             fatal_error: None,
         };
         let store = Arc::new(Store::new(config.root.clone()).unwrap());
-        let (tx, rx) = channel();
-        (dir, config, store, tx, rx)
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer: Writer = Arc::new(Mutex::new(Box::new(TestSink(captured.clone()))));
+        (dir, config, store, writer, captured)
     }
 
     #[test]
@@ -772,11 +859,14 @@ mod tests {
 
     #[test]
     fn start_emits_event_and_returns_payload() {
-        let (_d, config, store, tx, rx) = fixture();
+        let (_d, config, store, writer, captured) = fixture();
         let t = action_create(&json!({"title": "kickoff"}), &config, &store).unwrap();
-        let r = action_start(&json!({"id": t.id}), &config, &store, &tx).unwrap();
+        let r = action_start(&json!({"id": t.id}), &config, &store, &writer).unwrap();
         assert_eq!(r["todo"]["title"], "kickoff");
-        let frame: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        // emit() writes one line + \n; parse the captured bytes.
+        let bytes = captured.lock().unwrap().clone();
+        let line = std::str::from_utf8(&bytes).unwrap().trim_end();
+        let frame: Value = serde_json::from_str(line).unwrap();
         assert_eq!(frame["method"], "event.publish");
         assert_eq!(frame["params"]["kind"], "todo.start_requested");
     }
@@ -856,7 +946,7 @@ mod tests {
 
     #[test]
     fn fatal_error_short_circuits_actions() {
-        let (_d, _, store, tx, _rx) = fixture();
+        let (_d, _, store, writer, _rx) = fixture();
         let bad_config = Config {
             root: store.root().to_path_buf(),
             default_workspace: "default".into(),
@@ -869,7 +959,7 @@ mod tests {
             &bad_config,
             Some(&store),
             None,
-            &tx,
+            &writer,
         )
         .unwrap_err();
         assert_eq!(err.0, "config_error");
@@ -877,9 +967,16 @@ mod tests {
 
     #[test]
     fn unknown_action_returns_action_not_found() {
-        let (_d, config, store, tx, _rx) = fixture();
-        let err =
-            handle_action("todo.fly", &Value::Null, &config, Some(&store), None, &tx).unwrap_err();
+        let (_d, config, store, writer, _rx) = fixture();
+        let err = handle_action(
+            "todo.fly",
+            &Value::Null,
+            &config,
+            Some(&store),
+            None,
+            &writer,
+        )
+        .unwrap_err();
         assert_eq!(err.0, "action_not_found");
     }
 }
