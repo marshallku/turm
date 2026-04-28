@@ -15,11 +15,20 @@
 //!
 //! `from_env` never errors: invalid values land in `fatal_error` and
 //! the plugin still completes the `initialize` handshake so the
-//! supervisor's `provides` resolution succeeds. Every action then
-//! short-circuits to `config_error` instead of running on a half-
-//! validated config.
+//! supervisor's `provides` resolution succeeds. Behavior in degraded
+//! mode is per-action:
+//! - `discord.auth_status` always answers (even with fatal_error
+//!   set) so the UI/CLI can show a coherent diagnostic.
+//! - `discord.send_message` returns `not_authenticated` when
+//!   `fatal_error` is set OR when no credentials are resolvable.
+//!   Both states mean "the gateway cannot send right now"; merging
+//!   them under one error code keeps the trigger DSL simple at the
+//!   cost of slightly fuzzier root-cause attribution (callers can
+//!   still diff against `discord.auth_status` for the structured
+//!   reason).
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -31,6 +40,11 @@ pub struct Config {
     pub bot_token_env: Option<String>,
     pub plaintext_path: PathBuf,
     pub require_secure_store: bool,
+    /// Initial reconnect delay; doubles up to `reconnect_max` on
+    /// repeated connect failures. Reset to initial on a clean
+    /// disconnect (server-rotated reconnect, RESUMED).
+    pub reconnect_initial: Duration,
+    pub reconnect_max: Duration,
     pub fatal_error: Option<String>,
 }
 
@@ -62,6 +76,8 @@ impl Config {
             bot_token_env,
             plaintext_path,
             require_secure_store,
+            reconnect_initial: Duration::from_secs(1),
+            reconnect_max: Duration::from_secs(60),
             fatal_error,
         }
     }

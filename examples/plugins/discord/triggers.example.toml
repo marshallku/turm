@@ -1,0 +1,127 @@
+# Example triggers driven by the Discord plugin (slice 2).
+#
+# The plugin emits FOUR event kinds, all derived from MESSAGE_CREATE
+# DISPATCH frames:
+#   - `discord.mention` — message that @-mentions the bot, OR
+#                         @everyone (mention_everyone=true). Wins
+#                         priority over .message and .dm — a single
+#                         MESSAGE_CREATE produces ONE filtered event.
+#   - `discord.dm`      — DM-channel message (no guild_id) that does
+#                         NOT mention the bot.
+#   - `discord.message` — guild-channel message (has guild_id) that
+#                         does NOT mention the bot.
+#   - `discord.raw`     — every MESSAGE_CREATE (unfiltered firehose,
+#                         intended for the archive trigger below).
+#
+# Filtered payload shape (mention / dm / message):
+#   { message_id, channel_id, guild_id, author_id, author_username,
+#     content, mention_everyone, mentions_bot }
+#
+# Raw payload shape:
+#   { event_type, channel_id, guild_id, message_id, event_json }
+#   where `event_json` is the verbatim Discord MESSAGE_CREATE `d`
+#   object (embeds, attachments, components, mentions array, all of it).
+#
+# discord.send_message action:
+#   turmctl call discord.send_message --params \
+#     '{"channel_id":"123456789","content":"hello"}'
+#   Returns {message_id, channel_id} on success. Failure codes
+#   (top-level error.code, structurally matchable by trigger
+#   payload_match against the discord.send_message.failed event):
+#     - "rate_limited"      — HTTP 429 (Retry-After in the message)
+#     - "discord_<numeric>" — Discord API error, e.g. "discord_50001"
+#                             (Missing Access), "discord_50013"
+#                             (Missing Permissions). Numeric codes
+#                             from Discord's JSON error code table.
+#     - "io_error"          — transport-level failure with no Discord
+#                             error body (DNS, TLS, connection reset).
+
+# ---------------------------------------------------------------------
+# 1. Raw archive — capture EVERY MESSAGE_CREATE to a per-guild folder.
+#    Keyed by message_id (Discord snowflake), so RESUME-driven re-delivery
+#    of the same message naturally dedupes via kb.ensure.
+#
+#    For DMs, guild_id is null — the path interpolates as `.raw/discord/null/...`
+#    which collapses all DMs into one folder. If you want DMs separated,
+#    branch into two triggers (one with `event.guild_id != null`, one
+#    with `== null`) and use `dm` instead of the null literal.
+# ---------------------------------------------------------------------
+[[triggers]]
+name = "discord-archive-raw"
+action = "kb.ensure"
+params = { id = ".raw/discord/{event.guild_id}/{event.message_id}.json", default_template = "{event.event_json}\n" }
+
+[triggers.when]
+event_kind = "discord.raw"
+
+# ---------------------------------------------------------------------
+# 2. Mention → personal-tasks file
+#    Every @-mention of the bot appends to a single rolling notes file.
+#    Skip @everyone broadcasts (often noisy announcements) by gating
+#    the trigger to direct mentions only via condition.
+# ---------------------------------------------------------------------
+[[triggers]]
+name = "discord-mention-to-personal-tasks"
+action = "kb.append"
+params = { id = "threads/discord-mentions.md", content = """
+
+## {event.message_id} in {event.channel_id} — from {event.author_username}
+
+{event.content}
+
+""", ensure = true }
+condition = "!event.mention_everyone"
+
+[triggers.when]
+event_kind = "discord.mention"
+
+# ---------------------------------------------------------------------
+# 3. DM auto-reply (write action; Phase 14.2 await pattern)
+#    On every DM, send an LLM-generated reply. Uses the Phase 14.2
+#    `await` clause to chain: kick off llm.complete with the DM content,
+#    wait for `llm.complete.completed`, then post the reply back.
+#    Mirrors the Slack ask-and-wait sketch in slack/triggers.example.toml.
+# ---------------------------------------------------------------------
+# [[triggers]]
+# name = "discord-dm-llm-reply"
+# action = "llm.complete"
+# params = { prompt = "{event.content}\n\nRespond briefly." }
+# [triggers.when]
+# event_kind = "discord.dm"
+# [triggers.await]
+# event_kind = "llm.complete.completed"
+# timeout_seconds = 60
+# on_timeout = "abort"
+#
+# [[triggers]]
+# name = "discord-dm-llm-reply-post"
+# action = "discord.send_message"
+# params = { channel_id = "{event.channel_id}", content = "{event.await.completion}" }
+# [triggers.when]
+# event_kind = "llm.complete.completed"
+# # Note: this second trigger is required because turm's trigger model
+# # is action-then-await-then-end. The await result lives on the
+# # follow-up `llm.complete.completed` event which the second trigger
+# # consumes via payload_match (channel_id forwarded as a correlation
+# # token through llm.complete params).
+
+# ---------------------------------------------------------------------
+# 4. Channel-scoped subscription
+#    The plugin emits messages from ALL channels the bot can see.
+#    Use `payload_match` to subscribe to a single channel:
+# ---------------------------------------------------------------------
+# [[triggers]]
+# name = "discord-engineering-only"
+# action = "kb.append"
+# params = { id = "threads/eng-channel.md", content = "{event.author_username}: {event.content}\n", ensure = true }
+# [triggers.when]
+# event_kind = "discord.message"
+# payload_match = { channel_id = "1234567890" }
+
+# ---------------------------------------------------------------------
+# 5. Mention-as-command — "@bot kb search foo" → kb.search trigger
+#    Parsing the mention text into a structured command isn't
+#    expressible in the current interpolation DSL (no string ops),
+#    so use a passthrough action that re-dispatches with parsed
+#    params. Sketch only — needs a small command-router action.
+# ---------------------------------------------------------------------

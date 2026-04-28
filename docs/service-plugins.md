@@ -296,6 +296,14 @@ Each "Turn N.x" is one commit-sized unit (codex review + save.sh).
 **11.3 Derived markdown ingestion trigger** (depends on Phase 14 chained-trigger primitive)
 - TOML trigger: on `slack.mention`, call LLM action to summarize thread, write derived markdown to `~/docs/threads/<topic>.md`. Blocked on Phase 14 because the LLM result has to feed `kb.ensure` in the same workflow.
 
+**11.4 Discord plugin** (Phase 20 — shipped both slices)
+- Same external surface as Slack: `turm-plugin-discord auth` one-time CLI seeds keyring; `onStartup` activation runs the Gateway WebSocket whenever turm is up.
+- Events: `discord.mention` (bot @-mention or @everyone), `discord.dm` (no `guild_id`), `discord.message` (guild channel, no mention), `discord.raw` (full firehose with verbatim MESSAGE_CREATE `d` object). Self-messages and bot-authored messages are filtered from the non-raw events to prevent feedback loops; raw still receives them so archive triggers see full fidelity.
+- Filter precedence: a single MESSAGE_CREATE produces ONE non-raw event. Mention wins over DM wins over message — a DM that mentions the bot fires `discord.mention`, not `discord.dm`. A trigger that wants "every message including mentions" registers TWO triggers (one on `discord.message`, one on `discord.mention`) with the same action body — `payload_match` on the underlying message event would not work because mention-classified messages never reach `discord.message`.
+- Action: `discord.send_message` (POST `/channels/{id}/messages`). Failure codes surface STRUCTURALLY as the action's top-level error code so triggers can match on them: `rate_limited` (HTTP 429, with Retry-After in the message body), `discord_<numeric>` (e.g. `discord_50001` for Missing Access; covers every Discord API error code from <https://discord.com/developers/docs/topics/opcodes-and-status-codes#json>), or `io_error` for transport-level failures with no Discord error body.
+- Privileged MESSAGE_CONTENT intent (1<<15) is required for non-mention message bodies to arrive — toggled on the application's Bot tab. Without it, `event.content` is empty for messages that don't @-mention the bot, breaking keyword-match triggers. The plugin requests it unconditionally; Discord rejects IDENTIFY with close 4014 if the application doesn't have it enabled, and the gateway loop surfaces the close code with a hint.
+- Channel scoping is a trigger-side concern (same posture as Slack). The plugin emits messages from every channel the bot can see; users narrow with `payload_match { channel_id = "..." }` or `payload_match { guild_id = "..." }`. See `examples/plugins/discord/triggers.example.toml` for the canonical patterns (raw archive, mention → tasks, single-channel subscription, ask-and-wait DM reply via Phase 14.2 await).
+
 ### Phase 12: LLM plugin
 
 **12.1 `turm-plugin-llm`** (shipped — see roadmap.md for details)

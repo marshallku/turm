@@ -1,31 +1,46 @@
-//! First-party Discord service plugin for turm — slice 1.
+//! First-party Discord service plugin for turm.
 //!
-//! **Status (Phase 16-equivalent slice 1)**: this commit ships
-//! the crate skeleton + `auth` subcommand + plugin manifest +
-//! `discord.auth_status` action. The Gateway WebSocket client (which
-//! emits `discord.message` / `discord.mention` / `discord.dm` events
-//! and provides `discord.send_message`) lands in slice 2.
+//! Two run modes (selected by `argv[1]`):
+//! - **`auth`** — validates the env bot token via `GET /users/@me`
+//!   and persists a TokenSet (with bot user_id + global_name) to the
+//!   configured store.
+//! - **(no args)** — RPC mode. Speaks the turm service-plugin
+//!   protocol over stdio, runs the Gateway WebSocket in a background
+//!   thread, and publishes `discord.message` / `discord.dm` /
+//!   `discord.mention` / `discord.raw` events when MESSAGE_CREATE
+//!   dispatches arrive.
 //!
-//! Auth flow (matches `turm-plugin-slack`):
-//! 1. User creates an app at <https://discord.com/developers/applications>,
-//!    adds a Bot, copies the bot token (Reset Token if first time),
-//!    enables the MESSAGE CONTENT privileged intent if they want
-//!    message bodies (required for keyword matching).
-//! 2. `TURM_DISCORD_BOT_TOKEN=<token> turm-plugin-discord auth` →
-//!    validates against Discord's `/users/@me`, persists `TokenSet`
-//!    in the OS keyring (with plaintext fallback under
-//!    `$XDG_CONFIG_HOME/turm/discord-token-<workspace>.json` unless
-//!    `TURM_DISCORD_REQUIRE_SECURE_STORE=1` is set).
-//! 3. turm spawns the plugin via the supervisor (`onStartup`); the
-//!    plugin reads the token from the store at init time and (in
-//!    slice 2) opens the Gateway WebSocket.
+//! If RPC mode starts without stored credentials AND the env token is
+//! missing, the supervisor handshake still completes — the gateway
+//! loop just stays paused. Running `turm-plugin-discord auth` while
+//! turm is running is enough; the loop picks up the new credentials
+//! on its next reconnect attempt.
+//!
+//! Caveat — env precedence: `TURM_DISCORD_BOT_TOKEN`, when set, wins
+//! over the stored token (matches Slack's posture, useful for
+//! testing). That means the auth-while-running recovery path only
+//! works if the env var is UNSET in the supervisor's environment.
+//! Once env is set at turm startup, a fresh `auth` run updates the
+//! store but the gateway keeps using the env token until turm
+//! restarts. `discord.auth_status.credentials_source` reports the
+//! live source so the user can see which one is live.
+//!
+//! See `docs/service-plugins.md` for the protocol contract. Discord
+//! plugin is an event emitter + write-action provider — a `kb.append`
+//! / `webhook.fire` action on a `discord.mention` event is purely
+//! user trigger config, the same shape as the Slack integration.
 
+mod api;
 mod config;
+mod events;
+mod gateway;
 mod store;
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -34,6 +49,8 @@ use store::{TokenSet, TokenStore, open_store};
 
 const PROTOCOL_VERSION: u32 = 1;
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+
+type StdoutHandle = Arc<std::sync::Mutex<std::io::Stdout>>;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -48,10 +65,6 @@ fn main() {
     }
 }
 
-/// Validate the env-supplied bot token against `/users/@me` and
-/// persist a `TokenSet` to the configured store. Run interactively
-/// from a shell, NOT via the supervisor — supervisor-spawned
-/// instances skip the args path.
 fn run_auth() {
     let config = Config::from_env();
     if let Some(err) = &config.fatal_error {
@@ -100,9 +113,6 @@ fn run_auth() {
     );
 }
 
-/// Issue a `GET /users/@me` against Discord's REST API with the
-/// supplied bot token. Returns the JSON body on 2xx, an error
-/// describing the failure otherwise.
 fn get_users_me(bot_token: &str) -> Result<Value, String> {
     let resp = ureq::get(&format!("{DISCORD_API_BASE}/users/@me"))
         .set("Authorization", &format!("Bot {bot_token}"))
@@ -117,16 +127,19 @@ fn get_users_me(bot_token: &str) -> Result<Value, String> {
     serde_json::from_str(&body).map_err(|e| format!("decode: {e}"))
 }
 
-/// Stdio JSON-line RPC loop. Slice 1 handles `initialize` /
-/// `initialized` / `action.invoke` for `discord.auth_status` /
-/// `shutdown` only. The Gateway WebSocket client + `discord.message`
-/// events + `discord.send_message` action come in slice 2.
 fn run_rpc() {
     let config = Config::from_env();
     if let Some(err) = &config.fatal_error {
-        eprintln!("[discord] config error (actions will return config_error): {err}");
+        eprintln!(
+            "[discord] config error (gateway disabled; \
+             discord.send_message returns not_authenticated; \
+             discord.auth_status reports the fatal_error): {err}"
+        );
     }
-    let store = open_store(&config);
+    // Box<dyn TokenStore> → Arc<dyn TokenStore> so the gateway thread
+    // can hold an independent reference. The keyring-backed store has
+    // its own internal locking; we don't need a Mutex around it.
+    let store: Arc<dyn TokenStore> = Arc::from(open_store(&config));
     eprintln!(
         "[discord] workspace={}, store={}",
         config.workspace_label,
@@ -134,8 +147,41 @@ fn run_rpc() {
     );
 
     let stdin = std::io::stdin();
-    let stdout = Arc::new(std::sync::Mutex::new(std::io::stdout()));
+    let stdout: StdoutHandle = Arc::new(std::sync::Mutex::new(std::io::stdout()));
     let initialized = Arc::new(AtomicBool::new(false));
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    // Gateway loop runs in a background thread, gated on the
+    // supervisor's `initialized` notification so events can't race
+    // the handshake. The loop polls credentials inside `run_loop` —
+    // running `turm-plugin-discord auth` while the plugin is up
+    // populates the store and the loop picks it up on its next
+    // recheck (no plugin process restart required).
+    {
+        let init_flag = initialized.clone();
+        let stop = stop_signal.clone();
+        let writer = stdout.clone();
+        let cfg = config.clone();
+        let store_for_loop = store.clone();
+        thread::spawn(move || {
+            while !init_flag.load(Ordering::SeqCst) {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            gateway::run_loop(&cfg, store_for_loop, &stop, |event| {
+                let frame = json!({
+                    "method": "event.publish",
+                    "params": {
+                        "kind": event.kind(),
+                        "payload": event.payload_json(),
+                    }
+                });
+                emit(&writer, &frame.to_string());
+            });
+        });
+    }
 
     let reader = BufReader::new(stdin.lock());
     for line in reader.lines() {
@@ -153,16 +199,17 @@ fn run_rpc() {
                 continue;
             }
         };
-        handle_frame(&frame, &stdout, &initialized, &config, store.as_ref());
+        handle_frame(&frame, &stdout, &initialized, &stop_signal, &config, &store);
     }
 }
 
 fn handle_frame(
     frame: &Value,
-    stdout: &Arc<std::sync::Mutex<std::io::Stdout>>,
+    stdout: &StdoutHandle,
     initialized: &AtomicBool,
+    stop_signal: &AtomicBool,
     config: &Config,
-    store: &dyn TokenStore,
+    store: &Arc<dyn TokenStore>,
 ) {
     let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
     let id = frame.get("id").and_then(Value::as_str).unwrap_or("");
@@ -184,7 +231,7 @@ fn handle_frame(
                 id,
                 json!({
                     "service_version": env!("CARGO_PKG_VERSION"),
-                    "provides": ["discord.auth_status"],
+                    "provides": ["discord.auth_status", "discord.send_message"],
                     "subscribes": [],
                 }),
             );
@@ -206,7 +253,10 @@ fn handle_frame(
             }
         }
         "event.dispatch" => {}
-        "shutdown" => std::process::exit(0),
+        "shutdown" => {
+            stop_signal.store(true, Ordering::SeqCst);
+            std::process::exit(0);
+        }
         other if !other.is_empty() && !id.is_empty() => {
             send_error(
                 stdout,
@@ -221,32 +271,48 @@ fn handle_frame(
 
 fn handle_action(
     name: &str,
-    _params: &Value,
+    params: &Value,
     config: &Config,
-    store: &dyn TokenStore,
+    store: &Arc<dyn TokenStore>,
 ) -> Result<Value, (String, String)> {
     match name {
-        // Discoverable even when config has fatal errors — same shape
-        // Slack's `slack.auth_status` uses, so a future
-        // `turmctl context --full` can query both messengers
-        // uniformly without special-casing degraded modes.
-        // `configured = false` signals "env validation failed";
-        // `authenticated = false` signals "env OK but no creds stored
-        // yet". Independent flags so the UI can distinguish.
         "discord.auth_status" => {
+            // Same shape as Slack's slack.auth_status — reports BOTH
+            // configured (env validation OK) and authenticated (creds
+            // resolvable for the gateway loop) so a future
+            // `turmctl context --full` can render both messengers
+            // uniformly. credentials_source mirrors what the loop
+            // would actually use; reporting "store" while the loop
+            // reads from "env" would be a confusing lie.
             let configured = config.fatal_error.is_none();
+            let resolved = if configured {
+                gateway::current_credentials(config, &**store)
+            } else {
+                None
+            };
             let stored = if configured { store.load() } else { None };
+            let credentials_source = resolved.as_ref().map(|c| c.source).unwrap_or("none");
+            // Identity (user_id, username) is only validated for the
+            // store path — env tokens skip the auth.test step. Match
+            // Slack's posture: surface stored identity only when the
+            // live source is the store, else null.
+            let report_identity = credentials_source == "store";
             Ok(json!({
                 "configured": configured,
-                "authenticated": stored.is_some(),
+                "authenticated": resolved.is_some(),
+                "credentials_source": credentials_source,
                 "store_kind": store.kind(),
                 "workspace": config.workspace_label,
-                "user_id": stored.as_ref().and_then(|s| s.user_id.clone()),
-                "username": stored.as_ref().and_then(|s| s.username.clone()),
+                "user_id": if report_identity {
+                    stored.as_ref().and_then(|s| s.user_id.clone())
+                } else { None },
+                "username": if report_identity {
+                    stored.as_ref().and_then(|s| s.username.clone())
+                } else { None },
                 "fatal_error": config.fatal_error.clone(),
             }))
         }
-        // Other actions short-circuit on fatal_error.
+        "discord.send_message" => handle_send_message(params, config, store),
         _ if config.fatal_error.is_some() => {
             Err(("config_error".into(), config.fatal_error.clone().unwrap()))
         }
@@ -257,17 +323,78 @@ fn handle_action(
     }
 }
 
-fn send_response(stdout: &Arc<std::sync::Mutex<std::io::Stdout>>, id: &str, result: Value) {
+fn handle_send_message(
+    params: &Value,
+    config: &Config,
+    store: &Arc<dyn TokenStore>,
+) -> Result<Value, (String, String)> {
+    if config.fatal_error.is_some() {
+        return Err((
+            "not_authenticated".into(),
+            "discord plugin is in fatal-config state — see discord.auth_status".into(),
+        ));
+    }
+    let creds = gateway::current_credentials(config, &**store).ok_or((
+        "not_authenticated".to_string(),
+        "no Discord credentials available — run `turm-plugin-discord auth` or set TURM_DISCORD_BOT_TOKEN"
+            .to_string(),
+    ))?;
+    let channel_id = params.get("channel_id").and_then(Value::as_str).ok_or((
+        "invalid_params".to_string(),
+        "missing 'channel_id' (string)".to_string(),
+    ))?;
+    // Discord snowflakes are decimal-only — validate before
+    // interpolating into the URL path. Without this guard a
+    // malicious or buggy trigger could pass `../users/@me` or
+    // `123/messages?` and steer the authenticated POST at a
+    // different Discord API endpoint. Empty strings would also slip
+    // through `as_str().ok_or(...)` since "" is a valid &str.
+    if channel_id.is_empty() || !channel_id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err((
+            "invalid_params".to_string(),
+            format!(
+                "'channel_id' must be a Discord snowflake (decimal digits only); got {channel_id:?}"
+            ),
+        ));
+    }
+    let content = params.get("content").and_then(Value::as_str).ok_or((
+        "invalid_params".to_string(),
+        "missing 'content' (string)".to_string(),
+    ))?;
+    if content.is_empty() {
+        return Err((
+            "invalid_params".to_string(),
+            "'content' must be non-empty".to_string(),
+        ));
+    }
+    if content.chars().count() > 2000 {
+        return Err((
+            "invalid_params".to_string(),
+            format!(
+                "'content' exceeds Discord's 2000-character limit ({} chars)",
+                content.chars().count()
+            ),
+        ));
+    }
+    match api::post_message(&creds.bot_token, channel_id, content) {
+        Ok((message_id, posted_channel)) => Ok(json!({
+            "message_id": message_id,
+            "channel_id": posted_channel,
+        })),
+        // ApiError carries the structured code already
+        // (`rate_limited` / `discord_<numeric>` / `io_error`); pass
+        // it through so triggers can match `error.code ==
+        // "discord_50001"` rather than parsing the message string.
+        Err(api::ApiError { code, message }) => Err((code, message)),
+    }
+}
+
+fn send_response(stdout: &StdoutHandle, id: &str, result: Value) {
     let frame = json!({ "id": id, "ok": true, "result": result });
     emit(stdout, &frame.to_string());
 }
 
-fn send_error(
-    stdout: &Arc<std::sync::Mutex<std::io::Stdout>>,
-    id: &str,
-    code: &str,
-    message: &str,
-) {
+fn send_error(stdout: &StdoutHandle, id: &str, code: &str, message: &str) {
     let frame = json!({
         "id": id,
         "ok": false,
@@ -276,7 +403,7 @@ fn send_error(
     emit(stdout, &frame.to_string());
 }
 
-fn emit(stdout: &Arc<std::sync::Mutex<std::io::Stdout>>, line: &str) {
+fn emit(stdout: &StdoutHandle, line: &str) {
     let mut out = match stdout.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
