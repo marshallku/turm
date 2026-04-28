@@ -113,30 +113,45 @@
     touch-action: none;
   }
   .card:active { cursor: grabbing; }
-  .card.dragging { opacity: 0.35; }
+  .card.dragging { opacity: 0.25; }
   .card.drag-ghost {
-    box-shadow: 0 6px 16px rgba(0,0,0,0.4);
-    transform: rotate(-1.5deg);
-    opacity: 0.95;
+    box-shadow: 0 8px 22px rgba(0,0,0,0.55);
+    transform: rotate(-2deg) scale(1.02);
+    opacity: 0.7;
+    border: 1px solid var(--turm-accent);
+    background: var(--turm-surface2);
+  }
+  /* While a drag is in flight, kill text selection across the whole
+     panel — without this, the pointer-event sweep would also
+     start a native text-selection drag on column headers / titles
+     and the visual ghost ends up competing with a marquee. */
+  body.is-dragging,
+  body.is-dragging * {
+    user-select: none !important;
+    -webkit-user-select: none !important;
+    cursor: grabbing !important;
   }
   .card.drag-ghost .actions { display: none !important; }
-  .card .title { line-height: 1.3; word-break: break-word; }
+  .card .title { line-height: 1.3; word-break: break-word; padding-right: 70px; }
   .card.done .title { color: var(--turm-subtext0); text-decoration: line-through; }
   .card .meta { display: flex; flex-wrap: wrap; gap: 4px; font-size: 0.75em; }
+  /* Actions are always visible (not hover-revealed) — Start is the
+     primary workflow trigger; hiding it behind hover wrecked
+     discoverability. The padding-right on .title above keeps long
+     titles from running under the button. */
   .card .actions {
-    display: none; position: absolute; top: 6px; right: 6px; gap: 4px;
+    display: flex; position: absolute; top: 6px; right: 6px; gap: 4px;
   }
-  .card:hover .actions { display: flex; }
+  .card.drag-ghost .actions { display: none !important; }
   .card .actions button {
-    background: var(--turm-surface0); color: var(--turm-subtext1);
-    border: 1px solid var(--turm-surface2);
+    background: var(--turm-accent); color: var(--turm-bg);
+    border: 0;
     border-radius: 3px;
-    padding: 2px 8px; font-size: 0.75em;
+    padding: 3px 10px; font-size: 0.75em;
     line-height: 1; cursor: pointer;
+    font-weight: 500;
   }
-  .card .actions button:hover {
-    color: var(--turm-text); border-color: var(--turm-overlay0);
-  }
+  .card .actions button:hover { filter: brightness(1.1); }
 
   .badge {
     font-size: 0.72em; padding: 1px 6px; border-radius: 4px;
@@ -296,8 +311,8 @@ function buildCard(t) {
   actions.className = "actions";
   if (t.status === "open" || t.status === "blocked") {
     const start = document.createElement("button");
-    start.textContent = "start";
-    start.title = "Move to Doing and trigger todo.start_requested";
+    start.textContent = "▶ start";
+    start.title = "Move to Doing and fire the todo.start_requested workflow trigger (vision-flow-3)";
     start.addEventListener("click", (e) => { e.stopPropagation(); onStart(t); });
     actions.appendChild(start);
   }
@@ -329,6 +344,10 @@ function onCardPointerDown(e) {
   // Don't start a drag from action buttons (Start). They have their own click handler.
   if (e.target.closest(".actions")) return;
   if (e.button !== 0 && e.pointerType === "mouse") return;
+  // Suppress the browser's default text-selection behavior — without
+  // this, pointermove past the threshold would also start a marquee
+  // selection across the column body / titles.
+  e.preventDefault();
   const card = e.currentTarget;
   dragState = {
     card,
@@ -366,6 +385,9 @@ function onCardPointerMove(e) {
     dragState.offsetX = e.clientX - rect.left;
     dragState.offsetY = e.clientY - rect.top;
     dragState.card.classList.add("dragging");
+    document.body.classList.add("is-dragging");
+    // Clear any selection that may have started before the threshold trip.
+    if (window.getSelection) window.getSelection().removeAllRanges();
   }
   dragState.ghost.style.left = (e.clientX - dragState.offsetX) + "px";
   dragState.ghost.style.top = (e.clientY - dragState.offsetY) + "px";
@@ -402,6 +424,7 @@ function cleanupDrag() {
   card.removeEventListener("pointerup", onCardPointerUp);
   card.removeEventListener("pointercancel", onCardPointerCancel);
   $$(".col-body").forEach(b => b.classList.remove("drag-over"));
+  document.body.classList.remove("is-dragging");
   dragState = null;
 }
 
