@@ -243,29 +243,41 @@ fn lex(src: &str) -> Result<Vec<Token>, String> {
 
 fn lex_string(bytes: &[u8]) -> Result<(String, usize), String> {
     debug_assert_eq!(bytes[0], b'"');
-    let mut out = String::new();
+    // Collect raw bytes (NOT chars) so multi-byte UTF-8 sequences
+    // pass through intact. The previous implementation pushed each
+    // byte as `as char`, which mangled non-ASCII content like emoji
+    // — `"📝"` (4 bytes) became 4 garbage replacement chars, so
+    // `event.emoji_name == "📝"` never matched. Final conversion
+    // via `String::from_utf8` is infallible whenever the source
+    // string was valid UTF-8 (which it always is — `lex` takes
+    // `&str`), but we surface the error path defensively.
+    let mut out: Vec<u8> = Vec::new();
     let mut i = 1; // skip opening quote
     while i < bytes.len() {
         match bytes[i] {
-            b'"' => return Ok((out, i + 1)),
+            b'"' => {
+                let s = String::from_utf8(out)
+                    .map_err(|e| format!("invalid utf-8 in string literal: {e}"))?;
+                return Ok((s, i + 1));
+            }
             b'\\' => {
                 if i + 1 >= bytes.len() {
                     return Err("unterminated escape".into());
                 }
                 let esc = bytes[i + 1];
-                let c = match esc {
-                    b'"' => '"',
-                    b'\\' => '\\',
-                    b'n' => '\n',
-                    b't' => '\t',
-                    b'r' => '\r',
+                let c: u8 = match esc {
+                    b'"' => b'"',
+                    b'\\' => b'\\',
+                    b'n' => b'\n',
+                    b't' => b'\t',
+                    b'r' => b'\r',
                     other => return Err(format!("unknown escape `\\{}`", other as char)),
                 };
                 out.push(c);
                 i += 2;
             }
             other => {
-                out.push(other as char);
+                out.push(other);
                 i += 1;
             }
         }
@@ -831,5 +843,36 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    // -- Eval: unicode string literals (regression for the
+    // `event.emoji_name == "📝"` reaction-trigger case where the
+    // byte-level lexer mangled multi-byte UTF-8 into per-byte
+    // garbage chars). --
+
+    #[test]
+    fn string_literal_preserves_multibyte_utf8() {
+        // 📝 is U+1F4DD = 4 bytes in UTF-8 (F0 9F 93 9D). Before the
+        // fix the lexer would tokenize that as 4 separate chars and
+        // never equal the single-codepoint payload value.
+        let e = evt(json!({"emoji_name": "📝"}));
+        assert!(p_eval(r#"event.emoji_name == "📝""#, &e, None).unwrap());
+        let e2 = evt(json!({"emoji_name": "🔥"}));
+        assert!(!p_eval(r#"event.emoji_name == "📝""#, &e2, None).unwrap());
+    }
+
+    #[test]
+    fn string_literal_preserves_korean_text() {
+        // Hangul syllables are 3-byte UTF-8 — same lexer bug would
+        // hit them. Smoke-test the general case.
+        let e = evt(json!({"label": "안녕"}));
+        assert!(p_eval(r#"event.label == "안녕""#, &e, None).unwrap());
+    }
+
+    #[test]
+    fn string_literal_with_escape_then_unicode() {
+        // Escape handling and unicode pass-through must compose.
+        let e = evt(json!({"text": "\"📝\""}));
+        assert!(p_eval(r#"event.text == "\"📝\"""#, &e, None).unwrap());
     }
 }
