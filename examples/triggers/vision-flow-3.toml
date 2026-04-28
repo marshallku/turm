@@ -1,64 +1,94 @@
 # Vision Flow 3 — the killer demo: clicking "start" on a Todo
 # pops a turm tab with claude-code running inside a tmux session
-# in a fresh git worktree. Implemented as a chain of three
-# triggers via Phase 14.1's auto-published `<action>.completed`
-# events.
+# in a fresh git worktree, with a layered prompt pre-seeded into
+# claude. Implemented as a chain of three triggers via Phase 14.1's
+# auto-published `<action>.completed` events.
 #
 # Drop this whole file's `[[triggers]]` blocks into your
-# ~/.config/turm/config.toml (or include + import if you keep
-# triggers split out).
+# ~/.config/turm/config.toml.
 #
 # Prereqs (already shipped):
-# - Phase 15.1: turm-plugin-todo registered. `todo.start` action
-#   emits `todo.start_requested {id, workspace, title, body, status,
-#   priority, due, linked_jira, linked_slack, linked_kb, tags}`.
+# - Phase 15.1+: turm-plugin-todo registered. `todo.start` action
+#   emits `todo.start_requested` with both `prompt` (raw per-Todo
+#   frontmatter field, may be null) AND `assembled_prompt` (the
+#   LAYERED string built at start time from `~/docs/claude/global.md`
+#   + `~/docs/claude/workspaces/<ws>.md` + the Todo's `prompt`
+#   (or title+body) + linked_kb markdown contents). Other fields:
+#   id, workspace, title, body, status, priority, due, linked_jira,
+#   linked_slack, linked_kb, tags. The trigger chain below feeds
+#   `assembled_prompt` forward — that's the agent-facing string.
 # - Phase 17.1: turm-plugin-git registered. `git.worktree_add`
 #   creates the branch+dir; Phase 14.1 auto-emits
-#   `git.worktree_add.completed {workspace, path, branch, base}`.
-# - Phase 18.1: claude.start is a turm-internal socket action;
-#   spawns a tab with cwd=workspace_path, runs
-#   `tmux new-session -A -s <session_name> claude`.
+#   `git.worktree_add.completed {workspace, path, branch, base, prompt?}`.
+#   `prompt` only appears when the upstream trigger forwards it via
+#   the optional `prompt` passthrough param (used below).
+# - Phase 18.1+18.2: claude.start spawns a turm tab with
+#   cwd=workspace_path, runs `tmux new-session -A -s <name> claude`,
+#   and (when `prompt` supplied) pastes the prompt into claude's
+#   REPL once it becomes interactive — guarded by claude-specific
+#   capture-pane markers AND `pane_current_command` so the prompt
+#   never lands in a shell pane.
 #
-# Limitations as shipped (slice 1):
-# - **`prompt` pre-fill is NOT wired**. claude.start rejects
-#   `prompt` with `not_implemented` (Phase 18.2 will land tmux
-#   send-keys timing). Today the user sees claude open in the
-#   right worktree with the right session name and pastes the
-#   prompt themselves.
-# - **Jira summary enrichment is NOT included**. The roadmap
-#   spec calls for `jira.get_ticket {key=linked_jira}` to fan
-#   into `build_prompt`. That needs Phase 16 (Jira plugin) +
-#   Phase 14.2 (async correlation primitive) to join the
-#   enrichment with the original payload.
-# - **linked_kb fan-in is NOT included**. Same shape as Jira
-#   enrichment — chained `kb.read` for each path, joined back
-#   into a prompt. Also Phase 14.2.
+# Layered prompt management:
+# - `~/docs/claude/global.md` — common preamble for every agent
+#   session (coding rules, language conventions, etc.). The empty
+#   stub is created by `scripts/install-plugins.sh` so vim picks it
+#   up immediately.
+# - `~/docs/claude/workspaces/<workspace>.md` — per-workspace
+#   context. The Todo's `workspace` field selects which file gets
+#   layered in.
+# - Per-Todo: `prompt` frontmatter (when set) is the explicit
+#   instruction; otherwise `title + body`.
+# - `linked_kb` paths get their full markdown content fanned in
+#   under `## Reference: <path>` headings.
+# Edit any of these between Todo creation and `start` — the assembly
+# is late-bound to start-time, so changes apply on the next click.
 #
-# What you DO get end-to-end today:
+# Open limitations:
+# - **Jira summary enrichment is NOT included** — needs Phase 16
+#   (Jira plugin) + Phase 14.2 (async correlation) to join a fresh
+#   `jira.get_ticket {key=linked_jira}` result back into the
+#   prompt. Until then `linked_jira` shows up only as the raw key.
+# - **Re-clicking Start on the same Todo currently fails** at
+#   trigger 1/2 because `git.worktree_add` returns `branch_exists`
+#   when the worktree is already present. claude.start never runs,
+#   the prompt is never re-seeded. Tracked as a small follow-up
+#   (make `git.worktree_add` idempotent on existing worktrees).
+#   Workaround for now: open the worktree directory yourself and
+#   re-attach the existing tmux session manually.
+#
+# What you get end-to-end today:
 #   click Start in Todo panel
-#     → turm-plugin-todo emits todo.start_requested
-#     → trigger-1 below fires git.worktree_add (sanitize_jira if
-#       linked_jira present, else use a "todo-<id>" branch)
-#     → registry auto-emits git.worktree_add.completed
-#     → trigger-3 below fires claude.start with the new path
+#     → turm-plugin-todo emits todo.start_requested with both raw
+#       `prompt` and layered `assembled_prompt` fields
+#     → trigger-1 or trigger-2 fires git.worktree_add (sanitize_jira
+#       branch from linked_jira, or todo-<id>); the layered string
+#       is forwarded via git.worktree_add's `prompt` passthrough so
+#       trigger-3 can see it
+#     → registry auto-emits git.worktree_add.completed (carries
+#       `prompt` — the passthrough field, NOT to be confused with
+#       todo.start_requested's `prompt`)
+#     → trigger-3 fires claude.start with workspace_path + prompt
 #     → new turm tab, fresh worktree, tmux session, claude REPL
+#       opens with the layered prompt already pasted + submitted.
 #
 # Convention: the Todo plugin's `workspace` label and the git
-# plugin's workspace `name` are assumed to coincide
-# (e.g. todo.workspace = "turm" maps to a `[[workspace]]
-# name = "turm"` entry in workspaces.toml). If you want them
-# to differ, hardcode `workspace = "<git-name>"` in the
-# trigger params instead of `{event.workspace}`.
+# plugin's workspace `name` are assumed to coincide (e.g.
+# todo.workspace = "turm" maps to a `[[workspace]] name = "turm"`
+# entry in workspaces.toml). If you want them to differ, hardcode
+# `workspace = "<git-name>"` instead of `{event.workspace}`.
 
 # ---------------------------------------------------------------------
 # Trigger 1 — Todo with linked_jira → branch from sanitized Jira key.
 #   "PROJ-456"      → branch `proj-456`
 #   "epic/PROJ-456" → branch `epic/proj-456` (slash hierarchy preserved)
+# `prompt` carries the layered prompt forward so trigger 3 can seed
+# claude with it (see git.worktree_add's `prompt` passthrough).
 # ---------------------------------------------------------------------
 [[triggers]]
 name = "vision3-start-with-jira"
 action = "git.worktree_add"
-params = { workspace = "{event.workspace}", branch = "{event.linked_jira}", sanitize_jira = true }
+params = { workspace = "{event.workspace}", branch = "{event.linked_jira}", sanitize_jira = true, prompt = "{event.assembled_prompt}" }
 condition = "event.linked_jira != null"
 
 [triggers.when]
@@ -73,33 +103,42 @@ event_kind = "todo.start_requested"
 [[triggers]]
 name = "vision3-start-without-jira"
 action = "git.worktree_add"
-params = { workspace = "{event.workspace}", branch = "todo-{event.id}" }
+params = { workspace = "{event.workspace}", branch = "todo-{event.id}", prompt = "{event.assembled_prompt}" }
 condition = "event.linked_jira == null"
 
 [triggers.when]
 event_kind = "todo.start_requested"
 
 # ---------------------------------------------------------------------
-# Trigger 3 — Once the worktree exists, drop a Claude session there.
-#   session_name auto-derived by claude.start from the worktree path's
-#   last 2 components. Re-running the same Todo's "start" later
-#   re-attaches the same tmux session (no duplicate-stack).
+# Trigger 3 — Once the worktree exists, drop a Claude session there
+# with the layered prompt pre-seeded. session_name auto-derived from
+# the worktree path's last 2 components.
 #
-# `prompt` field intentionally OMITTED — claude.start would reject it
-# today (`not_implemented`). User pastes the prompt into the REPL
-# manually until Phase 18.2 lands.
+# CAVEAT: clicking Start again on the same Todo CURRENTLY fails at
+# trigger 1/2 because `git.worktree_add` errors with `branch_exists`
+# when the worktree is already present — claude.start never runs.
+# To resume work today, open the worktree directory yourself and
+# attach the existing tmux session manually. Making
+# `git.worktree_add` idempotent (return the existing path on a
+# pre-existing worktree, fall through to claude.start) is a small
+# follow-up that would close the resume-work UX.
 # ---------------------------------------------------------------------
 [[triggers]]
 name = "vision3-claude-after-worktree"
 action = "claude.start"
-params = { workspace_path = "{event.path}" }
+# `event.prompt` here is the passthrough field that
+# `git.worktree_add` echoed into its result (and thus the
+# auto-published `.completed` event). Triggers 1+2 fed it from
+# `todo.start_requested`'s `assembled_prompt` — the field rename
+# happens at the worktree-add step, not here.
+params = { workspace_path = "{event.path}", prompt = "{event.prompt}" }
 
 [triggers.when]
 event_kind = "git.worktree_add.completed"
 
 # ---------------------------------------------------------------------
-# Optional: log every worktree creation to a daily KB file so the
-# user has a trail of what they kicked off. Hooks into the SAME
+# Optional: log every worktree creation to a daily KB file so you
+# have a trail of what you kicked off. Hooks the SAME
 # `git.worktree_add.completed` event the chain uses, so it fires
 # alongside (not after) trigger 3. Uncomment if you want it.
 #
@@ -107,8 +146,8 @@ event_kind = "git.worktree_add.completed"
 # but doesn't work today — `claude.start` is a turm-internal
 # socket action that lives in the legacy match arm of
 # `socket::dispatch`, not the ActionRegistry, so Phase 14.1
-# fan-out doesn't apply. Migrating claude.start into the
-# registry would close that gap; tracked as a small follow-up.
+# fan-out doesn't apply. Migrating claude.start into the registry
+# would close that gap; tracked as a small follow-up.
 # ---------------------------------------------------------------------
 # [[triggers]]
 # name = "vision3-log-worktree-creates"

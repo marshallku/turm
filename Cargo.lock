@@ -2744,6 +2744,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shellexpand",
+ "tempfile",
  "turm-core",
  "uuid",
  "vte4",

@@ -176,6 +176,7 @@ impl Store {
         linked_slack: Vec<serde_json::Value>,
         linked_kb: Vec<String>,
         tags: Vec<String>,
+        prompt: Option<String>,
     ) -> Result<Todo, Err> {
         let title = title.trim();
         if title.is_empty() {
@@ -201,6 +202,7 @@ impl Store {
             linked_slack,
             linked_kb,
             tags,
+            prompt,
         };
         let content = todo::render_new(&todo);
         let path = self.todo_path(workspace, &id)?;
@@ -487,6 +489,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 vec!["personal".into()],
+                None,
             )
             .unwrap();
         assert_eq!(t.status, Status::Open);
@@ -511,6 +514,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
         )
         .unwrap();
         let err = s
@@ -525,6 +529,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
             .unwrap_err();
         assert!(matches!(err, Err::IdExists(_)));
@@ -555,6 +560,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 vec!["a".into()],
+                None,
             )
             .unwrap();
         let (prev, next) = s.set_status("default", &t.id, Status::Done).unwrap();
@@ -581,6 +587,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
         )
         .unwrap();
         s.create(
@@ -594,6 +601,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
         )
         .unwrap();
         let all = s.list_all(None).unwrap();
@@ -617,6 +625,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
         )
         .unwrap();
         // Drop a stray .todo-tmp-* sibling — must be ignored.
@@ -644,6 +653,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
             .unwrap();
         s.delete("default", &t.id).unwrap();
@@ -689,6 +699,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
         )
         .unwrap();
         std::os::unix::fs::symlink(s.root.join("real"), s.root.join("alias")).unwrap();
@@ -704,6 +715,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
             .unwrap_err();
         assert!(matches!(err, Err::InvalidParams(_)), "got {err:?}");
@@ -744,6 +756,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
             .unwrap_err();
         assert!(matches!(err, Err::InvalidParams(_)));

@@ -28,6 +28,7 @@ compile_error!(
 );
 
 mod config;
+mod prompt;
 mod store;
 mod todo;
 mod watcher;
@@ -258,6 +259,7 @@ fn action_create(
     let linked_slack = optional_array(params, "linked_slack")?;
     let linked_kb = optional_string_array(params, "linked_kb")?;
     let tags = optional_string_array(params, "tags")?;
+    let prompt = optional_string(params, "prompt")?;
 
     store
         .create(
@@ -271,6 +273,7 @@ fn action_create(
             linked_slack,
             linked_kb,
             tags,
+            prompt,
         )
         .map_err(|e| {
             let (c, m) = e.code_message();
@@ -376,7 +379,27 @@ fn action_start(
         let (c, m) = e.code_message();
         (c.to_string(), m)
     })?;
-    let payload = todo.to_json();
+    let docs_root = prompt::docs_root_for(&config.root);
+    let assembled_prompt = prompt::assemble(&todo, docs_root.as_deref());
+    let mut payload = todo.to_json();
+    // Add the layered prompt as a NEW field rather than overwriting
+    // the raw `prompt` frontmatter field. Two surfaces, two meanings:
+    // - `payload.prompt`        = the user's literal frontmatter
+    //                              `prompt` (None / explicit string).
+    // - `payload.assembled_prompt` = global preamble + workspace
+    //                              preamble + Todo prompt-or-body +
+    //                              linked_kb fan-in, late-bound at
+    //                              start time. This is what trigger
+    //                              chains feed to claude.start.
+    // Keeping both means trigger interpolation can pick either — and
+    // a future consumer that wants raw input can still read `prompt`
+    // without rebuilding the assembly itself.
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "assembled_prompt".to_string(),
+            Value::String(assembled_prompt.clone()),
+        );
+    }
     let frame = json!({
         "method": "event.publish",
         "params": {
@@ -391,6 +414,7 @@ fn action_start(
         "id": id,
         "workspace": workspace,
         "todo": payload,
+        "assembled_prompt": assembled_prompt,
     }))
 }
 

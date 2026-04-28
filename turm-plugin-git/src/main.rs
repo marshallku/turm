@@ -267,13 +267,30 @@ fn action_worktree_add(params: &Value, config: &Config) -> Result<Value, (String
     // reject if any component is a symlink. Same posture as
     // KB's `check_no_symlink_ancestors`.
     check_no_symlink_ancestors(&ws.worktree_root, &target)?;
+    // Optional opaque passthrough for chained triggers. Until Phase
+    // 14.2's async-correlation lands, the `git.worktree_add.completed`
+    // event payload is the only way for a downstream trigger
+    // (typically `claude.start`) to see fields the upstream event
+    // (e.g. `todo.start_requested`) carried. We don't interpret
+    // these fields — just echo them on the result so trigger 3 can
+    // reference `{event.prompt}` etc. without us coupling
+    // worktree_add to any specific consumer's schema. Documented
+    // first-class fields take precedence on collision (`prompt`
+    // here cannot shadow `path`, etc.) so future native fields stay
+    // safe.
+    let prompt_passthrough = optional_string(params, "prompt")?;
     let result = git::worktree_add(&ws.path, &target, &branch, &base).map_err(git_err_to_action)?;
-    let payload = json!({
+    let mut payload = json!({
         "workspace": ws.name,
         "path": result.path.display().to_string(),
         "branch": result.branch,
         "base": base,
     });
+    if let Some(p) = prompt_passthrough
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert("prompt".to_string(), Value::String(p));
+    }
     // Phase 14.1: `git.worktree_add.completed` is now auto-emitted
     // by the registry on every successful dispatch (with the
     // returned `Ok(payload)` as event payload), so we don't emit

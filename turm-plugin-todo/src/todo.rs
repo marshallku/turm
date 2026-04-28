@@ -100,6 +100,13 @@ pub struct Todo {
     pub linked_slack: Vec<Value>,
     pub linked_kb: Vec<String>,
     pub tags: Vec<String>,
+    /// Optional explicit instruction for downstream agents (claude,
+    /// LLM completions). When set, takes precedence over the body
+    /// markdown as the per-Todo layer of the assembled prompt — body
+    /// stays a human-readable description while `prompt` is the
+    /// agent-facing imperative. When absent, prompt assembly falls
+    /// back to title + body.
+    pub prompt: Option<String>,
 }
 
 impl Todo {
@@ -145,6 +152,13 @@ impl Todo {
         obj.insert(
             "tags".into(),
             Value::Array(self.tags.iter().map(|s| Value::String(s.clone())).collect()),
+        );
+        obj.insert(
+            "prompt".into(),
+            self.prompt
+                .as_ref()
+                .map(|s| Value::String(s.clone()))
+                .unwrap_or(Value::Null),
         );
         Value::Object(obj)
     }
@@ -220,6 +234,12 @@ pub fn parse(content: &str, id: &str, workspace: &str) -> Todo {
         })
         .unwrap_or_default();
 
+    let prompt = fm
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     let (title, body) = derive_title_and_body(body_str, id);
 
     Todo {
@@ -235,6 +255,7 @@ pub fn parse(content: &str, id: &str, workspace: &str) -> Todo {
         linked_slack,
         linked_kb,
         tags,
+        prompt,
     }
 }
 
@@ -280,6 +301,19 @@ pub fn render_new(todo: &Todo) -> String {
     }
     if !todo.tags.is_empty() {
         out.push_str(&format!("tags: [{}]\n", todo.tags.join(", ")));
+    }
+    if let Some(p) = &todo.prompt {
+        // Multi-line prompts use a YAML literal block scalar so the
+        // raw text round-trips without per-line escaping. A single-line
+        // prompt could go inline but the block form is uniform and
+        // also survives quotes / backslashes the user might put in
+        // an agent instruction.
+        out.push_str("prompt: |\n");
+        for line in p.lines() {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
     }
     out.push_str("---\n\n");
     out.push_str(&format!("# {}\n", todo.title));
@@ -467,7 +501,27 @@ fn parse_frontmatter_block(block: &str) -> Map<String, Value> {
         if key.is_empty() {
             continue;
         }
-        if val_str.is_empty() {
+        if val_str == "|" {
+            // YAML literal block scalar: `key: |\n  line1\n  line2`
+            // — preserves newlines verbatim. Used for `prompt:` so
+            // multi-line agent instructions round-trip without
+            // single-line escaping. Each continuation line must be
+            // indented (2-space convention as render_new emits).
+            let mut buf = String::new();
+            while let Some(next) = lines.peek() {
+                let nt = next.trim_end_matches(['\n', '\r']);
+                let stripped =
+                    nt.strip_prefix("  ")
+                        .or(if nt.is_empty() { Some("") } else { None });
+                let Some(content) = stripped else { break };
+                if !buf.is_empty() {
+                    buf.push('\n');
+                }
+                buf.push_str(content);
+                lines.next();
+            }
+            obj.insert(key.to_string(), Value::String(buf));
+        } else if val_str.is_empty() {
             // Block-form list collector: `key:\n  - foo\n  - bar`
             let mut arr = Vec::new();
             while let Some(next) = lines.peek() {
@@ -593,6 +647,7 @@ mod tests {
             linked_slack: Vec::new(),
             linked_kb: vec!["meetings/x.md".into()],
             tags: vec!["a".into(), "b".into()],
+            prompt: None,
         };
         let s = render_new(&t);
         let parsed = parse(&s, "T-1", "default");
@@ -679,6 +734,7 @@ mod tests {
             linked_slack: Vec::new(),
             linked_kb: Vec::new(),
             tags: Vec::new(),
+            prompt: None,
         };
         let rendered = render_new(&original);
         let parsed = parse(&rendered, "T-1", "default");

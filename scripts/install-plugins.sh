@@ -22,6 +22,36 @@ if [ ! -d "$EXAMPLES_DIR" ]; then
     exit 1
 fi
 
+# Idempotent claude-prompt layer scaffolding. The Todo plugin reads
+# these files at `todo.start` time to assemble the layered prompt
+# fed into claude.start (Phase 18.2). They're plain markdown — vim
+# them whenever the common preamble drifts. We only create empty
+# stubs when missing; existing user content is never touched.
+#
+# Path derivation MUST match `turm-plugin-todo::prompt::docs_root_for`
+# at runtime: `parent(TURM_TODO_ROOT)`. Default is `~/docs/todos` →
+# stubs at `~/docs/claude/`. Anything else here would create stubs
+# the plugin never reads.
+TODO_ROOT="${TURM_TODO_ROOT:-$HOME/docs/todos}"
+DOCS_ROOT="$(dirname -- "$TODO_ROOT")"
+ensure_claude_stub() {
+    local path="$1"
+    local body="$2"
+    if [ ! -e "$path" ]; then
+        mkdir -p "$(dirname "$path")"
+        printf '%s\n' "$body" > "$path"
+        echo "stub  $path"
+    fi
+}
+ensure_claude_stub "$DOCS_ROOT/claude/global.md" "# Global preamble for claude sessions
+
+Common context applied to every Todo's claude.start prompt. Edit
+freely — the Todo plugin re-reads this file at start time, so
+changes apply on the next click without restarting turm.
+
+(stub created by scripts/install-plugins.sh — replace with your
+own coding rules, language conventions, project-wide reminders.)"
+
 # Default to every example plugin that has a plugin.toml.
 if [ "$#" -eq 0 ]; then
     set -- $(cd "$EXAMPLES_DIR" && find . -mindepth 2 -maxdepth 2 -name plugin.toml -printf '%h\n' | sed 's|^./||' | sort)

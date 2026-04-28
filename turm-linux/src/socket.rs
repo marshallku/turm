@@ -1400,14 +1400,14 @@ fn handle_terminal_context(req: &Request, mgr: &Rc<TabManager>) -> Response {
 /// as the initial-window command on session-create; on attach,
 /// tmux ignores the command and we just attach.
 ///
-/// Slice 1 limitation: `prompt` seeding is not implemented.
-/// Interactive `claude` consumes its stdin via the TTY, not via
-/// stdin redirect or `--print`, so seeding a conversation
-/// reliably needs `tmux send-keys` after claude is up — that
-/// timing problem deserves its own design (Phase 18.2). Today
-/// the killer demo (Vision Flow 3) lands without prompt
-/// pre-fill: the user sees claude open in the right worktree
-/// with the right session, and pastes the prompt themselves.
+/// Phase 18.2: `prompt` is delivered via `tmux load-buffer +
+/// paste-buffer + send-keys Enter` once both a claude-specific
+/// capture-pane signal AND `pane_current_command` confirm the pane
+/// is actually claude — see `spawn_claude_prompt_seeder`. Mutually
+/// exclusive with `resume_session` (resume restores existing
+/// context; pasting on top would just confuse claude). Failures
+/// during the post-action paste log to stderr but never propagate
+/// — the action has already returned success.
 fn handle_claude_start(
     req: &Request,
     mgr: &Rc<TabManager>,
@@ -1500,18 +1500,29 @@ fn handle_claude_start(
         }
     };
 
-    // Phase 18 slice 1 doesn't seed claude with a prompt. Reject
-    // explicitly so callers using the future shape don't silently
-    // get a no-prompt session. Phase 18.2 will land tmux
-    // send-keys based seeding.
-    if let Some(p) = req.params.get("prompt")
-        && !matches!(p, serde_json::Value::Null)
-    {
+    // Phase 18.2: prompt seeding via tmux paste-buffer. Caller can
+    // pass a (possibly multi-line) prompt that we deliver to claude's
+    // REPL once the session is alive. `prompt` and `resume_session`
+    // are mutually exclusive — `--resume` restores an existing
+    // conversation (its own context wins), seeding new text on top
+    // would just confuse claude.
+    let prompt_to_seed = match req.params.get("prompt") {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(serde_json::Value::String(_)) | Some(serde_json::Value::Null) | None => None,
+        Some(other) => {
+            return Response::error(
+                req.id.clone(),
+                "invalid_params",
+                &format!("'prompt' must be a string, got {other}"),
+            );
+        }
+    };
+    if prompt_to_seed.is_some() && resume_session.is_some() {
         return Response::error(
             req.id.clone(),
-            "not_implemented",
-            "'prompt' seeding is deferred to Phase 18.2; for now, omit the field \
-             and paste the prompt into claude after the tab opens",
+            "invalid_params",
+            "'prompt' and 'resume_session' are mutually exclusive — \
+             resume restores existing context; prompt seeds a new conversation",
         );
     }
 
@@ -1541,6 +1552,15 @@ fn handle_claude_start(
             "internal_error",
             "claude.start expected a terminal panel",
         );
+    }
+
+    // Background-seed the prompt once claude's REPL is up. Polling
+    // `tmux capture-pane` for a readiness signal avoids a fixed
+    // sleep that's either too short (race) or too long (wastes the
+    // user's time before they can interact). Runs in its own thread
+    // so claude.start returns to the caller immediately.
+    if let Some(prompt) = prompt_to_seed {
+        spawn_claude_prompt_seeder(session_name.clone(), prompt);
     }
 
     // Return both identifiers — `panel_id` is the UUID consumed by
@@ -1614,6 +1634,133 @@ fn validate_tmux_session_name(s: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Spawn a background thread that waits for claude's REPL to become
+/// interactive in `session_name`'s tmux pane, then delivers `prompt`
+/// via tmux's load-buffer + paste-buffer (handles arbitrary
+/// multi-line text without per-character escaping) and a final
+/// Enter.
+///
+/// Readiness detection runs in two stages and refuses to paste if
+/// either fails — the original spec was "fire claude with a
+/// pre-seeded prompt" but `tmux new-session -A` ATTACHES if a
+/// session already exists, ignoring our `claude` command. If that
+/// pre-existing pane is a shell, blindly pasting + Enter would
+/// EXECUTE the prompt as a shell command (and exfiltrate `linked_kb`
+/// content into the user's history). Both checks below have to pass:
+///
+/// 1. `pane_current_command` indicates claude (or the node binary
+///    claude-code is built on). A shell (`zsh`, `bash`, `sh`, `fish`)
+///    is a hard skip.
+/// 2. `capture-pane` has rendered claude-specific markers — banner
+///    or `Try "` strings. Generic `> ` / box-drawing are NOT enough
+///    because shells emit those too.
+///
+/// Failures are logged to stderr, never propagated. claude.start
+/// has already returned success to the caller; the prompt is a
+/// post-action best-effort and any retry is the user's call.
+fn spawn_claude_prompt_seeder(session_name: String, prompt: String) {
+    std::thread::spawn(move || {
+        // Initial settle so capture-pane has SOMETHING to inspect.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let mut saw_claude_marker = false;
+        loop {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            if let Ok(out) = std::process::Command::new("tmux")
+                .args(["capture-pane", "-p", "-t", &session_name])
+                .output()
+            {
+                let s = String::from_utf8_lossy(&out.stdout);
+                // Claude-specific markers only. Dropped the generic
+                // "> " / box-drawing matchers — they fire on shells too.
+                if s.contains("Anthropic")
+                    || s.contains("Try \"")
+                    || s.contains("claude --")
+                    || s.to_ascii_lowercase().contains("claude code")
+                {
+                    saw_claude_marker = true;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+
+        // Cross-check: what's the current foreground command in the
+        // pane? `pane_current_command` is the kernel's view, not
+        // capture-pane's rendered text — survives even if claude's
+        // banner has scrolled off.
+        let current_cmd = std::process::Command::new("tmux")
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                &session_name,
+                "#{pane_current_command}",
+            ])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_lowercase())
+            .unwrap_or_default();
+        let pane_is_claude = matches!(current_cmd.as_str(), "claude" | "node");
+
+        if !saw_claude_marker || !pane_is_claude {
+            eprintln!(
+                "[claude.start] refusing to paste prompt into session {session_name:?}: \
+                 saw_claude_marker={saw_claude_marker}, pane_current_command={current_cmd:?}. \
+                 Pre-existing tmux session may be a shell or a non-claude process; user \
+                 can paste the prompt manually."
+            );
+            return;
+        }
+
+        // Write the prompt to a temp file → load-buffer → paste-buffer.
+        // Going through a buffer is what makes multi-line + special-char
+        // payloads safe; send-keys -l would also work but each special
+        // character needs care.
+        let mut tmpf = match tempfile::NamedTempFile::new() {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[claude.start] tempfile failed: {e}");
+                return;
+            }
+        };
+        if let Err(e) = std::io::Write::write_all(&mut tmpf, prompt.as_bytes()) {
+            eprintln!("[claude.start] write prompt failed: {e}");
+            return;
+        }
+        let buf_name = format!("turm-claude-{}", uuid::Uuid::new_v4());
+        let path_str = match tmpf.path().to_str() {
+            Some(s) => s,
+            None => {
+                eprintln!("[claude.start] tempfile path is not UTF-8 — aborting seed");
+                return;
+            }
+        };
+        let load = std::process::Command::new("tmux")
+            .args(["load-buffer", "-b", &buf_name, path_str])
+            .status();
+        if !matches!(load, Ok(s) if s.success()) {
+            eprintln!("[claude.start] tmux load-buffer failed: {load:?}");
+            return;
+        }
+        let paste = std::process::Command::new("tmux")
+            .args(["paste-buffer", "-t", &session_name, "-b", &buf_name, "-d"])
+            .status();
+        if !matches!(paste, Ok(s) if s.success()) {
+            eprintln!("[claude.start] tmux paste-buffer failed: {paste:?}");
+            return;
+        }
+        // Submit. claude's REPL needs an explicit Enter after paste.
+        let _ = std::process::Command::new("tmux")
+            .args(["send-keys", "-t", &session_name, "Enter"])
+            .status();
+    });
 }
 
 /// POSIX-safe single-quote escape: wrap in `'…'`, replace any

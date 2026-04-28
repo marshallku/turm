@@ -302,6 +302,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
             .unwrap();
         let next = scan_root(store.root()).unwrap();
@@ -327,6 +328,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
             .unwrap();
         let prev = scan_root(store.root()).unwrap();
@@ -362,6 +364,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
             .unwrap();
         let prev = scan_root(store.root()).unwrap();
@@ -388,6 +391,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
             .unwrap();
         store
