@@ -1,5 +1,6 @@
 mod client;
 mod commands;
+mod plugin_cmds;
 mod update;
 
 use clap::Parser;
@@ -34,6 +35,13 @@ fn main() {
             }
         }
         return;
+    }
+
+    // Phase 19.1: per-plugin ergonomic wrappers own their dispatch
+    // (preflight id resolution + custom human renderer), bypassing
+    // the generic `cli.method() / cli.params()` path.
+    if let Command::Todo(cmd) = &cli.command {
+        std::process::exit(plugin_cmds::todo::dispatch(cmd, &socket_path, cli.json));
     }
 
     let result = client::send_command(&socket_path, &cli.method(), cli.params());

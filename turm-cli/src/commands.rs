@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
+use crate::plugin_cmds::todo::TodoCommand;
+
 #[derive(Parser)]
 #[command(name = "turmctl", about = "turm CLI", version)]
 pub struct Cli {
@@ -63,6 +65,11 @@ pub enum Command {
     /// Plugin management
     #[command(subcommand)]
     Plugin(PluginCommand),
+
+    /// Todo plugin shortcuts (Phase 19.1a — wraps `todo.*` actions
+    /// with prefix-resolved ids and a human-readable list view)
+    #[command(subcommand)]
+    Todo(TodoCommand),
 
     /// Status bar management
     #[command(subcommand)]
@@ -496,6 +503,9 @@ impl Cli {
             }
             .to_string(),
             Command::Update(_) => unreachable!("update commands are handled locally"),
+            Command::Todo(_) => {
+                unreachable!("todo commands are dispatched via plugin_cmds::todo")
+            }
             Command::Call { method, .. } => method.clone(),
         }
     }
@@ -599,6 +609,9 @@ impl Cli {
             | Command::Update(_)
             | Command::Statusbar(_) => {
                 json!({})
+            }
+            Command::Todo(_) => {
+                unreachable!("todo commands are dispatched via plugin_cmds::todo")
             }
             Command::Call { params, .. } => {
                 serde_json::from_str(params).unwrap_or_else(|_| json!({}))

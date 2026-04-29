@@ -86,6 +86,19 @@ turmctl [--socket <path>] [--json] <command>
 - `turmctl plugin open <plugin> [--panel main]` — open a plugin panel in a new tab
 - `turmctl plugin run <plugin>.<command> [--params '{}']` — run a plugin shell command
 
+### Todo (Phase 19.1a)
+
+Ergonomic wrapper over the `todo.*` action surface. Every subcommand is sugar over `turmctl call todo.<name> --params '...'`; no new IPC. Use `--json` for raw payloads (scriptable), default mode for human-readable rendering.
+
+- `turmctl todo create <title> [--body <text>] [--workspace <ws>] [--priority <low|normal|high>] [--due <iso>] [--linked-jira <KEY>] [--tags <a,b,c>]` — wraps `todo.create`. Workspace defaults to `TURM_TODO_DEFAULT_WORKSPACE` env var, else the plugin's own default.
+- `turmctl todo list [--status <open|in_progress|done|blocked>] [--workspace <ws>] [--tag <name>] [--due-before <iso>] [--hide-done]` — wraps `todo.list`. Default render: `[icon] <id>  <priority>  <title>  ·  ws=<...> tags=<...>`. Status icons: `[ ]` open, `[~]` in_progress, `[x]` done, `[!]` blocked.
+- `turmctl todo set <id> --status <s> [--workspace <ws>]` — wraps `todo.set_status`. Status must be `open|in_progress|done|blocked`. `--workspace` scopes id resolution when the same id exists in multiple workspaces.
+- `turmctl todo done <id> [--workspace <ws>]` / `doing <id> [...]` / `block <id> [...]` — shorthands for `set --status done|in_progress|blocked`.
+- `turmctl todo start <id> [--workspace <ws>]` — wraps `todo.start` (publishes `todo.start_requested` for the vision-flow-3 chain).
+- `turmctl todo delete <id> [--workspace <ws>]` — wraps `todo.delete`.
+
+**ID prefix matching**: every `<id>` argument accepts a unique prefix. The CLI preflights `todo.list` to find candidates and resolves the workspace alongside, so a todo in a non-default workspace works without the user passing `--workspace`. Todo ids are workspace-scoped (not globally unique) — if the same id exists in multiple workspaces, the CLI errors out with the candidate list and the user disambiguates via `--workspace <ws>` (or a longer prefix). Exact-id collisions are NOT silently resolved.
+
 ### Theme
 
 - `turmctl theme list` — list available themes and current theme
