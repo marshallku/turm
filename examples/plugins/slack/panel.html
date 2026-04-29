@@ -1,0 +1,1290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Slack</title>
+<style>
+/* ========================================================================
+   slack/panel.html — "Signal Log" aesthetic
+   Information-dense row-based event log; monospace throughout; type-rail
+   color is the primary visual differentiator. No card boxes; the row IS
+   the affordance. See the matching brief in conversation history.
+   ----------------------------------------------------------------------
+   §1  TOKENS         design tokens, status colors, motion timings
+   §2  RESET          box-sizing, color-scheme, body baseline
+   §3  LAYOUT         shell: header / filter / feed / composer
+   §4  HEADER         workspace + status pill + refresh
+   §5  FILTER         chip row, active state
+   §6  FEED           list, empty state, scroll
+   §7  CARD           shared row chrome — rail / collapsed / expanded
+   §7.1 CARD-MENTION   mention rail
+   §7.2 CARD-DM        DM rail
+   §7.3 CARD-RXN       reaction rail + reacted-on body slot
+   §8  COMPOSER       sticky standalone + inline reply (same DOM)
+   §9  TOAST          error overlay
+   §10 SETUP          fatal/setup view
+   §11 MOTION         keyframes, prefers-reduced-motion override
+   §12 UTIL           .visually-hidden, .truncate, .copy-btn
+   ======================================================================== */
+
+/* §1 TOKENS ------------------------------------------------------------- */
+:root {
+  /* Status palette — Catppuccin Mocha defaults; host doesn't expose these
+     as CSS vars, so the panel hardcodes them. Edit here to retheme. */
+  --slack-ok:    #a6e3a1;   /* connected: green */
+  --slack-warn:  #f9e2af;   /* configured-not-signed-in: yellow */
+  --slack-info:  #89b4fa;   /* DM rail: blue */
+  --slack-rxn:   #94e2d5;   /* reaction rail: teal */
+
+  /* Type rails — modifier-driven, defaults to grey overlay */
+  --rail-default: var(--turm-overlay0);
+  --rail-mention: var(--turm-accent);
+  --rail-dm:      var(--slack-info);
+  --rail-rxn:     var(--slack-rxn);
+
+  /* Motion */
+  --t-fast: 80ms cubic-bezier(.2, 0, .1, 1);
+  --t-med:  180ms cubic-bezier(.2, 0, .1, 1);
+  --t-slow: 320ms cubic-bezier(.2, 0, .1, 1);
+
+  /* Spacing scale — 4px base, restricted to {4,8,12,16,20,32} */
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 20px; --s-7: 32px;
+
+  /* Type scale */
+  --fs-meta: 11px;     /* uppercase badge / header label */
+  --fs-body: 12px;
+  --fs-id:   13px;
+  --fs-head: 15px;
+
+  /* Component-level */
+  --row-h-collapsed: 30px;
+  --rail-w:          4px;
+}
+
+/* §2 RESET -------------------------------------------------------------- */
+*, *::before, *::after { box-sizing: border-box; }
+:root { color-scheme: dark; }
+
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font-family: "Iosevka Term", "Iosevka", "JetBrains Mono", "Cascadia Mono",
+               "SFMono-Regular", "Liberation Mono", ui-monospace, monospace;
+  font-feature-settings: "tnum", "ss02", "calt";
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  color: var(--turm-text);
+  /* Body MUST stay transparent — host paints window-level wallpaper. */
+  background: transparent;
+}
+
+/* §3 LAYOUT ------------------------------------------------------------- */
+.slack-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 0;
+}
+
+/* §4 HEADER ------------------------------------------------------------- */
+.slack-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  height: 36px;
+  padding-inline: var(--s-4);
+  background: color-mix(in oklab, var(--turm-surface0) 60%, transparent);
+  border-bottom: 1px solid var(--turm-overlay0);
+  flex-shrink: 0;
+}
+.slack-header__dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--turm-overlay0);
+  flex-shrink: 0;
+}
+.slack-header__dot--ok   { background: var(--slack-ok);   animation: signalPulse 2.4s ease-out infinite; }
+.slack-header__dot--warn { background: var(--slack-warn); }
+.slack-header__dot--err  { background: var(--turm-red);   }
+.slack-header__workspace {
+  font-size: var(--fs-head);
+  font-weight: 500;
+  color: var(--turm-text);
+  letter-spacing: -0.005em;
+}
+.slack-header__meta {
+  display: flex; gap: var(--s-3);
+  font-size: var(--fs-meta);
+  color: var(--turm-subtext0);
+  font-style: italic;
+}
+.slack-header__meta strong {
+  font-weight: 400; font-style: normal;
+  color: var(--turm-subtext1);
+}
+.slack-header__spacer { flex: 1; }
+.slack-header__refresh {
+  background: transparent;
+  border: 1px solid var(--turm-surface2);
+  color: var(--turm-subtext1);
+  font: inherit;
+  font-size: var(--fs-meta);
+  padding: 4px 10px;
+  height: 24px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.slack-header__refresh:hover {
+  background: var(--turm-surface1);
+  color: var(--turm-text);
+}
+.slack-header__refresh:active { transform: scale(0.97); }
+.slack-header__refresh:disabled { opacity: 0.4; cursor: progress; }
+
+/* §5 FILTER ------------------------------------------------------------- */
+.slack-filter {
+  display: flex;
+  gap: var(--s-1);
+  align-items: center;
+  height: 32px;
+  padding-inline: var(--s-4);
+  border-bottom: 1px solid var(--turm-overlay0);
+  flex-shrink: 0;
+}
+.slack-filter__chip {
+  background: transparent;
+  border: 0;
+  color: var(--turm-subtext0);
+  font: inherit;
+  font-size: var(--fs-meta);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.slack-filter__chip:hover {
+  background: color-mix(in oklab, var(--turm-surface0) 40%, transparent);
+}
+.slack-filter__chip--active {
+  color: var(--turm-accent);
+}
+.slack-filter__count {
+  margin-left: 4px;
+  color: var(--turm-subtext0);
+  font-variant-numeric: tabular-nums;
+}
+.slack-filter__chip--active .slack-filter__count {
+  color: color-mix(in oklab, var(--turm-accent) 70%, var(--turm-subtext1));
+}
+
+/* §6 FEED --------------------------------------------------------------- */
+.slack-feed {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s-4) var(--s-4) var(--s-7);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.slack-feed::-webkit-scrollbar { width: 8px; }
+.slack-feed::-webkit-scrollbar-track { background: transparent; }
+.slack-feed::-webkit-scrollbar-thumb {
+  background: var(--turm-surface1);
+  border-radius: 4px;
+}
+.slack-feed::-webkit-scrollbar-thumb:hover { background: var(--turm-surface2); }
+
+.slack-feed__empty {
+  margin: var(--s-7) auto;
+  color: var(--turm-subtext0);
+  font-style: italic;
+  font-size: var(--fs-body);
+  text-align: center;
+}
+.slack-feed__empty::before {
+  content: "··· ";
+  letter-spacing: 0.2em;
+  color: var(--turm-overlay0);
+}
+.slack-feed__empty::after {
+  content: " ···";
+  letter-spacing: 0.2em;
+  color: var(--turm-overlay0);
+}
+
+/* §7 CARD --------------------------------------------------------------- */
+.slack-card {
+  --rail-color: var(--rail-default);
+  display: grid;
+  grid-template-columns: 56px 1fr auto;
+  grid-template-areas:
+    "rail body actions"
+    "rail expand expand";
+  align-items: start;
+  gap: 0 var(--s-3);
+  padding: var(--s-2) var(--s-3) var(--s-2) var(--s-2);
+  background: color-mix(in oklab, var(--turm-surface0) 60%, transparent);
+  border-left: var(--rail-w) solid var(--rail-color);
+  border-left-color: color-mix(in oklab, var(--rail-color) 40%, transparent);
+  border-radius: 0 4px 4px 0;
+  cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast),
+              transform var(--t-fast), padding var(--t-med);
+}
+.slack-card:hover {
+  background: color-mix(in oklab, var(--turm-surface1) 85%, transparent);
+  border-left-color: var(--rail-color);
+  transform: translateY(-1px);
+}
+.slack-card:active { transform: translateY(0) scale(0.997); }
+.slack-card:focus-visible {
+  outline: 1px solid var(--turm-accent);
+  outline-offset: 2px;
+}
+.slack-card--expanded {
+  background: var(--turm-surface1);
+  border-left-color: var(--rail-color);
+  padding-block: var(--s-3) var(--s-4);
+  cursor: default;
+}
+.slack-card--expanded:hover { transform: none; }
+
+.slack-card__rail {
+  grid-area: rail;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding-top: 2px;
+}
+.slack-card__badge {
+  font-size: var(--fs-meta);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--rail-color) 80%, var(--turm-text));
+  font-weight: 600;
+}
+.slack-card__ts {
+  font-size: var(--fs-meta);
+  color: var(--turm-subtext0);
+  font-variant-numeric: tabular-nums;
+  font-style: italic;
+  white-space: nowrap;
+}
+
+.slack-card__body {
+  grid-area: body;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.slack-card__head {
+  display: flex;
+  gap: var(--s-2);
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: var(--fs-id);
+}
+.slack-card__channel {
+  color: var(--turm-text);
+  font-weight: 600;
+}
+.slack-card__user {
+  color: var(--turm-subtext1);
+  font-weight: 400;
+}
+.slack-card__rel {
+  color: var(--turm-subtext0);
+  font-style: italic;
+  font-size: var(--fs-meta);
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.slack-card__preview {
+  color: var(--turm-subtext1);
+  font-size: var(--fs-body);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.slack-card--expanded .slack-card__preview {
+  white-space: pre-wrap;
+  overflow: visible;
+  color: var(--turm-text);
+  word-break: break-word;
+}
+
+.slack-card__actions {
+  grid-area: actions;
+  display: flex;
+  gap: var(--s-1);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-med);
+  align-self: center;
+}
+.slack-card:hover .slack-card__actions,
+.slack-card:focus-within .slack-card__actions,
+.slack-card--expanded .slack-card__actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.slack-card__action {
+  background: transparent;
+  border: 0;
+  color: var(--turm-subtext0);
+  font: inherit;
+  font-size: var(--fs-meta);
+  letter-spacing: 0.04em;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.slack-card__action:hover {
+  background: var(--turm-surface2);
+  color: var(--turm-text);
+}
+
+/* Expand-only zone — reply composer, fetched body, reacted-on body */
+.slack-card__expand {
+  grid-area: expand;
+  margin-top: var(--s-3);
+  display: none;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.slack-card--expanded .slack-card__expand { display: flex; }
+
+.slack-card__sent {
+  font-size: var(--fs-meta);
+  color: var(--slack-ok);
+  font-style: italic;
+  font-variant-numeric: tabular-nums;
+}
+
+/* §7.1 CARD-MENTION ------------------------------------------------------ */
+.slack-card--mention { --rail-color: var(--rail-mention); }
+
+/* §7.2 CARD-DM ----------------------------------------------------------- */
+.slack-card--dm { --rail-color: var(--rail-dm); }
+
+/* §7.3 CARD-RXN ---------------------------------------------------------- */
+.slack-card--rxn { --rail-color: var(--rail-rxn); }
+.slack-card--rxn .slack-card__badge {
+  /* Reaction badge: emoji name in shortcode form. */
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+  font-weight: 500;
+}
+.slack-card--rxn .slack-card__preview::before {
+  content: "↳ on: ";
+  color: var(--turm-overlay0);
+}
+.slack-card__rxn-body {
+  font-size: var(--fs-body);
+  color: var(--turm-subtext1);
+  background: color-mix(in oklab, var(--turm-surface0) 80%, transparent);
+  border-left: 2px solid var(--turm-overlay0);
+  padding: var(--s-2) var(--s-3);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-style: italic;
+}
+.slack-card__rxn-body--loading {
+  color: var(--turm-subtext0);
+  font-style: italic;
+}
+
+/* §8 COMPOSER ----------------------------------------------------------- */
+.slack-composer {
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in oklab, var(--turm-surface2) 92%, transparent);
+  border-top: 1px solid var(--turm-overlay0);
+  padding: var(--s-2) var(--s-4);
+  flex-shrink: 0;
+  transition: padding var(--t-fast);
+}
+.slack-composer__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  height: 32px;
+}
+.slack-composer__row::before {
+  content: "›";
+  color: var(--turm-subtext0);
+  font-size: var(--fs-id);
+  flex-shrink: 0;
+}
+.slack-composer__channel {
+  background: var(--turm-surface0);
+  border: 1px solid var(--turm-surface2);
+  color: var(--turm-text);
+  font: inherit;
+  font-size: var(--fs-body);
+  padding: 4px 8px;
+  height: 24px;
+  border-radius: 3px;
+  width: 120px;
+  letter-spacing: 0.02em;
+}
+.slack-composer__channel:focus {
+  outline: 1px solid var(--turm-accent);
+  outline-offset: 1px;
+  border-color: var(--turm-accent);
+}
+.slack-composer__channel:read-only {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+.slack-composer__divider {
+  width: 1px;
+  height: 16px;
+  background: var(--turm-overlay0);
+  flex-shrink: 0;
+}
+.slack-composer__textarea {
+  flex: 1;
+  background: var(--turm-surface0);
+  border: 1px solid var(--turm-surface2);
+  color: var(--turm-text);
+  font: inherit;
+  font-size: var(--fs-body);
+  padding: 4px 8px;
+  height: 24px;
+  min-height: 24px;
+  border-radius: 3px;
+  resize: none;
+  line-height: 1.45;
+  transition: height var(--t-fast), border-color var(--t-fast);
+}
+.slack-composer__textarea::placeholder {
+  color: var(--turm-subtext0);
+  font-style: italic;
+}
+.slack-composer__textarea:focus {
+  outline: 1px solid var(--turm-accent);
+  outline-offset: 1px;
+  border-color: var(--turm-accent);
+  height: 96px;
+}
+.slack-composer__send {
+  background: transparent;
+  border: 1px solid var(--turm-surface2);
+  color: var(--turm-subtext1);
+  font: inherit;
+  font-size: var(--fs-meta);
+  padding: 0 10px;
+  height: 24px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+  flex-shrink: 0;
+}
+.slack-composer__send:hover {
+  background: var(--turm-accent);
+  color: var(--turm-bg);
+  border-color: var(--turm-accent);
+}
+.slack-composer__send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.slack-composer__hint {
+  font-size: var(--fs-meta);
+  color: var(--turm-subtext0);
+  font-style: italic;
+  padding-top: 4px;
+  padding-left: 18px;
+  display: none;
+}
+.slack-composer__textarea:focus ~ .slack-composer__hint,
+.slack-composer__textarea:not(:placeholder-shown) ~ .slack-composer__hint {
+  display: block;
+}
+
+/* Inline reply variant — same DOM shape, different scope */
+.slack-card__expand .slack-composer {
+  background: color-mix(in oklab, var(--turm-surface0) 80%, transparent);
+  border: 1px solid var(--turm-overlay0);
+  border-radius: 4px;
+  padding: var(--s-2);
+}
+.slack-card__expand .slack-composer__channel { width: 100px; }
+
+/* §9 TOAST -------------------------------------------------------------- */
+.slack-toast {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  z-index: 1000;
+  pointer-events: none;
+}
+.slack-toast__item {
+  background: color-mix(in oklab, var(--turm-surface2) 95%, transparent);
+  color: var(--turm-text);
+  border-left: 4px solid var(--turm-red);
+  border-radius: 3px;
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--fs-body);
+  max-width: 360px;
+  pointer-events: auto;
+  cursor: pointer;
+  animation: toastIn var(--t-med) ease-out;
+}
+.slack-toast__code {
+  display: block;
+  font-size: var(--fs-meta);
+  color: var(--turm-subtext0);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+.slack-toast__msg {
+  word-break: break-word;
+}
+
+/* §10 SETUP ------------------------------------------------------------- */
+.slack-setup {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s-7) var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  max-width: 720px;
+  margin-inline: auto;
+}
+.slack-setup__title {
+  font-size: var(--fs-head);
+  color: var(--turm-text);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  margin: 0;
+}
+.slack-setup__body {
+  color: var(--turm-subtext1);
+  font-size: var(--fs-body);
+  line-height: 1.6;
+}
+.slack-setup__error {
+  border-left: 3px solid var(--turm-red);
+  background: color-mix(in oklab, var(--turm-red) 8%, transparent);
+  padding: var(--s-3) var(--s-4);
+  border-radius: 0 3px 3px 0;
+  color: var(--turm-text);
+  font-size: var(--fs-body);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.slack-setup__error strong {
+  display: block;
+  font-weight: 600;
+  color: var(--turm-red);
+  margin-bottom: 4px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: var(--fs-meta);
+}
+.slack-setup__steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  counter-reset: step;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.slack-setup__steps li {
+  counter-increment: step;
+  padding-left: var(--s-7);
+  position: relative;
+  color: var(--turm-subtext1);
+}
+.slack-setup__steps li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--turm-overlay0);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--turm-subtext0);
+  font-size: var(--fs-meta);
+}
+.slack-setup__cmd {
+  display: block;
+  margin-top: var(--s-2);
+  background: var(--turm-surface0);
+  color: var(--turm-text);
+  border: 1px solid var(--turm-surface2);
+  border-radius: 3px;
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--fs-body);
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+.slack-setup__cmd::before {
+  content: "$ ";
+  color: var(--turm-subtext0);
+}
+
+/* §11 MOTION ------------------------------------------------------------ */
+@keyframes signalPulse {
+  0%   { box-shadow: 0 0 0 0    color-mix(in oklab, var(--slack-ok) 60%, transparent); }
+  70%  { box-shadow: 0 0 0 6px  color-mix(in oklab, var(--slack-ok)  0%, transparent); }
+  100% { box-shadow: 0 0 0 0    color-mix(in oklab, var(--slack-ok)  0%, transparent); }
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+  .slack-card:hover { transform: none; }
+}
+
+/* §12 UTIL -------------------------------------------------------------- */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.copy-id {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+.copy-id:hover { color: var(--turm-accent); }
+</style>
+</head>
+<body>
+<div class="slack-shell">
+
+  <!-- §4 HEADER -->
+  <header class="slack-header" id="header" aria-label="Slack auth status">
+    <div class="slack-header__dot" id="status-dot"></div>
+    <div class="slack-header__workspace" id="workspace-label">…</div>
+    <div class="slack-header__meta" id="header-meta"></div>
+    <div class="slack-header__spacer"></div>
+    <button class="slack-header__refresh" id="refresh-btn" type="button">refresh</button>
+  </header>
+
+  <!-- §5 FILTER (only mounted in feed view) -->
+  <nav class="slack-filter" id="filter" role="tablist" hidden>
+    <button class="slack-filter__chip" data-filter="all" type="button" role="tab">
+      ALL<span class="slack-filter__count" data-count="all"> 0</span>
+    </button>
+    <button class="slack-filter__chip" data-filter="mention" type="button" role="tab">
+      MENTIONS<span class="slack-filter__count" data-count="mention"> 0</span>
+    </button>
+    <button class="slack-filter__chip" data-filter="dm" type="button" role="tab">
+      DMS<span class="slack-filter__count" data-count="dm"> 0</span>
+    </button>
+    <button class="slack-filter__chip" data-filter="reaction" type="button" role="tab">
+      REACTIONS<span class="slack-filter__count" data-count="reaction"> 0</span>
+    </button>
+  </nav>
+
+  <!-- §6 FEED or §10 SETUP — toggled by JS -->
+  <main id="main" class="slack-feed" aria-live="polite"></main>
+
+  <!-- §8 COMPOSER (standalone) — only mounted in feed view -->
+  <footer class="slack-composer" id="composer" hidden>
+    <div class="slack-composer__row">
+      <input class="slack-composer__channel" id="composer-channel"
+             type="text" placeholder="C01ABC…" autocomplete="off"
+             spellcheck="false" />
+      <div class="slack-composer__divider"></div>
+      <textarea class="slack-composer__textarea" id="composer-text"
+                placeholder="reply or send raw…" rows="1"
+                spellcheck="false"></textarea>
+      <button class="slack-composer__send" id="composer-send" type="button">SEND</button>
+    </div>
+    <div class="slack-composer__hint">⌘+enter to send · esc to collapse</div>
+  </footer>
+
+</div>
+
+<!-- §9 TOAST region — outside shell, fixed-positioned -->
+<div class="slack-toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+'use strict';
+
+/* ========================================================================
+   slack/panel.html — JS
+   - Bridge: window.turm.call / .on (host-injected)
+   - Single-pass full-feed render (200 cap → ~5ms cost). Throttled by RAF.
+   - localStorage keys:
+     * slack-filter           "all"|"mention"|"dm"|"reaction"
+     * slack-expanded         JSON Set<eventId>
+     * slack-composer-draft   string
+   - Events arriving before init() finishes are queued. The bridge starts
+     pumping as soon as `turm.on(...)` is registered, but the auth-status
+     call may not have returned yet — buffer until UI ready.
+   ======================================================================== */
+
+const LS = {
+  filter:   'slack-filter',
+  expanded: 'slack-expanded',
+  draft:    'slack-composer-draft',
+};
+
+const state = {
+  auth: null,
+  filter: localStorage.getItem(LS.filter) || 'all',
+  authError: null,  // populated when auth_status REJECTS (transport)
+  events: [],   // { id, kind, payload, sentAt? } — newest first
+  expanded: new Set(safeJSON(localStorage.getItem(LS.expanded)) || []),
+  bodies: new Map(),  // key=`${channel}:${ts}`, value=string|null|Promise
+  ready: false,
+  pending: [],  // events received before ready
+};
+
+function safeJSON(s) { try { return JSON.parse(s); } catch { return null; } }
+function persistExpanded() {
+  localStorage.setItem(LS.expanded, JSON.stringify([...state.expanded]));
+}
+
+/* DOM refs ------------------------------------------------------------- */
+const $ = (id) => document.getElementById(id);
+const dom = {
+  shell:     document.querySelector('.slack-shell'),
+  dot:       $('status-dot'),
+  workspace: $('workspace-label'),
+  meta:      $('header-meta'),
+  refresh:   $('refresh-btn'),
+  filter:    $('filter'),
+  main:      $('main'),
+  composer:  $('composer'),
+  composerChannel: $('composer-channel'),
+  composerText:    $('composer-text'),
+  composerSend:    $('composer-send'),
+  toast:     $('toast'),
+};
+
+/* HTML escape ---------------------------------------------------------- */
+const ESC_MAP = { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' };
+function esc(s) { return String(s ?? '').replace(/[<>&"']/g, c => ESC_MAP[c]); }
+
+/* Time ----------------------------------------------------------------- */
+function relTime(tsStr) {
+  const sec = Date.now() / 1000 - parseFloat(tsStr);
+  if (!isFinite(sec) || sec < 0) return '—';
+  if (sec < 60)    return 'now';
+  if (sec < 3600)  return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}
+function tsClock(tsStr) {
+  const d = new Date(parseFloat(tsStr) * 1000);
+  if (isNaN(d.getTime())) return '——:——';
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+/* Auth refresh --------------------------------------------------------- */
+async function refreshAuth() {
+  dom.refresh.disabled = true;
+  try {
+    state.auth = await turm.call('slack.auth_status', {});
+    state.authError = null;
+  } catch (err) {
+    // Distinguish "the call itself failed" from "the call returned
+    // configured=false". The former usually means service_unavailable
+    // (supervisor + slack plugin not running) — collapsing it into a
+    // setup-style error would mislead the user into re-running auth
+    // when the actual problem is the supervisor. Carry the error
+    // code through to renderSetup so it can route accordingly.
+    state.auth = null;
+    state.authError = {
+      code: err.code || 'auth_status_failed',
+      message: err.message || String(err),
+    };
+  } finally {
+    dom.refresh.disabled = false;
+  }
+  renderHeader();
+  renderBody();
+  flushPending();
+}
+
+function renderHeader() {
+  const a = state.auth || {};
+  if (state.authError) {
+    dom.workspace.textContent = 'slack · transport error';
+    dom.dot.className = 'slack-header__dot slack-header__dot--err';
+    dom.dot.title = state.authError.message;
+    dom.meta.innerHTML = `<em>${esc(state.authError.code)}</em>`;
+    return;
+  }
+  dom.workspace.textContent = a.workspace || '…';
+  let dotClass = '';
+  if (a.authenticated)        dotClass = 'slack-header__dot--ok';
+  else if (a.configured)      dotClass = 'slack-header__dot--warn';
+  else                        dotClass = 'slack-header__dot--err';
+  dom.dot.className = `slack-header__dot ${dotClass}`;
+  dom.dot.title = a.authenticated
+    ? 'connected'
+    : a.configured ? 'configured · not signed in' : 'not configured';
+
+  const meta = [];
+  if (a.team_id) meta.push(`team <strong>${esc(a.team_id)}</strong>`);
+  if (a.user_id) meta.push(`bot <strong>${esc(a.user_id)}</strong>`);
+  if (a.credentials_source && a.credentials_source !== 'none') {
+    meta.push(`source <strong>${esc(a.credentials_source)}</strong>`);
+  }
+  dom.meta.innerHTML = meta.join(' · ');
+}
+
+function renderBody() {
+  if (state.authError) {
+    dom.filter.hidden = true;
+    dom.composer.hidden = true;
+    renderTransportError();
+    return;
+  }
+  const a = state.auth || {};
+  const ok = a.configured && a.authenticated;
+  if (ok) {
+    dom.filter.hidden = false;
+    dom.composer.hidden = false;
+    renderFeed();
+  } else {
+    dom.filter.hidden = true;
+    dom.composer.hidden = true;
+    renderSetup();
+  }
+}
+
+/* §10 SETUP render — transport-error variant -------------------------- */
+function renderTransportError() {
+  const e = state.authError;
+  dom.main.className = 'slack-setup';
+  dom.main.innerHTML = `
+    <h1 class="slack-setup__title">slack plugin · transport error</h1>
+    <p class="slack-setup__body">
+      The <code>slack.auth_status</code> call failed before the plugin
+      could respond. The supervisor probably hasn't started the slack
+      service, or the IPC connection broke. Try refresh after a moment;
+      if it persists, check turm's stderr (e.g. <code>journalctl --user -u turm</code>
+      or the launching terminal's output) for service-supervisor messages.
+    </p>
+    <section class="slack-setup__error">
+      <strong>${esc(e.code)}</strong>${esc(e.message)}
+    </section>
+  `;
+}
+
+/* §10 SETUP render ----------------------------------------------------- */
+function renderSetup() {
+  const a = state.auth || {};
+  const fatal = a.fatal_error;
+  const errBlock = fatal ? `
+    <section class="slack-setup__error">
+      <strong>fatal_error</strong>${esc(fatal)}
+    </section>` : '';
+  const status = a.configured
+    ? `Slack plugin is configured but no credentials are signed in (<code>credentials_source = ${esc(a.credentials_source || 'none')}</code>). Run the auth command below and restart turm.`
+    : `Slack plugin is not configured. Required env vars are missing or invalid; run the auth command below and restart turm.`;
+  dom.main.className = 'slack-setup';
+  dom.main.innerHTML = `
+    <h1 class="slack-setup__title">slack plugin · setup</h1>
+    <p class="slack-setup__body">${status}</p>
+    ${errBlock}
+    <ol class="slack-setup__steps">
+      <li>Create a Slack app at <code>api.slack.com/apps</code>; enable Socket Mode and generate an App-Level Token (<code>xapp-…</code>) with <code>connections:write</code>.</li>
+      <li>Subscribe to bot events: <code>app_mention</code>, <code>message.im</code>, <code>reaction_added</code>.</li>
+      <li>Add bot scopes: <code>app_mentions:read</code>, <code>im:history</code>, <code>users:read</code>, <code>chat:write</code>, <code>reactions:read</code>, <code>channels:history</code>.</li>
+      <li>Install to your workspace; copy the Bot User OAuth Token (<code>xoxb-…</code>).</li>
+      <li>Persist the credentials and verify against Slack:
+        <code class="slack-setup__cmd">TURM_SLACK_BOT_TOKEN=xoxb-… TURM_SLACK_APP_TOKEN=xapp-… turm-plugin-slack auth</code>
+      </li>
+      <li>Restart turm. The Socket Mode loop reconnects automatically.</li>
+    </ol>
+  `;
+}
+
+/* §6 FEED render ------------------------------------------------------- */
+function renderFeed() {
+  dom.main.className = 'slack-feed';
+  const filtered = state.events.filter(matchesFilter);
+  if (filtered.length === 0) {
+    dom.main.innerHTML = `<div class="slack-feed__empty">waiting for mentions, dms, reactions</div>`;
+  } else {
+    dom.main.innerHTML = filtered.map(renderCard).join('');
+  }
+  renderFilterCounts();
+}
+
+function matchesFilter(ev) {
+  return state.filter === 'all' || ev.kind === state.filter;
+}
+
+function renderFilterCounts() {
+  const counts = { all: 0, mention: 0, dm: 0, reaction: 0 };
+  for (const ev of state.events) {
+    counts.all++;
+    if (counts[ev.kind] !== undefined) counts[ev.kind]++;
+  }
+  for (const k of Object.keys(counts)) {
+    const el = dom.filter.querySelector(`[data-count="${k}"]`);
+    if (el) el.textContent = ` ${counts[k]}`;
+  }
+  dom.filter.querySelectorAll('.slack-filter__chip').forEach(b => {
+    b.classList.toggle('slack-filter__chip--active', b.dataset.filter === state.filter);
+  });
+}
+
+function renderCard(ev) {
+  const expanded = state.expanded.has(ev.id);
+  const cls = `slack-card slack-card--${ev.kind}${expanded ? ' slack-card--expanded' : ''}`;
+  const p = ev.payload;
+  const channelLabel = ev.kind === 'dm' ? '─direct' : esc(p.channel || '?');
+  const user = p.user || p.item_user || '?';
+  let badge, preview;
+  if (ev.kind === 'mention') {
+    badge = 'MEN';
+    preview = esc((p.text || '').trim() || '(no text)');
+  } else if (ev.kind === 'dm') {
+    badge = 'DM';
+    preview = esc((p.text || '').trim() || '(no text)');
+  } else { /* reaction */
+    badge = `:${esc(p.reaction || '?')}:`;
+    preview = `ts ${esc(p.ts || '?')}`;
+  }
+  const sentFooter = ev.sentAt
+    ? `<div class="slack-card__sent">✓ sent ${esc(ev.sentAt)}</div>` : '';
+
+  // Reaction body slot: lazy-fetched
+  let rxnBody = '';
+  if (ev.kind === 'reaction' && expanded) {
+    const key = `${p.channel}:${p.ts}`;
+    const cached = state.bodies.get(key);
+    rxnBody = `<div class="slack-card__rxn-body${cached === undefined ? ' slack-card__rxn-body--loading' : ''}"
+                    data-rxn-body="${esc(key)}">${cached === undefined ? 'fetching…' : esc(cached || '(empty)')}</div>`;
+  }
+
+  // Reply composer (mounted only when expanded; not for reaction since
+  // reply context for reactions is ambiguous — keep one composer-per-thread)
+  const replyChannel = p.channel || '';
+  const replyThread  = p.thread_ts || p.ts || '';
+  const replyComposer = expanded && (ev.kind === 'mention' || ev.kind === 'dm') ? `
+    <form class="slack-composer slack-composer--reply" data-reply="${esc(ev.id)}">
+      <div class="slack-composer__row">
+        <input class="slack-composer__channel" type="text"
+               value="${esc(replyChannel)}" readonly />
+        <div class="slack-composer__divider"></div>
+        <textarea class="slack-composer__textarea" name="text"
+                  placeholder="reply in thread…" rows="1"
+                  spellcheck="false"></textarea>
+        <button class="slack-composer__send" type="submit">REPLY</button>
+      </div>
+      <div class="slack-composer__hint">thread_ts ${esc(replyThread)} · ⌘+enter / esc</div>
+    </form>` : '';
+
+  // The "open" link is only rendered when the payload carries a
+  // permalink. As of slack/events.rs, only `slack.reaction` payloads
+  // include a (best-effort) permalink fetched at event time via
+  // `chat.getPermalink`. Mention/DM payloads do not — the workspace
+  // subdomain is unknown locally, so we cannot build a URL ourselves.
+  // The user sees `copy ts` on every card; `open` only on reactions
+  // and on mentions/DMs after a future plugin-side enhancement that
+  // back-fills permalink there too.
+  return `
+    <article class="${cls}" data-event-id="${esc(ev.id)}" tabindex="0">
+      <div class="slack-card__rail">
+        <span class="slack-card__badge">${badge}</span>
+        <span class="slack-card__ts">${esc(tsClock(p.ts || '0'))}</span>
+      </div>
+      <div class="slack-card__body">
+        <div class="slack-card__head">
+          <span class="slack-card__channel">${channelLabel}</span>
+          <span class="slack-card__user">@${esc(user)}</span>
+          <span class="slack-card__rel">${esc(relTime(p.ts || '0'))}</span>
+        </div>
+        <div class="slack-card__preview">${preview}</div>
+      </div>
+      <div class="slack-card__actions">
+        <button class="slack-card__action" data-act="copy-ts" data-ts="${esc(p.ts || '')}" type="button">copy ts</button>
+        ${p.permalink ? `<a class="slack-card__action" href="${esc(p.permalink)}" target="_blank" rel="noopener">open</a>` : ''}
+      </div>
+      <div class="slack-card__expand">
+        ${rxnBody}
+        ${replyComposer}
+        ${sentFooter}
+      </div>
+    </article>`;
+}
+
+/* Event ingest --------------------------------------------------------- */
+function makeEventId(kind, payload) {
+  // Slack guarantees uniqueness via event_id when present; fall back to
+  // (channel, ts, kind) which is also unique for messages and reactions.
+  if (payload.event_id) return `${kind}:${payload.event_id}`;
+  return `${kind}:${payload.channel || '?'}:${payload.ts || Date.now()}`;
+}
+
+function ingestEvent(kind, payload) {
+  if (!state.ready) {
+    state.pending.push({ kind, payload });
+    return;
+  }
+  const id = makeEventId(kind, payload);
+  // Dedup — Slack occasionally redelivers; the bridge re-sends won't
+  // happen but defending against accidental double-binds is cheap.
+  if (state.events.some(e => e.id === id)) return;
+  state.events.unshift({ id, kind, payload });
+  if (state.events.length > 200) state.events.length = 200;
+  scheduleRender();
+}
+
+function flushPending() {
+  state.ready = true;
+  const buf = state.pending;
+  state.pending = [];
+  for (const { kind, payload } of buf) ingestEvent(kind, payload);
+}
+
+let renderRAF = 0;
+function scheduleRender() {
+  if (renderRAF) return;
+  renderRAF = requestAnimationFrame(() => {
+    renderRAF = 0;
+    if (state.auth?.authenticated) renderFeed();
+  });
+}
+
+/* Reaction body fetch -------------------------------------------------- */
+async function fetchReactionBody(channel, ts) {
+  const key = `${channel}:${ts}`;
+  if (state.bodies.has(key)) return;
+  state.bodies.set(key, undefined);  // placeholder = "in flight"
+  try {
+    const msg = await turm.call('slack.get_message', { channel, ts });
+    const body = (msg && (msg.text || msg.messages?.[0]?.text)) || '(no text)';
+    state.bodies.set(key, body);
+  } catch (err) {
+    state.bodies.set(key, `(failed: ${err.message})`);
+    toast('get_message', err.message);
+  }
+  scheduleRender();
+}
+
+/* Toast ---------------------------------------------------------------- */
+function toast(code, msg, ttl = 4000) {
+  const el = document.createElement('div');
+  el.className = 'slack-toast__item';
+  el.innerHTML = `
+    <span class="slack-toast__code">${esc(code)}</span>
+    <span class="slack-toast__msg">${esc(msg)}</span>`;
+  el.addEventListener('click', () => el.remove());
+  dom.toast.appendChild(el);
+  setTimeout(() => el.remove(), ttl);
+}
+
+/* Send ----------------------------------------------------------------- */
+async function sendMessage(channel, text, threadTs, sourceEv) {
+  if (!channel || !text.trim()) return;
+  try {
+    await turm.call('slack.post_message', {
+      channel,
+      text,
+      ...(threadTs ? { thread_ts: threadTs } : {}),
+    });
+    if (sourceEv) {
+      sourceEv.sentAt = new Date().toLocaleTimeString([], { hour12: false });
+      scheduleRender();
+    }
+    return true;
+  } catch (err) {
+    toast(err.code || 'post_message', err.message);
+    return false;
+  }
+}
+
+/* Wire UP -------------------------------------------------------------- */
+function bindFilter() {
+  dom.filter.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-filter]');
+    if (!btn) return;
+    state.filter = btn.dataset.filter;
+    localStorage.setItem(LS.filter, state.filter);
+    renderFeed();
+  });
+}
+
+function bindFeed() {
+  dom.main.addEventListener('click', (e) => {
+    // Action buttons short-circuit the card-toggle handler.
+    const action = e.target.closest('[data-act]');
+    if (action) {
+      e.stopPropagation();
+      if (action.dataset.act === 'copy-ts' && action.dataset.ts) {
+        navigator.clipboard.writeText(action.dataset.ts).catch(() => {});
+      }
+      return;
+    }
+    if (e.target.closest('a, button, textarea, input, form')) return;
+
+    const card = e.target.closest('.slack-card');
+    if (!card) return;
+    const id = card.dataset.eventId;
+    const wasExpanded = state.expanded.has(id);
+    if (wasExpanded) state.expanded.delete(id);
+    else state.expanded.add(id);
+    persistExpanded();
+    renderFeed();
+
+    if (!wasExpanded) {
+      const ev = state.events.find(x => x.id === id);
+      if (ev?.kind === 'reaction') {
+        fetchReactionBody(ev.payload.channel, ev.payload.ts);
+      }
+      // Focus the reply textarea if the new expansion has one
+      requestAnimationFrame(() => {
+        const ta = dom.main.querySelector(
+          `[data-event-id="${cssEscape(id)}"] .slack-composer__textarea`);
+        ta?.focus();
+      });
+    }
+  });
+
+  // Reply form submit
+  dom.main.addEventListener('submit', async (e) => {
+    const form = e.target.closest('form[data-reply]');
+    if (!form) return;
+    e.preventDefault();
+    const id = form.dataset.reply;
+    const ev = state.events.find(x => x.id === id);
+    if (!ev) return;
+    const ta = form.querySelector('textarea[name=text]');
+    const ok = await sendMessage(
+      ev.payload.channel,
+      ta.value,
+      ev.payload.thread_ts || ev.payload.ts,
+      ev);
+    if (ok) ta.value = '';
+  });
+
+  // Cmd/Ctrl+Enter inside reply textarea triggers submit
+  dom.main.addEventListener('keydown', (e) => {
+    if (e.target.matches('form[data-reply] textarea')) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        e.target.closest('form').requestSubmit();
+      } else if (e.key === 'Escape') {
+        // Collapse the card
+        const card = e.target.closest('.slack-card');
+        if (card) {
+          state.expanded.delete(card.dataset.eventId);
+          persistExpanded();
+          renderFeed();
+        }
+      }
+    }
+  });
+}
+
+function bindComposer() {
+  // Restore draft
+  dom.composerText.value = localStorage.getItem(LS.draft) || '';
+  dom.composerText.addEventListener('input', () => {
+    localStorage.setItem(LS.draft, dom.composerText.value);
+  });
+  // Cmd/Ctrl+Enter triggers send
+  dom.composerText.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      dom.composerSend.click();
+    } else if (e.key === 'Escape') {
+      dom.composerText.blur();
+    }
+  });
+  dom.composerSend.addEventListener('click', async () => {
+    const channel = dom.composerChannel.value.trim();
+    const text = dom.composerText.value;
+    if (!channel) {
+      toast('invalid_params', "channel id required (e.g. C01ABC…)");
+      return;
+    }
+    const ok = await sendMessage(channel, text);
+    if (ok) {
+      dom.composerText.value = '';
+      localStorage.removeItem(LS.draft);
+      dom.composerText.blur();
+    }
+  });
+}
+
+function bindHeader() {
+  dom.refresh.addEventListener('click', refreshAuth);
+}
+
+/* CSS escape for selectors -------------------------------------------- */
+function cssEscape(s) {
+  if (window.CSS?.escape) return CSS.escape(s);
+  return String(s).replace(/[^\w-]/g, '\\$&');
+}
+
+/* Periodic relTime refresh — tick every 30s without rebuilding cards */
+function refreshRelTimes() {
+  for (const card of dom.main.querySelectorAll('.slack-card')) {
+    const id = card.dataset.eventId;
+    const ev = state.events.find(x => x.id === id);
+    if (!ev) continue;
+    const rel = card.querySelector('.slack-card__rel');
+    if (rel) rel.textContent = relTime(ev.payload.ts || '0');
+  }
+}
+
+/* Init ----------------------------------------------------------------- */
+async function init() {
+  bindHeader();
+  bindFilter();
+  bindFeed();
+  bindComposer();
+
+  // Buffer events that arrive before auth_status returns. The bridge
+  // pump starts immediately on `turm.on`, but the panel isn't visually
+  // ready until refreshAuth() resolves.
+  turm.on('slack.mention',  ev => ingestEvent('mention',  ev));
+  turm.on('slack.dm',       ev => ingestEvent('dm',       ev));
+  turm.on('slack.reaction', ev => ingestEvent('reaction', ev));
+
+  await refreshAuth();
+  setInterval(refreshRelTimes, 30 * 1000);
+}
+
+init().catch(err => {
+  toast('init_failed', err.message || String(err));
+  console.error('slack panel init failed:', err);
+});
+</script>
+</body>
+</html>

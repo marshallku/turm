@@ -38,3 +38,11 @@ subscribes = []
 #      → validates against /users/@me, persists to OS keyring.
 #   5. Restart turm — the supervisor spawns the plugin which reads
 #      tokens from the keyring (not env).
+
+# Panel name "main" so `turmctl plugin open discord` works without
+# having to pass `--params '{"panel":"..."}'` — the dispatch path
+# defaults to panel="main" when none is supplied.
+[[panels]]
+name = "main"
+title = "Discord"
+file = "panel.html"

@@ -1,0 +1,1312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Discord</title>
+<style>
+/* ========================================================================
+   discord/panel.html — "Signal Log" aesthetic (mirrors slack/panel.html)
+   Same row-based, mono-only design language; rail color encodes event
+   kind. Discord differs from Slack in event surface (4 kinds: message /
+   mention / dm / reaction) and in identifier shape (snowflakes, not
+   ts/channel-prefix codes). The reference precedent is the sister
+   slack panel — keep the visual vocabulary aligned so users moving
+   between them retain muscle memory.
+   ----------------------------------------------------------------------
+   §1  TOKENS         design tokens, status colors, motion timings
+   §2  RESET          box-sizing, color-scheme, body baseline
+   §3  LAYOUT         shell: header / filter / feed / composer
+   §4  HEADER         workspace + status pill + refresh
+   §5  FILTER         chip row, active state
+   §6  FEED           list, empty state, scroll
+   §7  CARD           shared row chrome — rail / collapsed / expanded
+   §7.1 CARD-MENTION   mention rail
+   §7.2 CARD-DM        DM rail
+   §7.3 CARD-MESSAGE   message rail (least prominent — firehose)
+   §7.4 CARD-RXN       reaction rail + reacted-on body slot
+   §8  COMPOSER       sticky standalone + inline reply (same DOM)
+   §9  TOAST          error overlay
+   §10 SETUP          fatal/setup view
+   §11 MOTION         keyframes, prefers-reduced-motion override
+   §12 UTIL           .visually-hidden, .truncate, .copy-id
+   ======================================================================== */
+
+/* §1 TOKENS ------------------------------------------------------------- */
+:root {
+  /* Status palette — Catppuccin Mocha defaults; host doesn't expose these
+     as CSS vars, so the panel hardcodes them. Edit here to retheme. */
+  --discord-ok:    #a6e3a1;   /* green */
+  --discord-warn:  #f9e2af;   /* yellow */
+  --discord-info:  #89b4fa;   /* blue — DM rail */
+  --discord-rxn:   #94e2d5;   /* teal — reaction rail */
+  --discord-msg:   #6c7086;   /* muted — plain-message rail (firehose) */
+
+  /* Type rails — modifier-driven */
+  --rail-default: var(--turm-overlay0);
+  --rail-mention: var(--turm-accent);
+  --rail-dm:      var(--discord-info);
+  --rail-rxn:     var(--discord-rxn);
+  --rail-msg:     var(--discord-msg);
+
+  --t-fast: 80ms cubic-bezier(.2, 0, .1, 1);
+  --t-med:  180ms cubic-bezier(.2, 0, .1, 1);
+
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 20px; --s-7: 32px;
+
+  --fs-meta: 11px;
+  --fs-body: 12px;
+  --fs-id:   13px;
+  --fs-head: 15px;
+
+  --row-h-collapsed: 30px;
+  --rail-w:          4px;
+}
+
+/* §2 RESET -------------------------------------------------------------- */
+*, *::before, *::after { box-sizing: border-box; }
+:root { color-scheme: dark; }
+
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font-family: "Iosevka Term", "Iosevka", "JetBrains Mono", "Cascadia Mono",
+               "SFMono-Regular", "Liberation Mono", ui-monospace, monospace;
+  font-feature-settings: "tnum", "ss02", "calt";
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  color: var(--turm-text);
+  background: transparent;
+}
+
+/* §3 LAYOUT ------------------------------------------------------------- */
+.discord-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 0;
+}
+
+/* §4 HEADER ------------------------------------------------------------- */
+.discord-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  height: 36px;
+  padding-inline: var(--s-4);
+  background: color-mix(in oklab, var(--turm-surface0) 60%, transparent);
+  border-bottom: 1px solid var(--turm-overlay0);
+  flex-shrink: 0;
+}
+.discord-header__dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--turm-overlay0);
+  flex-shrink: 0;
+}
+.discord-header__dot--ok   { background: var(--discord-ok);   animation: signalPulse 2.4s ease-out infinite; }
+.discord-header__dot--warn { background: var(--discord-warn); }
+.discord-header__dot--err  { background: var(--turm-red);     }
+.discord-header__workspace {
+  font-size: var(--fs-head);
+  font-weight: 500;
+  color: var(--turm-text);
+  letter-spacing: -0.005em;
+}
+.discord-header__meta {
+  display: flex; gap: var(--s-3);
+  font-size: var(--fs-meta);
+  color: var(--turm-subtext0);
+  font-style: italic;
+}
+.discord-header__meta strong {
+  font-weight: 400; font-style: normal;
+  color: var(--turm-subtext1);
+}
+.discord-header__spacer { flex: 1; }
+.discord-header__refresh {
+  background: transparent;
+  border: 1px solid var(--turm-surface2);
+  color: var(--turm-subtext1);
+  font: inherit;
+  font-size: var(--fs-meta);
+  padding: 4px 10px;
+  height: 24px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.discord-header__refresh:hover {
+  background: var(--turm-surface1);
+  color: var(--turm-text);
+}
+.discord-header__refresh:active { transform: scale(0.97); }
+.discord-header__refresh:disabled { opacity: 0.4; cursor: progress; }
+
+/* §5 FILTER ------------------------------------------------------------- */
+.discord-filter {
+  display: flex;
+  gap: var(--s-1);
+  align-items: center;
+  height: 32px;
+  padding-inline: var(--s-4);
+  border-bottom: 1px solid var(--turm-overlay0);
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+.discord-filter::-webkit-scrollbar { height: 0; }
+.discord-filter__chip {
+  background: transparent;
+  border: 0;
+  color: var(--turm-subtext0);
+  font: inherit;
+  font-size: var(--fs-meta);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+  white-space: nowrap;
+}
+.discord-filter__chip:hover {
+  background: color-mix(in oklab, var(--turm-surface0) 40%, transparent);
+}
+.discord-filter__chip--active {
+  color: var(--turm-accent);
+}
+.discord-filter__count {
+  margin-left: 4px;
+  color: var(--turm-subtext0);
+  font-variant-numeric: tabular-nums;
+}
+.discord-filter__chip--active .discord-filter__count {
+  color: color-mix(in oklab, var(--turm-accent) 70%, var(--turm-subtext1));
+}
+
+/* §6 FEED --------------------------------------------------------------- */
+.discord-feed {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s-4) var(--s-4) var(--s-7);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.discord-feed::-webkit-scrollbar { width: 8px; }
+.discord-feed::-webkit-scrollbar-track { background: transparent; }
+.discord-feed::-webkit-scrollbar-thumb {
+  background: var(--turm-surface1);
+  border-radius: 4px;
+}
+.discord-feed::-webkit-scrollbar-thumb:hover { background: var(--turm-surface2); }
+
+.discord-feed__empty {
+  margin: var(--s-7) auto;
+  color: var(--turm-subtext0);
+  font-style: italic;
+  font-size: var(--fs-body);
+  text-align: center;
+}
+.discord-feed__empty::before {
+  content: "··· ";
+  letter-spacing: 0.2em;
+  color: var(--turm-overlay0);
+}
+.discord-feed__empty::after {
+  content: " ···";
+  letter-spacing: 0.2em;
+  color: var(--turm-overlay0);
+}
+
+/* §7 CARD --------------------------------------------------------------- */
+.discord-card {
+  --rail-color: var(--rail-default);
+  display: grid;
+  grid-template-columns: 56px 1fr auto;
+  grid-template-areas:
+    "rail body actions"
+    "rail expand expand";
+  align-items: start;
+  gap: 0 var(--s-3);
+  padding: var(--s-2) var(--s-3) var(--s-2) var(--s-2);
+  background: color-mix(in oklab, var(--turm-surface0) 60%, transparent);
+  border-left: var(--rail-w) solid var(--rail-color);
+  border-left-color: color-mix(in oklab, var(--rail-color) 40%, transparent);
+  border-radius: 0 4px 4px 0;
+  cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast),
+              transform var(--t-fast), padding var(--t-med);
+}
+.discord-card:hover {
+  background: color-mix(in oklab, var(--turm-surface1) 85%, transparent);
+  border-left-color: var(--rail-color);
+  transform: translateY(-1px);
+}
+.discord-card:active { transform: translateY(0) scale(0.997); }
+.discord-card:focus-visible {
+  outline: 1px solid var(--turm-accent);
+  outline-offset: 2px;
+}
+.discord-card--expanded {
+  background: var(--turm-surface1);
+  border-left-color: var(--rail-color);
+  padding-block: var(--s-3) var(--s-4);
+  cursor: default;
+}
+.discord-card--expanded:hover { transform: none; }
+
+.discord-card__rail {
+  grid-area: rail;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding-top: 2px;
+}
+.discord-card__badge {
+  font-size: var(--fs-meta);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--rail-color) 80%, var(--turm-text));
+  font-weight: 600;
+}
+.discord-card__ts {
+  font-size: var(--fs-meta);
+  color: var(--turm-subtext0);
+  font-variant-numeric: tabular-nums;
+  font-style: italic;
+  white-space: nowrap;
+}
+
+.discord-card__body {
+  grid-area: body;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.discord-card__head {
+  display: flex;
+  gap: var(--s-2);
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: var(--fs-id);
+}
+.discord-card__channel {
+  color: var(--turm-text);
+  font-weight: 600;
+}
+.discord-card__user {
+  color: var(--turm-subtext1);
+  font-weight: 400;
+}
+.discord-card__rel {
+  color: var(--turm-subtext0);
+  font-style: italic;
+  font-size: var(--fs-meta);
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.discord-card__preview {
+  color: var(--turm-subtext1);
+  font-size: var(--fs-body);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.discord-card--expanded .discord-card__preview {
+  white-space: pre-wrap;
+  overflow: visible;
+  color: var(--turm-text);
+  word-break: break-word;
+}
+
+.discord-card__actions {
+  grid-area: actions;
+  display: flex;
+  gap: var(--s-1);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-med);
+  align-self: center;
+}
+.discord-card:hover .discord-card__actions,
+.discord-card:focus-within .discord-card__actions,
+.discord-card--expanded .discord-card__actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.discord-card__action {
+  background: transparent;
+  border: 0;
+  color: var(--turm-subtext0);
+  font: inherit;
+  font-size: var(--fs-meta);
+  letter-spacing: 0.04em;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+  text-decoration: none;
+}
+.discord-card__action:hover {
+  background: var(--turm-surface2);
+  color: var(--turm-text);
+}
+
+.discord-card__expand {
+  grid-area: expand;
+  margin-top: var(--s-3);
+  display: none;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.discord-card--expanded .discord-card__expand { display: flex; }
+
+.discord-card__sent {
+  font-size: var(--fs-meta);
+  color: var(--discord-ok);
+  font-style: italic;
+  font-variant-numeric: tabular-nums;
+}
+
+/* §7.1 CARD-MENTION ------------------------------------------------------ */
+.discord-card--mention { --rail-color: var(--rail-mention); }
+
+/* §7.2 CARD-DM ----------------------------------------------------------- */
+.discord-card--dm { --rail-color: var(--rail-dm); }
+
+/* §7.3 CARD-MESSAGE ----------------------------------------------------- */
+.discord-card--message { --rail-color: var(--rail-msg); }
+.discord-card--message .discord-card__channel {
+  /* Plain-message channel id is less load-bearing than mention/DM */
+  color: var(--turm-subtext1);
+}
+
+/* §7.4 CARD-RXN ---------------------------------------------------------- */
+.discord-card--rxn { --rail-color: var(--rail-rxn); }
+.discord-card--rxn .discord-card__badge {
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+  font-weight: 500;
+}
+.discord-card--rxn .discord-card__preview::before {
+  content: "↳ on: ";
+  color: var(--turm-overlay0);
+}
+.discord-card__rxn-body {
+  font-size: var(--fs-body);
+  color: var(--turm-subtext1);
+  background: color-mix(in oklab, var(--turm-surface0) 80%, transparent);
+  border-left: 2px solid var(--turm-overlay0);
+  padding: var(--s-2) var(--s-3);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-style: italic;
+}
+
+/* §8 COMPOSER ----------------------------------------------------------- */
+.discord-composer {
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in oklab, var(--turm-surface2) 92%, transparent);
+  border-top: 1px solid var(--turm-overlay0);
+  padding: var(--s-2) var(--s-4);
+  flex-shrink: 0;
+  transition: padding var(--t-fast);
+}
+.discord-composer__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  height: 32px;
+}
+.discord-composer__row::before {
+  content: "›";
+  color: var(--turm-subtext0);
+  font-size: var(--fs-id);
+  flex-shrink: 0;
+}
+.discord-composer__channel {
+  background: var(--turm-surface0);
+  border: 1px solid var(--turm-surface2);
+  color: var(--turm-text);
+  font: inherit;
+  font-size: var(--fs-body);
+  padding: 4px 8px;
+  height: 24px;
+  border-radius: 3px;
+  width: 180px;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.discord-composer__channel:focus {
+  outline: 1px solid var(--turm-accent);
+  outline-offset: 1px;
+  border-color: var(--turm-accent);
+}
+.discord-composer__channel:read-only {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+.discord-composer__divider {
+  width: 1px;
+  height: 16px;
+  background: var(--turm-overlay0);
+  flex-shrink: 0;
+}
+.discord-composer__textarea {
+  flex: 1;
+  background: var(--turm-surface0);
+  border: 1px solid var(--turm-surface2);
+  color: var(--turm-text);
+  font: inherit;
+  font-size: var(--fs-body);
+  padding: 4px 8px;
+  height: 24px;
+  min-height: 24px;
+  border-radius: 3px;
+  resize: none;
+  line-height: 1.45;
+  transition: height var(--t-fast), border-color var(--t-fast);
+}
+.discord-composer__textarea::placeholder {
+  color: var(--turm-subtext0);
+  font-style: italic;
+}
+.discord-composer__textarea:focus {
+  outline: 1px solid var(--turm-accent);
+  outline-offset: 1px;
+  border-color: var(--turm-accent);
+  height: 96px;
+}
+.discord-composer__send {
+  background: transparent;
+  border: 1px solid var(--turm-surface2);
+  color: var(--turm-subtext1);
+  font: inherit;
+  font-size: var(--fs-meta);
+  padding: 0 10px;
+  height: 24px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+  flex-shrink: 0;
+}
+.discord-composer__send:hover {
+  background: var(--turm-accent);
+  color: var(--turm-bg);
+  border-color: var(--turm-accent);
+}
+.discord-composer__send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.discord-composer__hint {
+  font-size: var(--fs-meta);
+  color: var(--turm-subtext0);
+  font-style: italic;
+  padding-top: 4px;
+  padding-left: 18px;
+  display: none;
+  font-variant-numeric: tabular-nums;
+}
+.discord-composer__hint--over { color: var(--turm-red); font-style: normal; }
+.discord-composer__textarea:focus ~ .discord-composer__hint,
+.discord-composer__textarea:not(:placeholder-shown) ~ .discord-composer__hint {
+  display: block;
+}
+
+.discord-card__expand .discord-composer {
+  background: color-mix(in oklab, var(--turm-surface0) 80%, transparent);
+  border: 1px solid var(--turm-overlay0);
+  border-radius: 4px;
+  padding: var(--s-2);
+}
+.discord-card__expand .discord-composer__channel { width: 160px; }
+
+/* §9 TOAST -------------------------------------------------------------- */
+.discord-toast {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  z-index: 1000;
+  pointer-events: none;
+}
+.discord-toast__item {
+  background: color-mix(in oklab, var(--turm-surface2) 95%, transparent);
+  color: var(--turm-text);
+  border-left: 4px solid var(--turm-red);
+  border-radius: 3px;
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--fs-body);
+  max-width: 360px;
+  pointer-events: auto;
+  cursor: pointer;
+  animation: toastIn var(--t-med) ease-out;
+}
+.discord-toast__code {
+  display: block;
+  font-size: var(--fs-meta);
+  color: var(--turm-subtext0);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+.discord-toast__msg { word-break: break-word; }
+
+/* §10 SETUP ------------------------------------------------------------- */
+.discord-setup {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s-7) var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  max-width: 720px;
+  margin-inline: auto;
+}
+.discord-setup__title {
+  font-size: var(--fs-head);
+  color: var(--turm-text);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  margin: 0;
+}
+.discord-setup__body {
+  color: var(--turm-subtext1);
+  font-size: var(--fs-body);
+  line-height: 1.6;
+}
+.discord-setup__error {
+  border-left: 3px solid var(--turm-red);
+  background: color-mix(in oklab, var(--turm-red) 8%, transparent);
+  padding: var(--s-3) var(--s-4);
+  border-radius: 0 3px 3px 0;
+  color: var(--turm-text);
+  font-size: var(--fs-body);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.discord-setup__error strong {
+  display: block;
+  font-weight: 600;
+  color: var(--turm-red);
+  margin-bottom: 4px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: var(--fs-meta);
+}
+.discord-setup__steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  counter-reset: step;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.discord-setup__steps li {
+  counter-increment: step;
+  padding-left: var(--s-7);
+  position: relative;
+  color: var(--turm-subtext1);
+}
+.discord-setup__steps li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--turm-overlay0);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--turm-subtext0);
+  font-size: var(--fs-meta);
+}
+.discord-setup__cmd {
+  display: block;
+  margin-top: var(--s-2);
+  background: var(--turm-surface0);
+  color: var(--turm-text);
+  border: 1px solid var(--turm-surface2);
+  border-radius: 3px;
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--fs-body);
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+.discord-setup__cmd::before {
+  content: "$ ";
+  color: var(--turm-subtext0);
+}
+
+/* §11 MOTION ------------------------------------------------------------ */
+@keyframes signalPulse {
+  0%   { box-shadow: 0 0 0 0    color-mix(in oklab, var(--discord-ok) 60%, transparent); }
+  70%  { box-shadow: 0 0 0 6px  color-mix(in oklab, var(--discord-ok)  0%, transparent); }
+  100% { box-shadow: 0 0 0 0    color-mix(in oklab, var(--discord-ok)  0%, transparent); }
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+  .discord-card:hover { transform: none; }
+}
+
+/* §12 UTIL -------------------------------------------------------------- */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+</style>
+</head>
+<body>
+<div class="discord-shell">
+
+  <!-- §4 HEADER -->
+  <header class="discord-header" id="header" aria-label="Discord auth status">
+    <div class="discord-header__dot" id="status-dot"></div>
+    <div class="discord-header__workspace" id="workspace-label">…</div>
+    <div class="discord-header__meta" id="header-meta"></div>
+    <div class="discord-header__spacer"></div>
+    <button class="discord-header__refresh" id="refresh-btn" type="button">refresh</button>
+  </header>
+
+  <!-- §5 FILTER -->
+  <nav class="discord-filter" id="filter" role="tablist" hidden>
+    <button class="discord-filter__chip" data-filter="all" type="button" role="tab">
+      ALL<span class="discord-filter__count" data-count="all"> 0</span>
+    </button>
+    <button class="discord-filter__chip" data-filter="mention" type="button" role="tab">
+      MENTIONS<span class="discord-filter__count" data-count="mention"> 0</span>
+    </button>
+    <button class="discord-filter__chip" data-filter="dm" type="button" role="tab">
+      DMS<span class="discord-filter__count" data-count="dm"> 0</span>
+    </button>
+    <button class="discord-filter__chip" data-filter="reaction" type="button" role="tab">
+      REACTIONS<span class="discord-filter__count" data-count="reaction"> 0</span>
+    </button>
+    <button class="discord-filter__chip" data-filter="message" type="button" role="tab">
+      MESSAGES<span class="discord-filter__count" data-count="message"> 0</span>
+    </button>
+  </nav>
+
+  <!-- §6 FEED or §10 SETUP — toggled by JS -->
+  <main id="main" class="discord-feed" aria-live="polite"></main>
+
+  <!-- §8 COMPOSER (standalone) — only mounted in feed view -->
+  <footer class="discord-composer" id="composer" hidden>
+    <div class="discord-composer__row">
+      <input class="discord-composer__channel" id="composer-channel"
+             type="text" placeholder="channel_id (snowflake)" autocomplete="off"
+             spellcheck="false" inputmode="numeric" pattern="[0-9]*" />
+      <div class="discord-composer__divider"></div>
+      <textarea class="discord-composer__textarea" id="composer-text"
+                placeholder="reply or send raw…" rows="1"
+                spellcheck="false"></textarea>
+      <button class="discord-composer__send" id="composer-send" type="button">SEND</button>
+    </div>
+    <div class="discord-composer__hint" id="composer-hint">⌘+enter to send · esc to collapse</div>
+  </footer>
+
+</div>
+
+<!-- §9 TOAST region -->
+<div class="discord-toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+'use strict';
+
+/* ========================================================================
+   discord/panel.html — JS
+   - Bridge: window.turm.call / .on
+   - Snowflake → ms via DISCORD_EPOCH; no ts field on payloads.
+   - localStorage keys: discord-filter, discord-expanded, discord-composer-draft
+   ======================================================================== */
+
+const LS = {
+  filter:   'discord-filter',
+  expanded: 'discord-expanded',
+  draft:    'discord-composer-draft',
+};
+
+/* Discord epoch: 2015-01-01T00:00:00.000Z (ms). Snowflake encodes
+   (timestamp_ms - DISCORD_EPOCH) in the high 42 bits, lower bits are
+   worker/process/sequence. We only need the timestamp. */
+const DISCORD_EPOCH_MS = 1420070400000n;
+function snowflakeMs(snowflake) {
+  if (!snowflake) return 0;
+  try {
+    return Number((BigInt(snowflake) >> 22n) + DISCORD_EPOCH_MS);
+  } catch {
+    return 0;
+  }
+}
+
+const state = {
+  auth: null,
+  filter: localStorage.getItem(LS.filter) || 'all',
+  authError: null,  // populated when auth_status REJECTS (transport)
+  events: [],   // { id, kind, payload, sentAt? }
+  expanded: new Set(safeJSON(localStorage.getItem(LS.expanded)) || []),
+  bodies: new Map(),  // key=`${channel_id}:${message_id}`
+  ready: false,
+  pending: [],
+};
+
+function safeJSON(s) { try { return JSON.parse(s); } catch { return null; } }
+function persistExpanded() {
+  localStorage.setItem(LS.expanded, JSON.stringify([...state.expanded]));
+}
+
+const $ = (id) => document.getElementById(id);
+const dom = {
+  shell:     document.querySelector('.discord-shell'),
+  dot:       $('status-dot'),
+  workspace: $('workspace-label'),
+  meta:      $('header-meta'),
+  refresh:   $('refresh-btn'),
+  filter:    $('filter'),
+  main:      $('main'),
+  composer:  $('composer'),
+  composerChannel: $('composer-channel'),
+  composerText:    $('composer-text'),
+  composerSend:    $('composer-send'),
+  composerHint:    $('composer-hint'),
+  toast:     $('toast'),
+};
+
+const ESC_MAP = { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' };
+function esc(s) { return String(s ?? '').replace(/[<>&"']/g, c => ESC_MAP[c]); }
+
+function relTime(ms) {
+  if (!ms) return '—';
+  const sec = (Date.now() - ms) / 1000;
+  if (!isFinite(sec) || sec < 0) return '—';
+  if (sec < 60)    return 'now';
+  if (sec < 3600)  return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}
+function clockOf(ms) {
+  if (!ms) return '——:——';
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return '——:——';
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+async function refreshAuth() {
+  dom.refresh.disabled = true;
+  try {
+    state.auth = await turm.call('discord.auth_status', {});
+    state.authError = null;
+  } catch (err) {
+    // Distinguish "the call itself failed" from "the call returned
+    // configured=false". Transport failures (service_unavailable,
+    // bridge_timeout) need a different message than "you forgot to
+    // run auth" — surface the error code so the user diagnoses
+    // correctly.
+    state.auth = null;
+    state.authError = {
+      code: err.code || 'auth_status_failed',
+      message: err.message || String(err),
+    };
+  } finally {
+    dom.refresh.disabled = false;
+  }
+  renderHeader();
+  renderBody();
+  flushPending();
+}
+
+function renderHeader() {
+  const a = state.auth || {};
+  if (state.authError) {
+    dom.workspace.textContent = 'discord · transport error';
+    dom.dot.className = 'discord-header__dot discord-header__dot--err';
+    dom.dot.title = state.authError.message;
+    dom.meta.innerHTML = `<em>${esc(state.authError.code)}</em>`;
+    return;
+  }
+  dom.workspace.textContent = a.workspace || '…';
+  let dotClass = '';
+  if (a.authenticated)    dotClass = 'discord-header__dot--ok';
+  else if (a.configured)  dotClass = 'discord-header__dot--warn';
+  else                    dotClass = 'discord-header__dot--err';
+  dom.dot.className = `discord-header__dot ${dotClass}`;
+  dom.dot.title = a.authenticated
+    ? 'connected'
+    : a.configured ? 'configured · not signed in' : 'not configured';
+
+  const meta = [];
+  if (a.username) meta.push(`bot <strong>${esc(a.username)}</strong>`);
+  if (a.user_id)  meta.push(`id <strong>${esc(a.user_id)}</strong>`);
+  if (a.credentials_source && a.credentials_source !== 'none') {
+    meta.push(`source <strong>${esc(a.credentials_source)}</strong>`);
+  }
+  dom.meta.innerHTML = meta.join(' · ');
+}
+
+function renderBody() {
+  if (state.authError) {
+    dom.filter.hidden = true;
+    dom.composer.hidden = true;
+    renderTransportError();
+    return;
+  }
+  const a = state.auth || {};
+  const ok = a.configured && a.authenticated;
+  if (ok) {
+    dom.filter.hidden = false;
+    dom.composer.hidden = false;
+    renderFeed();
+  } else {
+    dom.filter.hidden = true;
+    dom.composer.hidden = true;
+    renderSetup();
+  }
+}
+
+/* §10 SETUP render — transport-error variant -------------------------- */
+function renderTransportError() {
+  const e = state.authError;
+  dom.main.className = 'discord-setup';
+  dom.main.innerHTML = `
+    <h1 class="discord-setup__title">discord plugin · transport error</h1>
+    <p class="discord-setup__body">
+      The <code>discord.auth_status</code> call failed before the plugin
+      could respond. The supervisor probably hasn't started the discord
+      service, or the IPC connection broke. Try refresh after a moment;
+      if it persists, check turm's stderr (e.g. <code>journalctl --user -u turm</code>
+      or the launching terminal's output) for service-supervisor messages.
+    </p>
+    <section class="discord-setup__error">
+      <strong>${esc(e.code)}</strong>${esc(e.message)}
+    </section>
+  `;
+}
+
+/* §10 SETUP render ----------------------------------------------------- */
+function renderSetup() {
+  const a = state.auth || {};
+  const fatal = a.fatal_error;
+  const errBlock = fatal ? `
+    <section class="discord-setup__error">
+      <strong>fatal_error</strong>${esc(fatal)}
+    </section>` : '';
+  const status = a.configured
+    ? `Discord plugin is configured but no credentials are signed in (<code>credentials_source = ${esc(a.credentials_source || 'none')}</code>). Run the auth command below and restart turm.`
+    : `Discord plugin is not configured. Required env vars are missing or invalid; run the auth command below and restart turm.`;
+  dom.main.className = 'discord-setup';
+  dom.main.innerHTML = `
+    <h1 class="discord-setup__title">discord plugin · setup</h1>
+    <p class="discord-setup__body">${status}</p>
+    ${errBlock}
+    <ol class="discord-setup__steps">
+      <li>Visit <code>discord.com/developers/applications</code>, create an app, add a Bot. Copy the bot token (Reset Token if first time).</li>
+      <li>Enable the <strong>MESSAGE CONTENT</strong> privileged intent (required to read message bodies for keyword matching).</li>
+      <li>Use OAuth2 → URL Generator → <code>bot</code> scope + the permissions you want (Read Messages, Send Messages typical) → invite the bot to your server.</li>
+      <li>Persist the credentials and verify against Discord:
+        <code class="discord-setup__cmd">TURM_DISCORD_BOT_TOKEN=&lt;token&gt; turm-plugin-discord auth</code>
+      </li>
+      <li>Restart turm. The Gateway WebSocket reconnects automatically.</li>
+    </ol>
+  `;
+}
+
+/* §6 FEED render ------------------------------------------------------- */
+function renderFeed() {
+  dom.main.className = 'discord-feed';
+  const filtered = state.events.filter(matchesFilter);
+  if (filtered.length === 0) {
+    dom.main.innerHTML = `<div class="discord-feed__empty">waiting for messages, mentions, dms, reactions</div>`;
+  } else {
+    dom.main.innerHTML = filtered.map(renderCard).join('');
+  }
+  renderFilterCounts();
+}
+
+function matchesFilter(ev) {
+  return state.filter === 'all' || ev.kind === state.filter;
+}
+
+function renderFilterCounts() {
+  const counts = { all: 0, mention: 0, dm: 0, reaction: 0, message: 0 };
+  for (const ev of state.events) {
+    counts.all++;
+    if (counts[ev.kind] !== undefined) counts[ev.kind]++;
+  }
+  for (const k of Object.keys(counts)) {
+    const el = dom.filter.querySelector(`[data-count="${k}"]`);
+    if (el) el.textContent = ` ${counts[k]}`;
+  }
+  dom.filter.querySelectorAll('.discord-filter__chip').forEach(b => {
+    b.classList.toggle('discord-filter__chip--active', b.dataset.filter === state.filter);
+  });
+}
+
+function renderCard(ev) {
+  const expanded = state.expanded.has(ev.id);
+  const cls = `discord-card discord-card--${ev.kind}${expanded ? ' discord-card--expanded' : ''}`;
+  const p = ev.payload;
+  // Channel display:
+  //   - DM: no guild_id, render "─direct"
+  //   - else: show channel_id (no human name available without extra API)
+  const channelLabel = ev.kind === 'dm' ? '─direct' : `#${esc(p.channel_id || '?')}`;
+  const userLabel = p.author_username
+    ? `@${esc(p.author_username)}`
+    : `@${esc((p.author_id || p.user_id || '?').slice(-6))}`;
+
+  // Snowflake → ms. Reactions don't have a message_id-of-sending; use
+  // message_id (the reacted-on message's id, which is still chronological
+  // enough for sort-by-recency purposes).
+  const tsMs = snowflakeMs(p.message_id);
+
+  let badge, preview;
+  if (ev.kind === 'mention') {
+    badge = 'MEN';
+    preview = esc((p.content || '').trim() || '(no content)');
+  } else if (ev.kind === 'dm') {
+    badge = 'DM';
+    preview = esc((p.content || '').trim() || '(no content)');
+  } else if (ev.kind === 'message') {
+    badge = 'MSG';
+    preview = esc((p.content || '').trim() || '(no content)');
+  } else { /* reaction */
+    const emoji = p.emoji_name || '?';
+    badge = p.emoji_id ? `:${esc(emoji)}:` : esc(emoji);
+    preview = `msg ${esc(p.message_id || '?')}`;
+  }
+  const sentFooter = ev.sentAt
+    ? `<div class="discord-card__sent">✓ sent ${esc(ev.sentAt)}</div>` : '';
+
+  // Reaction body slot (lazy)
+  let rxnBody = '';
+  if (ev.kind === 'reaction' && expanded) {
+    const key = `${p.channel_id}:${p.message_id}`;
+    const cached = state.bodies.get(key);
+    rxnBody = `<div class="discord-card__rxn-body" data-rxn-body="${esc(key)}">${cached === undefined ? 'fetching…' : esc(cached || '(empty)')}</div>`;
+  }
+
+  // Reply composer — applies to mention/dm/message; skip for reaction
+  // since "replying to a reaction" is conceptually wrong (reply to the
+  // reacted-on message instead, via the open link).
+  const replyComposer = expanded && ev.kind !== 'reaction' ? `
+    <form class="discord-composer discord-composer--reply" data-reply="${esc(ev.id)}">
+      <div class="discord-composer__row">
+        <input class="discord-composer__channel" type="text"
+               value="${esc(p.channel_id || '')}" readonly />
+        <div class="discord-composer__divider"></div>
+        <textarea class="discord-composer__textarea" name="content"
+                  placeholder="reply…" rows="1" maxlength="2000"
+                  spellcheck="false"></textarea>
+        <button class="discord-composer__send" type="submit">REPLY</button>
+      </div>
+      <div class="discord-composer__hint">⌘+enter / esc · 2000 char limit</div>
+    </form>` : '';
+
+  const openLink = p.message_url
+    ? `<a class="discord-card__action" href="${esc(p.message_url)}" target="_blank" rel="noopener">open</a>` : '';
+
+  return `
+    <article class="${cls}" data-event-id="${esc(ev.id)}" tabindex="0">
+      <div class="discord-card__rail">
+        <span class="discord-card__badge">${badge}</span>
+        <span class="discord-card__ts">${esc(clockOf(tsMs))}</span>
+      </div>
+      <div class="discord-card__body">
+        <div class="discord-card__head">
+          <span class="discord-card__channel">${channelLabel}</span>
+          <span class="discord-card__user">${userLabel}</span>
+          <span class="discord-card__rel">${esc(relTime(tsMs))}</span>
+        </div>
+        <div class="discord-card__preview">${preview}</div>
+      </div>
+      <div class="discord-card__actions">
+        <button class="discord-card__action" data-act="copy-id" data-id="${esc(p.message_id || '')}" type="button">copy id</button>
+        ${openLink}
+      </div>
+      <div class="discord-card__expand">
+        ${rxnBody}
+        ${replyComposer}
+        ${sentFooter}
+      </div>
+    </article>`;
+}
+
+/* Event ingest --------------------------------------------------------- */
+function makeEventId(kind, payload) {
+  // Reactions share message_id with another event class — disambiguate
+  // by suffixing user_id + emoji so reaction-add bursts on the same
+  // message produce distinct cards.
+  if (kind === 'reaction') {
+    return `reaction:${payload.channel_id}:${payload.message_id}:${payload.user_id}:${payload.emoji_name || payload.emoji_id || '?'}`;
+  }
+  return `${kind}:${payload.message_id || `${payload.channel_id}:${Date.now()}`}`;
+}
+
+function ingestEvent(kind, payload) {
+  if (!state.ready) {
+    state.pending.push({ kind, payload });
+    return;
+  }
+  const id = makeEventId(kind, payload);
+  if (state.events.some(e => e.id === id)) return;
+  state.events.unshift({ id, kind, payload });
+  if (state.events.length > 200) state.events.length = 200;
+  scheduleRender();
+}
+
+function flushPending() {
+  state.ready = true;
+  const buf = state.pending;
+  state.pending = [];
+  for (const { kind, payload } of buf) ingestEvent(kind, payload);
+}
+
+let renderRAF = 0;
+function scheduleRender() {
+  if (renderRAF) return;
+  renderRAF = requestAnimationFrame(() => {
+    renderRAF = 0;
+    if (state.auth?.authenticated) renderFeed();
+  });
+}
+
+async function fetchReactionBody(channelId, messageId) {
+  const key = `${channelId}:${messageId}`;
+  if (state.bodies.has(key)) return;
+  state.bodies.set(key, undefined);
+  try {
+    const msg = await turm.call('discord.get_message', {
+      channel_id: channelId,
+      message_id: messageId,
+    });
+    const body = (msg && (msg.content || msg.messages?.[0]?.content)) || '(no content)';
+    state.bodies.set(key, body);
+  } catch (err) {
+    state.bodies.set(key, `(failed: ${err.message})`);
+    toast(err.code || 'get_message', err.message);
+  }
+  scheduleRender();
+}
+
+/* Toast ---------------------------------------------------------------- */
+function toast(code, msg, ttl = 4000) {
+  const el = document.createElement('div');
+  el.className = 'discord-toast__item';
+  el.innerHTML = `
+    <span class="discord-toast__code">${esc(code)}</span>
+    <span class="discord-toast__msg">${esc(msg)}</span>`;
+  el.addEventListener('click', () => el.remove());
+  dom.toast.appendChild(el);
+  setTimeout(() => el.remove(), ttl);
+}
+
+/* Send ----------------------------------------------------------------- */
+// Discord enforces a 2000-CHARACTER (Unicode code-point, not UTF-16
+// code-unit) limit at `discord.send_message` via Rust's
+// `chars().count()`. JS `String.length` counts code units, which
+// double-counts astral characters (emoji etc.). Use a code-point
+// count so the panel and backend agree.
+function codePointCount(s) {
+  let n = 0;
+  // eslint-disable-next-line no-unused-vars
+  for (const _ of s) n++;
+  return n;
+}
+
+async function sendMessage(channelId, content, sourceEv) {
+  if (!channelId || !content.trim()) return false;
+  const len = codePointCount(content);
+  if (len > 2000) {
+    toast('invalid_params', `content exceeds 2000 chars (got ${len})`);
+    return false;
+  }
+  try {
+    await turm.call('discord.send_message', { channel_id: channelId, content });
+    if (sourceEv) {
+      sourceEv.sentAt = new Date().toLocaleTimeString([], { hour12: false });
+      scheduleRender();
+    }
+    return true;
+  } catch (err) {
+    toast(err.code || 'send_message', err.message);
+    return false;
+  }
+}
+
+/* Wire UP -------------------------------------------------------------- */
+function bindFilter() {
+  dom.filter.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-filter]');
+    if (!btn) return;
+    state.filter = btn.dataset.filter;
+    localStorage.setItem(LS.filter, state.filter);
+    renderFeed();
+  });
+}
+
+function bindFeed() {
+  dom.main.addEventListener('click', (e) => {
+    const action = e.target.closest('[data-act]');
+    if (action) {
+      e.stopPropagation();
+      if (action.dataset.act === 'copy-id' && action.dataset.id) {
+        navigator.clipboard.writeText(action.dataset.id).catch(() => {});
+      }
+      return;
+    }
+    if (e.target.closest('a, button, textarea, input, form')) return;
+
+    const card = e.target.closest('.discord-card');
+    if (!card) return;
+    const id = card.dataset.eventId;
+    const wasExpanded = state.expanded.has(id);
+    if (wasExpanded) state.expanded.delete(id);
+    else state.expanded.add(id);
+    persistExpanded();
+    renderFeed();
+
+    if (!wasExpanded) {
+      const ev = state.events.find(x => x.id === id);
+      if (ev?.kind === 'reaction') {
+        fetchReactionBody(ev.payload.channel_id, ev.payload.message_id);
+      }
+      requestAnimationFrame(() => {
+        const ta = dom.main.querySelector(
+          `[data-event-id="${cssEscape(id)}"] .discord-composer__textarea`);
+        ta?.focus();
+      });
+    }
+  });
+
+  dom.main.addEventListener('submit', async (e) => {
+    const form = e.target.closest('form[data-reply]');
+    if (!form) return;
+    e.preventDefault();
+    const id = form.dataset.reply;
+    const ev = state.events.find(x => x.id === id);
+    if (!ev) return;
+    const ta = form.querySelector('textarea[name=content]');
+    const ok = await sendMessage(ev.payload.channel_id, ta.value, ev);
+    if (ok) ta.value = '';
+  });
+
+  dom.main.addEventListener('keydown', (e) => {
+    if (e.target.matches('form[data-reply] textarea')) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        e.target.closest('form').requestSubmit();
+      } else if (e.key === 'Escape') {
+        const card = e.target.closest('.discord-card');
+        if (card) {
+          state.expanded.delete(card.dataset.eventId);
+          persistExpanded();
+          renderFeed();
+        }
+      }
+    }
+  });
+}
+
+function bindComposer() {
+  dom.composerText.value = localStorage.getItem(LS.draft) || '';
+  const updateHint = () => {
+    const len = codePointCount(dom.composerText.value);
+    const over = len > 2000;
+    dom.composerHint.textContent = over
+      ? `over 2000-char limit (${len})`
+      : `⌘+enter to send · esc to collapse · ${len}/2000`;
+    dom.composerHint.classList.toggle('discord-composer__hint--over', over);
+  };
+  dom.composerText.addEventListener('input', () => {
+    localStorage.setItem(LS.draft, dom.composerText.value);
+    updateHint();
+  });
+  updateHint();
+  dom.composerText.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      dom.composerSend.click();
+    } else if (e.key === 'Escape') {
+      dom.composerText.blur();
+    }
+  });
+  dom.composerSend.addEventListener('click', async () => {
+    const channelId = dom.composerChannel.value.trim();
+    const content = dom.composerText.value;
+    if (!channelId) {
+      toast('invalid_params', 'channel_id required (snowflake)');
+      return;
+    }
+    const ok = await sendMessage(channelId, content);
+    if (ok) {
+      dom.composerText.value = '';
+      localStorage.removeItem(LS.draft);
+      updateHint();
+      dom.composerText.blur();
+    }
+  });
+}
+
+function bindHeader() {
+  dom.refresh.addEventListener('click', refreshAuth);
+}
+
+function cssEscape(s) {
+  if (window.CSS?.escape) return CSS.escape(s);
+  return String(s).replace(/[^\w-]/g, '\\$&');
+}
+
+function refreshRelTimes() {
+  for (const card of dom.main.querySelectorAll('.discord-card')) {
+    const id = card.dataset.eventId;
+    const ev = state.events.find(x => x.id === id);
+    if (!ev) continue;
+    const rel = card.querySelector('.discord-card__rel');
+    if (rel) rel.textContent = relTime(snowflakeMs(ev.payload.message_id));
+  }
+}
+
+async function init() {
+  bindHeader();
+  bindFilter();
+  bindFeed();
+  bindComposer();
+
+  turm.on('discord.message',  ev => ingestEvent('message',  ev));
+  turm.on('discord.mention',  ev => ingestEvent('mention',  ev));
+  turm.on('discord.dm',       ev => ingestEvent('dm',       ev));
+  turm.on('discord.reaction', ev => ingestEvent('reaction', ev));
+
+  await refreshAuth();
+  setInterval(refreshRelTimes, 30 * 1000);
+}
+
+init().catch(err => {
+  toast('init_failed', err.message || String(err));
+  console.error('discord panel init failed:', err);
+});
+</script>
+</body>
+</html>

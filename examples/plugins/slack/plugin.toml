@@ -41,3 +41,11 @@ subscribes = []
 #                              respective conversation kinds)
 #   5. Install to your workspace; copy the Bot User OAuth Token (xoxb-...)
 #   6. Run `TURM_SLACK_BOT_TOKEN=xoxb-... TURM_SLACK_APP_TOKEN=xapp-... turm-plugin-slack auth`
+
+# Panel name "main" so `turmctl plugin open slack` works without
+# having to pass `--params '{"panel":"..."}'` — the dispatch path
+# defaults to panel="main" when none is supplied.
+[[panels]]
+name = "main"
+title = "Slack"
+file = "panel.html"
