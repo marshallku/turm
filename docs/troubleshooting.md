@@ -99,6 +99,22 @@ WebProcess CRASHED
 **Cause:** gio 0.20 uses builder pattern, not positional args.
 **Fix:** Use `connection.register_object(path, &interface_info).method_call(closure).build()`.
 
+### Plugin/webview panel frozen on last frame after Hyprland workspace switch
+
+**Symptom:** Plugin panel (or any `webkit6::WebView`) renders fine on first show. User switches to a different Hyprland workspace (or any wlroots-compositor that toggles `wl_surface` visibility on workspace change), then comes back. Panel is stuck on the last frame — appears alive but doesn't repaint, doesn't respond to bus events visually. Right-clicking → "Inspect Element" instantly revives the panel.
+
+**Cause:** When the GTK4 toplevel surface gets unmapped (workspace switch out) and remapped (switch back), GTK gives the WebView a fresh `GdkSurface`, but WebKit's compositor doesn't always push a frame to it on its own. The dev-tools-attach revives it because attaching WebInspector schedules a JS task in the WebProcess, which in turn schedules layout + paint, which makes WebKit push to the new surface. Same root cause is tracked upstream in `webkit2gtk` / `wpebackend-fdo` Wayland-compositor remap handling — not Hyprland-specific (any compositor that toggles surface visibility on workspace change can hit it). Distinct from same-window focus loss (no surface change) and from cold-boot blank panel (different mechanism — see `bb9c1f1` prewarm).
+
+**Fix:** Hook the WebView's GTK4 `map` signal and run a trivial `evaluate_javascript("0", …)`. The map signal fires on first show AND on every re-show after unmap; the no-op JS evaluate kicks the JS scheduler same way dev-tools-attach does, so WebKit's compositor pushes the next frame to the new surface.
+
+```rust
+webview.connect_map(|wv| {
+    wv.evaluate_javascript("0", None, None, gtk4::gio::Cancellable::NONE, |_| {});
+});
+```
+
+Applied at `turm-linux/src/plugin_panel.rs` (per-panel) and `turm-linux/src/webview.rs` (generic webview panel).
+
 ---
 
 ## macOS App Issues

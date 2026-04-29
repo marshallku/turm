@@ -1,0 +1,9 @@
+# Session 651aae9c — additional turn since last session review
+
+## What's new since last session review (e338683)
+- **8b382ac**: WebKit panel freeze on Hyprland workspace switch fix. User reproduced live: open plugin panel → Hyprland workspace switch out → switch back → panel stuck on last frame. Right-click → Inspect Element revives every time. Confirmed via direct probing that backend is healthy (discord.auth_status returns in 60ms, both `WebKitWebProcess` PIDs alive, NetworkProcess + xdg-dbus-proxy alive). So the failure is rendering-only: WebKit's compositor doesn't push a frame to the new GdkSurface after wl_surface remap. Fix: hook `webview.connect_map(|wv| wv.evaluate_javascript("0", …))` on both `plugin_panel.rs` and `webview.rs` to nudge the JS scheduler on every map, which schedules layout+paint. Empirically equivalent to what dev-tools-attach does. Plus a troubleshooting.md entry.
+
+## Codex round on this single fix: APPROVED, no findings.
+
+## End-of-turn check
+Working tree clean. All four prior session commits + this one pushed. Reviewer should look at coherence — the new `connect_map` block sits inline with the 78ebdb1 diagnostic signal hooks, sharing the same panel_label and same one-line eprintln pattern for log correlation. No conflict with the prior prewarm fix (window.rs, hidden 1×1 webview): prewarm warms host-side daemons before any panel opens; this map nudge handles per-panel post-remap rendering. Different mechanisms, different failure modes, no overlap.

@@ -306,6 +306,42 @@ impl PluginPanel {
             });
         }
 
+        // Wayland surface re-map workaround: when the window comes
+        // back from a Hyprland (or other wlroots compositor)
+        // workspace switch, the GdkSurface that GTK4 hands the
+        // WebKitWebView is fresh, but WebKit's compositor doesn't
+        // always push a frame to it — the panel renders the last
+        // frame from the OLD surface and stays frozen until
+        // something forces a JS context tick (opening WebInspector,
+        // clicking inside, dispatching an event, etc.). Symptom is
+        // user-reported: open panel → switch Hyprland workspace →
+        // come back → panel frozen on last frame; right-click →
+        // Inspect Element revives it because dev-tools attach
+        // schedules a JS task. Same root cause is tracked upstream
+        // in webkit2gtk/wpebackend-fdo wayland-compositor remap
+        // handling; not Hyprland-specific (any compositor that
+        // toggles wl_surface visibility on workspace change can
+        // hit it).
+        //
+        // The fix is mechanical: on `map` (widget becomes visible
+        // — fires on first show AND on every re-show after unmap)
+        // run a trivial `evaluate_javascript` so the JS scheduler
+        // wakes up, which schedules layout + paint, which makes
+        // WebKit push a frame to the new surface. Cost is
+        // microseconds; expression has no side effect on JS state.
+        //
+        // Distinct from the cold-boot prewarm (window.rs) — that
+        // one warms host-side daemons before any panel opens; this
+        // one fixes a per-panel frozen-frame after the panel is
+        // already alive.
+        {
+            let label = panel_label.clone();
+            webview.connect_map(move |wv| {
+                wv.evaluate_javascript("0", None, None, gtk4::gio::Cancellable::NONE, |_| {});
+                eprintln!("[panel:{label}] map: nudged compositor");
+            });
+        }
+
         webview.load_uri(&uri);
 
         // Forward events from EventBus to webview JS

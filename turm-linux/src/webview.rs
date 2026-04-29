@@ -74,6 +74,17 @@ impl WebViewPanel {
         // pages paint their own solid bg so this is a no-op visually
         // for them; the consistency only matters for blank/about: pages.
         webview.set_background_color(&gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
+
+        // Wayland surface re-map workaround — see plugin_panel.rs's
+        // matching `connect_map` for the full explanation. Symptom:
+        // Hyprland workspace switch leaves the webview frozen on the
+        // last frame; opening WebInspector revives it. Fix: nudge
+        // the JS scheduler on every map so the compositor pushes a
+        // new frame to the new GdkSurface.
+        webview.connect_map(|wv| {
+            wv.evaluate_javascript("0", None, None, gtk4::gio::Cancellable::NONE, |_| {});
+        });
+
         webview.load_uri(url);
 
         // -- Toolbar --
