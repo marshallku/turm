@@ -306,39 +306,67 @@ impl PluginPanel {
             });
         }
 
-        // Wayland surface re-map workaround: when the window comes
-        // back from a Hyprland (or other wlroots compositor)
-        // workspace switch, the GdkSurface that GTK4 hands the
-        // WebKitWebView is fresh, but WebKit's compositor doesn't
-        // always push a frame to it — the panel renders the last
-        // frame from the OLD surface and stays frozen until
-        // something forces a JS context tick (opening WebInspector,
-        // clicking inside, dispatching an event, etc.). Symptom is
-        // user-reported: open panel → switch Hyprland workspace →
-        // come back → panel frozen on last frame; right-click →
-        // Inspect Element revives it because dev-tools attach
-        // schedules a JS task. Same root cause is tracked upstream
-        // in webkit2gtk/wpebackend-fdo wayland-compositor remap
-        // handling; not Hyprland-specific (any compositor that
-        // toggles wl_surface visibility on workspace change can
-        // hit it).
+        // Wayland workspace-switch freeze workaround. Symptom:
+        // user opens a plugin panel → switches Hyprland workspace
+        // away → comes back → panel is stuck on the last frame
+        // (backend healthy, WebProcess alive, only rendering is
+        // frozen). Recovers when the user opens dev-tools, clicks
+        // inside, OR focuses another window and comes back. The
+        // last clue is the load-bearing one: refocusing turm
+        // through a focus path revives it.
         //
-        // The fix is mechanical: on `map` (widget becomes visible
-        // — fires on first show AND on every re-show after unmap)
-        // run a trivial `evaluate_javascript` so the JS scheduler
-        // wakes up, which schedules layout + paint, which makes
-        // WebKit push a frame to the new surface. Cost is
-        // microseconds; expression has no side effect on JS state.
+        // Round 1 of this fix hooked `connect_map` thinking
+        // Hyprland would unmap/remap the wl_surface on workspace
+        // change. It doesn't — wlroots scene-graph hides the
+        // surface without unmapping, so `map` never fires for the
+        // workspace toggle. Round 2 (this) hooks the toplevel
+        // window's `is-active` notify, which DOES toggle on
+        // workspace switch (the focused window changes when the
+        // active workspace changes). When `is_active` flips back
+        // to true (= turm window regained focus, whether via
+        // focus-back or workspace-switch-back), nudge the JS
+        // scheduler with a trivial evaluate so WebKit's compositor
+        // schedules layout + paint and pushes a fresh frame.
+        //
+        // Same-window focus changes already self-recover without
+        // code, because GTK's natural focus handling on the
+        // WebView itself triggers redraws when widget focus
+        // arrives. Workspace switches leave the WebView focused
+        // throughout (only the toplevel's `is_active` changes), so
+        // widget-level focus doesn't fire — that's why we hook the
+        // toplevel.
+        //
+        // We connect through `connect_realize` because the widget's
+        // `root()` (= toplevel window) is only valid once the
+        // widget is in the window tree. Realization fires once for
+        // the panel's lifetime, so this installs exactly one
+        // is_active handler per panel.
         //
         // Distinct from the cold-boot prewarm (window.rs) — that
-        // one warms host-side daemons before any panel opens; this
-        // one fixes a per-panel frozen-frame after the panel is
+        // warms host-side daemons before any panel opens; this
+        // recovers a per-panel frozen-frame after the panel is
         // already alive.
         {
             let label = panel_label.clone();
-            webview.connect_map(move |wv| {
-                wv.evaluate_javascript("0", None, None, gtk4::gio::Cancellable::NONE, |_| {});
-                eprintln!("[panel:{label}] map: nudged compositor");
+            webview.connect_realize(move |wv| {
+                let Some(root) = wv.root() else { return };
+                let Some(window) = root.downcast_ref::<gtk4::Window>() else {
+                    return;
+                };
+                let wv_for_handler = wv.clone();
+                let label_for_handler = label.clone();
+                window.connect_is_active_notify(move |w| {
+                    if w.is_active() {
+                        wv_for_handler.evaluate_javascript(
+                            "0",
+                            None,
+                            None,
+                            gtk4::gio::Cancellable::NONE,
+                            |_| {},
+                        );
+                        eprintln!("[panel:{label_for_handler}] is_active=true: nudged compositor");
+                    }
+                });
             });
         }
 

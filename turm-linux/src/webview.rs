@@ -75,14 +75,31 @@ impl WebViewPanel {
         // for them; the consistency only matters for blank/about: pages.
         webview.set_background_color(&gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
 
-        // Wayland surface re-map workaround — see plugin_panel.rs's
-        // matching `connect_map` for the full explanation. Symptom:
-        // Hyprland workspace switch leaves the webview frozen on the
-        // last frame; opening WebInspector revives it. Fix: nudge
-        // the JS scheduler on every map so the compositor pushes a
-        // new frame to the new GdkSurface.
-        webview.connect_map(|wv| {
-            wv.evaluate_javascript("0", None, None, gtk4::gio::Cancellable::NONE, |_| {});
+        // Wayland workspace-switch freeze workaround — see
+        // plugin_panel.rs's matching `connect_realize → is_active`
+        // hook for the full explanation. Hyprland keeps the
+        // wl_surface mapped through workspace toggles (so `map`
+        // doesn't fire), but the toplevel window's `is_active`
+        // does flip on workspace change. When it flips back to
+        // true, nudge the JS scheduler so WebKit's compositor
+        // pushes a fresh frame.
+        webview.connect_realize(|wv| {
+            let Some(root) = wv.root() else { return };
+            let Some(window) = root.downcast_ref::<gtk4::Window>() else {
+                return;
+            };
+            let wv_for_handler = wv.clone();
+            window.connect_is_active_notify(move |w| {
+                if w.is_active() {
+                    wv_for_handler.evaluate_javascript(
+                        "0",
+                        None,
+                        None,
+                        gtk4::gio::Cancellable::NONE,
+                        |_| {},
+                    );
+                }
+            });
         });
 
         webview.load_uri(url);

@@ -101,19 +101,29 @@ WebProcess CRASHED
 
 ### Plugin/webview panel frozen on last frame after Hyprland workspace switch
 
-**Symptom:** Plugin panel (or any `webkit6::WebView`) renders fine on first show. User switches to a different Hyprland workspace (or any wlroots-compositor that toggles `wl_surface` visibility on workspace change), then comes back. Panel is stuck on the last frame — appears alive but doesn't repaint, doesn't respond to bus events visually. Right-clicking → "Inspect Element" instantly revives the panel.
+**Symptom:** Plugin panel (or any `webkit6::WebView`) renders fine on first show. User switches to a different Hyprland workspace, then comes back. Panel is stuck on the last frame — appears alive but doesn't repaint, doesn't respond to bus events visually. Right-clicking → "Inspect Element" instantly revives the panel; OR focusing another window and coming back also revives it.
 
-**Cause:** When the GTK4 toplevel surface gets unmapped (workspace switch out) and remapped (switch back), GTK gives the WebView a fresh `GdkSurface`, but WebKit's compositor doesn't always push a frame to it on its own. The dev-tools-attach revives it because attaching WebInspector schedules a JS task in the WebProcess, which in turn schedules layout + paint, which makes WebKit push to the new surface. Same root cause is tracked upstream in `webkit2gtk` / `wpebackend-fdo` Wayland-compositor remap handling — not Hyprland-specific (any compositor that toggles surface visibility on workspace change can hit it). Distinct from same-window focus loss (no surface change) and from cold-boot blank panel (different mechanism — see `bb9c1f1` prewarm).
+**Cause:** When Hyprland (or any wlroots-based compositor with scene-graph workspaces) switches workspace, the wl_surface is NOT unmapped — it's just hidden in the scene graph. So GTK4's `map` signal does NOT fire on workspace toggle. But WebKit's compositor still gets confused and stops pushing frames; opening dev tools revives it (dev-tools attach schedules a JS task → layout → paint), and so does focusing another window and coming back (the toplevel `is_active` toggles, GTK natural focus handling triggers a redraw).
 
-**Fix:** Hook the WebView's GTK4 `map` signal and run a trivial `evaluate_javascript("0", …)`. The map signal fires on first show AND on every re-show after unmap; the no-op JS evaluate kicks the JS scheduler same way dev-tools-attach does, so WebKit's compositor pushes the next frame to the new surface.
+The load-bearing distinction: same-window focus changes self-recover (because widget-level focus moves in/out of the WebView), but pure workspace switch keeps the WebView focused throughout — only the toplevel's `is_active` changes. So we hook at the toplevel level.
+
+**Fix (round 2 — round 1's `connect_map` did not work because `map` doesn't fire on Hyprland workspace toggle):** Hook the toplevel window's `is-active` notify. When `is_active` flips back to true (= turm window regained focus, whether via focus-back or workspace-switch-back), run a trivial `evaluate_javascript("0", …)` on the WebView so the JS scheduler kicks WebKit into pushing a fresh frame. Connect through `connect_realize` because the widget's `root()` (= toplevel window) is only valid once the widget is in the window tree.
 
 ```rust
-webview.connect_map(|wv| {
-    wv.evaluate_javascript("0", None, None, gtk4::gio::Cancellable::NONE, |_| {});
+webview.connect_realize(|wv| {
+    let Some(root) = wv.root() else { return };
+    let Some(window) = root.downcast_ref::<gtk4::Window>() else { return };
+    let wv2 = wv.clone();
+    window.connect_is_active_notify(move |w| {
+        if w.is_active() {
+            wv2.evaluate_javascript("0", None, None,
+                gtk4::gio::Cancellable::NONE, |_| {});
+        }
+    });
 });
 ```
 
-Applied at `turm-linux/src/plugin_panel.rs` (per-panel) and `turm-linux/src/webview.rs` (generic webview panel).
+Applied at `turm-linux/src/plugin_panel.rs` (per-panel) and `turm-linux/src/webview.rs` (generic webview panel). Distinct from cold-boot blank panel (different mechanism — see commit `bb9c1f1` prewarm).
 
 ---
 
