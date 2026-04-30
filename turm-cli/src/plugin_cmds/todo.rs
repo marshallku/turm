@@ -147,6 +147,15 @@ pub enum TodoCommand {
         #[arg(long)]
         workspace: Option<String>,
     },
+    /// Show full Todo with linked-entity expansion (kb previews,
+    /// linked Jira/Slack list)
+    Show {
+        /// Todo id (full id or unique prefix)
+        id: String,
+        /// Scope id resolution to this workspace
+        #[arg(long)]
+        workspace: Option<String>,
+    },
 }
 
 /// Top-level dispatch. Performs id-prefix resolution where needed,
@@ -269,7 +278,276 @@ pub fn dispatch(cmd: &TodoCommand, socket_path: &str, json_out: bool) -> i32 {
                 |_| println!("deleted {} (ws={})", r.id, r.workspace),
             )
         }
+        TodoCommand::Show { id, workspace } => {
+            show(socket_path, id, workspace.as_deref(), json_out)
+        }
     }
+}
+
+/// `turmctl todo show <id>` — full Todo + linked-entity expansion.
+///
+/// Composes existing actions, no new plugin work:
+/// 1. Resolve id via the same preflight `todo.list` used by set/start/delete.
+/// 2. For each `linked_kb` entry: call `kb.read {id}` (best-effort,
+///    swallow per-entry errors). First few lines rendered as a
+///    preview in human mode; `--json` returns full content.
+/// 3. `linked_jira` would fan out to `jira.get_ticket` once Phase 16
+///    ships; until then we render the keys verbatim.
+/// 4. `linked_slack` permalinks rendered as-is — no fan-out (no
+///    cheap "read message body" action that doesn't burn rate
+///    limit; user can click the permalink).
+/// 5. Timeline (todo.changed / todo.completed / todo.start_requested
+///    history) waits on Phase 19.2c's `event.history` ring buffer —
+///    until then there's no socket-callable history surface.
+fn show(
+    socket_path: &str,
+    id_or_prefix: &str,
+    workspace_filter: Option<&str>,
+    json_out: bool,
+) -> i32 {
+    let r = match resolve_id(socket_path, id_or_prefix, workspace_filter) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    // Re-fetch the full todo from the resolved id. The preflight in
+    // `resolve_id` already pulled `todo.list`, but it discards
+    // everything except `id` and `workspace`; doing one more list
+    // (filtered by workspace) is cheaper than threading the full
+    // object through and doesn't depend on `resolve_id`'s internal
+    // shape.
+    let todo = match find_todo(socket_path, &r.id, &r.workspace) {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+    let linked_kb_arr = todo
+        .get("linked_kb")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut kb_entries: Vec<KbEntry> = Vec::new();
+    for kb_id in &linked_kb_arr {
+        if let Some(kb_id_str) = kb_id.as_str() {
+            let resp = call_one(socket_path, "kb.read", json!({ "id": kb_id_str }));
+            kb_entries.push((kb_id_str.to_string(), resp));
+        }
+    }
+
+    if json_out {
+        let kb_json: Vec<Value> = kb_entries
+            .iter()
+            .map(|(id, res)| match res {
+                // Pass through the full kb.read payload (content +
+                // frontmatter + path + whatever else the plugin
+                // adds in future) so scripts piping
+                // `--json` get the same data as a direct
+                // `turmctl call kb.read` would.
+                Ok(v) => {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("id".into(), Value::String(id.clone()));
+                    obj.insert("ok".into(), Value::Bool(true));
+                    if let Value::Object(payload) = v {
+                        for (k, v) in payload {
+                            obj.insert(k.clone(), v.clone());
+                        }
+                    }
+                    Value::Object(obj)
+                }
+                Err((code, msg)) => json!({ "id": id, "ok": false, "code": code, "message": msg }),
+            })
+            .collect();
+        let aggregate = json!({
+            "todo": todo,
+            "linked_kb_resolved": kb_json,
+        });
+        println!("{}", serde_json::to_string_pretty(&aggregate).unwrap());
+        return 0;
+    }
+
+    render_show(&todo, &kb_entries);
+    0
+}
+
+/// Pull the full todo object from `todo.list` (workspace-filtered)
+/// by id. Returns the Value for the matching entry, or an error
+/// exit code after printing a diagnostic.
+fn find_todo(socket_path: &str, id: &str, workspace: &str) -> Result<Value, i32> {
+    let resp =
+        match client::send_command(socket_path, "todo.list", json!({ "workspace": workspace })) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Error: todo.list failed: {e}");
+                return Err(1);
+            }
+        };
+    if !resp.ok {
+        let err = resp
+            .error
+            .map(|e| format!("[{}] {}", e.code, e.message))
+            .unwrap_or_default();
+        eprintln!("Error: todo.list failed: {err}");
+        return Err(1);
+    }
+    let arr = resp
+        .result
+        .and_then(|v| v.get("todos").and_then(Value::as_array).cloned())
+        .unwrap_or_default();
+    arr.into_iter()
+        .find(|t| t.get("id").and_then(Value::as_str) == Some(id))
+        .ok_or_else(|| {
+            eprintln!("Error: todo {id} disappeared between resolve and fetch (concurrent edit?)");
+            1
+        })
+}
+
+/// Single one-shot action call used by the linked-entity fan-out.
+/// Distinct from `call_and_render` because we don't want to print
+/// or exit on per-call failure — `show` aggregates and renders all
+/// at once.
+fn call_one(socket_path: &str, method: &str, params: Value) -> Result<Value, (String, String)> {
+    let resp = client::send_command(socket_path, method, params)
+        .map_err(|e| ("transport_error".to_string(), e.to_string()))?;
+    if resp.ok {
+        Ok(resp.result.unwrap_or(Value::Null))
+    } else {
+        Err(resp
+            .error
+            .map(|e| (e.code, e.message))
+            .unwrap_or_else(|| ("unknown".into(), String::new())))
+    }
+}
+
+type KbEntry = (String, Result<Value, (String, String)>);
+
+fn render_show(todo: &Value, kb_entries: &[KbEntry]) {
+    let id = todo.get("id").and_then(Value::as_str).unwrap_or("?");
+    let title = todo.get("title").and_then(Value::as_str).unwrap_or("");
+    let status = todo.get("status").and_then(Value::as_str).unwrap_or("?");
+    let priority = todo.get("priority").and_then(Value::as_str).unwrap_or("?");
+    let workspace = todo.get("workspace").and_then(Value::as_str).unwrap_or("?");
+    let icon = status_icon(status);
+
+    println!("{icon} {id}  {title}");
+    println!("  status={status}  priority={priority}  workspace={workspace}");
+
+    if let Some(due) = todo.get("due").and_then(Value::as_str)
+        && !due.is_empty()
+    {
+        println!("  due {due}");
+    }
+    if let Some(tags) = todo.get("tags").and_then(Value::as_array)
+        && !tags.is_empty()
+    {
+        let names: Vec<String> = tags
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
+        if !names.is_empty() {
+            println!("  tags {}", names.join(", "));
+        }
+    }
+    if let Some(jira) = todo.get("linked_jira").and_then(Value::as_str)
+        && !jira.is_empty()
+    {
+        // jira.get_ticket fan-out lands once Phase 16 ships; until
+        // then we just surface the key.
+        println!("  jira {jira}");
+    }
+    if let Some(slack) = todo.get("linked_slack").and_then(Value::as_array)
+        && !slack.is_empty()
+    {
+        // `linked_slack` is `Vec<Value>` per the todo schema —
+        // entries can be permalink strings OR structured objects
+        // (e.g. `{team, channel, ts}` matching the slack.reaction
+        // payload shape). Render strings verbatim; flatten objects
+        // to `key=value` pairs; fall back to JSON for anything else.
+        println!("  slack");
+        for s in slack {
+            match s {
+                Value::String(p) => println!("    {p}"),
+                Value::Object(map) => {
+                    let pairs: Vec<String> = map
+                        .iter()
+                        .map(|(k, v)| match v {
+                            Value::String(s) => format!("{k}={s}"),
+                            other => format!("{k}={other}"),
+                        })
+                        .collect();
+                    println!("    {}", pairs.join("  "));
+                }
+                other => println!("    {other}"),
+            }
+        }
+    }
+    let body = todo.get("body").and_then(Value::as_str).unwrap_or("");
+    if !body.is_empty() {
+        println!();
+        println!("body");
+        for line in body.lines() {
+            println!("  {line}");
+        }
+    }
+    let prompt = todo.get("prompt").and_then(Value::as_str).unwrap_or("");
+    if !prompt.is_empty() {
+        println!();
+        println!("prompt");
+        for line in prompt.lines() {
+            println!("  {line}");
+        }
+    }
+    if !kb_entries.is_empty() {
+        println!();
+        println!("linked_kb");
+        for (kb_id, res) in kb_entries {
+            match res {
+                Ok(v) => {
+                    let content = v.get("content").and_then(Value::as_str).unwrap_or("");
+                    // Strip frontmatter for the preview — the user
+                    // came here for body content, not metadata they
+                    // already see in the kb file itself.
+                    let preview = strip_frontmatter(content);
+                    println!("  {kb_id}");
+                    let mut shown = 0;
+                    for line in preview.lines() {
+                        if shown >= 5 {
+                            println!("    …");
+                            break;
+                        }
+                        let trimmed = line.trim_end();
+                        if trimmed.is_empty() && shown == 0 {
+                            // Skip leading blank lines after frontmatter
+                            continue;
+                        }
+                        println!("    {trimmed}");
+                        shown += 1;
+                    }
+                }
+                Err((code, msg)) => {
+                    println!("  {kb_id}  ({code}: {msg})");
+                }
+            }
+        }
+    }
+}
+
+/// Strip a leading `---\n...\n---\n` YAML frontmatter block. Returns
+/// the input unchanged if no frontmatter is present.
+fn strip_frontmatter(content: &str) -> &str {
+    if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
+        return content;
+    }
+    let after_open = content
+        .split_once('\n')
+        .map(|(_, rest)| rest)
+        .unwrap_or(content);
+    if let Some(close_idx) = after_open.find("\n---\n") {
+        let after_close = &after_open[close_idx + 5..];
+        return after_close.trim_start_matches('\n');
+    }
+    if let Some(close_idx) = after_open.find("\n---\r\n") {
+        let after_close = &after_open[close_idx + 6..];
+        return after_close.trim_start_matches('\n');
+    }
+    content
 }
 
 fn set_status(

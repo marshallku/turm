@@ -97,6 +97,7 @@ Ergonomic wrapper over the `todo.*` action surface. Every subcommand is sugar ov
 - `turmctl todo done <id> [--workspace <ws>]` / `doing <id> [...]` / `block <id> [...]` — shorthands for `set --status done|in_progress|blocked`.
 - `turmctl todo start <id> [--workspace <ws>]` — wraps `todo.start` (publishes `todo.start_requested` for the vision-flow-3 chain).
 - `turmctl todo delete <id> [--workspace <ws>]` — wraps `todo.delete`.
+- `turmctl todo show <id> [--workspace <ws>]` (Phase 19.2b) — full Todo + linked-entity expansion. Composes `todo.list` (workspace-filtered, then id-pick) + `kb.read` for each `linked_kb` entry. Renders title / status / priority / tags / body / prompt + a 5-line preview per linked KB note (frontmatter stripped). `linked_jira` shows the key verbatim until Phase 16's `jira.get_ticket` lands; `linked_slack` permalinks render as-is. `--json` returns the aggregate as one object (todo payload + per-kb resolution status).
 
 **ID prefix matching**: every `<id>` argument accepts a unique prefix. The CLI preflights `todo.list` to find candidates and resolves the workspace alongside, so a todo in a non-default workspace works without the user passing `--workspace`. Todo ids are workspace-scoped (not globally unique) — if the same id exists in multiple workspaces, the CLI errors out with the candidate list and the user disambiguates via `--workspace <ws>` (or a longer prefix). Exact-id collisions are NOT silently resolved.
 
