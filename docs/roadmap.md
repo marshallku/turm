@@ -571,6 +571,44 @@ User-explicit gap. The plugin landscape (Todo / KB / Calendar / Slack / Jira / G
 - [ ] **Bus-history retention** (`event.history`): Phase 19.2's `turmctl recent` needs `EventBus` to keep a bounded ring buffer. Trivial implementation; tracked here so the turn isn't surprised when the action shows up.
 - [ ] **CLI as a panel surface**: a longer arc — let the CLI render the same kanban Todo board (text-mode), full-screen, when invoked as `turmctl todo board`. Useful in SSH sessions where the GUI panel isn't reachable. Out of scope for 19.1/19.2; flagged here so the subcommand layout stays consistent if we do it later.
 
+### Phase 19.3: Bookmark plugin (URL → KB note + auto-link)
+
+User-explicit gap. The browser-bookmark experience ("save this for later, retrieve by topic, surface related notes") doesn't have a turm equivalent today — `kb.append` is too low-level for a one-shot URL drop, and there's no fetch/extraction layer. New plugin `turm-plugin-bookmark` slots into the existing pattern: filesystem-source-of-truth under `~/docs/bookmarks/`, action surface composes with `kb.search`, optional thin `/bookmark` slash skill in `~/dotfiles/claude/` for conversational capture.
+
+**Hardened decisions** (post codex round 1, see plan archive at `/tmp/turm-bookmark-plan.md` while it's hot):
+
+- ID is `sha1(canonical_url)[..8]`. Filename `<urlhash8>-<slug>.md`. Re-adding the same canonical URL is idempotent.
+- URL canonicalization (`canonical.rs`): scheme allow-list (http/https), lowercase host, strip fragment, strip tracking params (`utm_*`, `gclid`, `fbclid`, `mc_cid`, `mc_eid`, `ref`). No redirect chasing — that's a fetch concern.
+- Storage at `~/docs/bookmarks/YYYY-MM/<urlhash8>-<slug>.md`. **No on-disk index** — `bookmark.list` re-derives from the filesystem on every call (todo/kb pattern). Vim/`mv`/`rm` safe.
+- Async fetch (BM-2) is **race-safe**: `bookmark.add` writes the queued stub, records `sha1(file_bytes)`. The fetch worker only overwrites the body if `sha1(file_bytes)` still matches at write time — a vim edit between add and fetch is preserved.
+- Linker target surface (BM-3) is an **allow-list**, not "everything except". Default `LINKING_TARGETS = ["topics/", "projects/", "weekly/", "monthly/"]`; configurable via `TURM_BOOKMARK_LINK_DIRS`. Excludes `bookmarks/` (no self-reference) and `todos/`/`daily/`/etc. (ephemeral).
+- Fetch guardrails (BM-2): http(s) only, 20s deadline, 5MiB body cap, Content-Type allow-list (`text/html`, `application/xhtml+xml`, `text/plain`), 5 redirects max, `User-Agent: turm-bookmark/0.1`.
+- Harness coupling: `~/dotfiles/claude/.claude/skills/bookmark/SKILL.md` (BM-5) is a **thin slash skill** that calls `turmctl bookmark add`. When the socket is unreachable it drops a stub at `~/docs/bookmarks/inbox/<urlhash8>.url` for the next `turmctl bookmark drain`. No duplication of plugin logic in shell.
+
+**Phase 19.3 — BM-1 (shipped):**
+
+- [x] **`turm-plugin-bookmark` workspace member**. Crate skeleton (`Cargo.toml` deps: `serde`, `serde_json`, `chrono`, `sha1`, `url`, `libc`), stdio JSON dispatcher (mirrors `turm-plugin-kb`), Linux-only compile guard.
+- [x] **URL canonicalization module** (`canonical.rs`, ~180 LOC). Tracking-param stripping, scheme allow-list, urlhash8 derivation. 9 unit tests.
+- [x] **Filesystem store** (`store.rs`, ~370 LOC). Path-safety primitives mirror kb/todo (canonicalize root + per-path re-validation, hidden-dir skip, no symlink descent). Atomic create via temp+rename. Slug generator (Unicode-alphanumeric, ≤60 chars, CJK preserved). 11 unit tests.
+- [x] **Frontmatter parser** (`frontmatter.rs`, ~280 LOC). Reads inline + block-style YAML lists, writes inline; canonical key order on write so vim diffs stay clean. 8 unit tests.
+- [x] **Action handlers** (`bookmark.rs`, dispatcher). Provides `bookmark.add` / `bookmark.list` / `bookmark.show` / `bookmark.delete`. ID-prefix resolution with ambiguous-prefix error reporting. URL-form auto-detection in `show`/`delete` (`http(s)://...` routes as `{url}` instead of `{id}`).
+- [x] **Plugin manifest** at `examples/plugins/bookmark/plugin.toml`. `onAction:bookmark.*` activation (no panel/watcher in BM-1; BM-2 may flip to `onStartup` for the fetch worker).
+- [x] **`turmctl bookmark` wrapper** (`turm-cli/src/plugin_cmds/bookmark.rs`, ~225 LOC). Subcommands: `add`, `list`, `show`, `delete`. Default human render + `--json` raw. Same Phase 19.1 pattern as `turmctl todo` / `turmctl git`.
+- [x] **Rule of Three refactor**: `call_and_render` extracted from `todo.rs` + `git.rs` to `plugin_cmds/mod.rs` (third copy was bookmark.rs's draft); now shared.
+
+**Phase 19.3 — remaining slices:**
+
+- [ ] **BM-2 — async fetch + extraction**: spawn a worker thread on `bookmark.add` (not waited for; action returns immediately with `status: queued`). Fetch via `ureq` with the guardrails above; extract readable content via `readable-readability`. Race-safe overwrite — only writes body if `sha1(file_bytes)` matches the recorded stub hash, otherwise preserves user edits and updates only `status` to `user_edited`. Adds `bookmark.refresh` (re-fetch on demand).
+- [ ] **BM-3 — keyword linker** (Phase A linking, see plan): on extraction, derive top-N keywords (TF + stoplist), call `kb.search` for each scoped to `LINKING_TARGETS`, intersect, write top 5 paths into `linked_kb` frontmatter. Adds `bookmark.related` (read linked_kb), `bookmark.relink` (re-run linker — write-once with explicit user opt-in to recompute).
+- [ ] **BM-4 — HTML panel**. Aesthetic match: same Iosevka/Catppuccin-mocha vars used in slack/discord. Sections: add bar (URL + tags), feed (recent bookmarks with status dot), detail drawer (full extracted body + linked_kb expansion via `kb.read` fan-out, mirrors `turmctl todo show` pattern).
+- [ ] **BM-5 — `/bookmark` harness slash skill + `bookmark.drain`**. Thin shell over `turmctl bookmark add`. Offline fallback drops stubs at `~/docs/bookmarks/inbox/<urlhash8>.url` (one URL per line, optional `tags=` lines); `turmctl bookmark drain` reads + deletes them on next turm-up. New action `bookmark.drain` listed but not in BM-1's `provides`.
+- [ ] **BM-6 — embeddings (optional, only if BM-3 is insufficient)**: local ONNX via `fastembed-rs` (BGE-small-en, ~30MB, lazy download on first `bookmark.relink-embeddings`). Sidecar at `~/docs/.turm-cache/embeddings.bin` (binary, NOT under `~/docs` git tree). Defer until keyword linker has been used in anger and demonstrably misses.
+
+**Out of scope for Phase 19.3, ever (or until a real demand surfaces):**
+
+- Browser extension / HTTP shim. v1 capture is "paste URL into terminal" or `/bookmark` slash. A future browser extension can use the `xdg-open turm://bookmark/add?url=...` URL-handler pathway without turm needing to expose HTTP.
+- Slack/Discord forward → bookmark integration. Confirmed not needed; if it ever is, `bookmark.add { source: "forward-slack" }` is forward-compatible without a plugin change.
+
 ### Phase 20: Discord plugin
 
 User-explicit gap. Same shape as Slack (Phase 11) — a long-lived WebSocket plugin that emits messenger events into the bus. Discord's Gateway protocol is more involved than Slack's Socket Mode (explicit heartbeat, IDENTIFY/RESUME OP codes, intents declaration), but the plugin's external surface mirrors Slack: `<plugin> auth` one-time CLI, keyring-backed token store, `onStartup` activation, `discord.message` / `discord.mention` / `discord.dm` events plus `discord.send_message` action.

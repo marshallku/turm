@@ -1,0 +1,27 @@
+[plugin]
+name = "bookmark"
+title = "Bookmarks"
+version = "0.1.0"
+description = "URL → KB note. Captures bookmarks under ~/docs/bookmarks/YYYY-MM/<urlhash8>-<slug>.md (override root with TURM_BOOKMARK_ROOT). Filesystem is the source of truth — vim/git-edit safe."
+
+[[services]]
+name = "main"
+exec = "turm-plugin-bookmark"
+# onAction (not onStartup) for BM-1 — no watcher / no events yet.
+# BM-2 may flip this to onStartup once a background fetch worker
+# wants to drain queued URLs without an explicit action call.
+activation = "onAction:bookmark.*"
+restart = "on-crash"
+provides = [
+    "bookmark.add",
+    "bookmark.list",
+    "bookmark.show",
+    "bookmark.delete",
+]
+subscribes = []
+# Optional env:
+#   TURM_BOOKMARK_ROOT (default ~/docs/bookmarks)
+
+# No [[panels]] yet — BM-4 will add panel.html. Until then,
+# `turmctl plugin open bookmark` would fail; use `turmctl bookmark`
+# subcommands or `turmctl call bookmark.<action>` instead.

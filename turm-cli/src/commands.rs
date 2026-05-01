@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
+use crate::plugin_cmds::bookmark::BookmarkCommand;
 use crate::plugin_cmds::git::GitCommand;
 use crate::plugin_cmds::todo::TodoCommand;
 
@@ -87,6 +88,11 @@ pub enum Command {
     /// table renderers for workspaces / worktrees / status)
     #[command(subcommand)]
     Git(GitCommand),
+
+    /// Bookmark plugin shortcuts (BM-1 — wraps `bookmark.*` actions
+    /// for URL → KB note capture with urlhash8 prefix resolution)
+    #[command(subcommand)]
+    Bookmark(BookmarkCommand),
 
     /// Status bar management
     #[command(subcommand)]
@@ -526,6 +532,9 @@ impl Cli {
             Command::Git(_) => {
                 unreachable!("git commands are dispatched via plugin_cmds::git")
             }
+            Command::Bookmark(_) => {
+                unreachable!("bookmark commands are dispatched via plugin_cmds::bookmark")
+            }
             Command::Call { method, .. } => method.clone(),
         }
     }
@@ -635,6 +644,9 @@ impl Cli {
             }
             Command::Git(_) => {
                 unreachable!("git commands are dispatched via plugin_cmds::git")
+            }
+            Command::Bookmark(_) => {
+                unreachable!("bookmark commands are dispatched via plugin_cmds::bookmark")
             }
             Command::Call { params, .. } => {
                 serde_json::from_str(params).unwrap_or_else(|_| json!({}))

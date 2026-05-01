@@ -15,6 +15,45 @@
 //! prefix-resolution rules, output formats — without bloating
 //! `commands.rs`.
 
+pub mod bookmark;
 pub mod context;
 pub mod git;
 pub mod todo;
+
+use serde_json::Value;
+
+use crate::client;
+
+/// Shared one-shot "call action, render response" entrypoint for the
+/// per-plugin CLI wrappers. Returns the process exit code (0 on
+/// success, 1 on transport error or `ok: false` response). On JSON
+/// mode dumps `result` as pretty JSON; otherwise calls the supplied
+/// human renderer with the parsed `result`.
+pub fn call_and_render(
+    socket_path: &str,
+    method: &str,
+    params: Value,
+    json_out: bool,
+    human: impl FnOnce(&Value),
+) -> i32 {
+    let resp = match client::send_command(socket_path, method, params) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to connect: {e}");
+            return 1;
+        }
+    };
+    if !resp.ok {
+        if let Some(err) = resp.error {
+            eprintln!("Error [{}]: {}", err.code, err.message);
+        }
+        return 1;
+    }
+    let result = resp.result.unwrap_or(Value::Null);
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    } else {
+        human(&result);
+    }
+    0
+}

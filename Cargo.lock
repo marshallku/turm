@@ -2752,6 +2752,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "turm-plugin-bookmark"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "url",
+]
+
+[[package]]
 name = "turm-plugin-calendar"
 version = "0.1.0"
 dependencies = [

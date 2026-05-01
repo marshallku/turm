@@ -46,6 +46,9 @@ fn main() {
     if let Command::Git(cmd) = &cli.command {
         std::process::exit(plugin_cmds::git::dispatch(cmd, &socket_path, cli.json));
     }
+    if let Command::Bookmark(cmd) = &cli.command {
+        std::process::exit(plugin_cmds::bookmark::dispatch(cmd, &socket_path, cli.json));
+    }
     // Phase 19.2 context aggregator. Bypass to the new dispatcher
     // unless the user is explicitly asking for the raw legacy shape
     // (`--json` without `--full`) — that path stays on the generic

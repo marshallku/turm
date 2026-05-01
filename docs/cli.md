@@ -114,6 +114,19 @@ Ergonomic wrapper over the `git.*` action surface. Every subcommand is sugar ove
 
 **Workspace defaulting** (every command except `workspaces`, `wt remove`, `status --path`): explicit `--workspace` flag → `TURM_GIT_DEFAULT_WORKSPACE` env → cwd-derived (preflights `git.list_workspaces` and matches the longest prefix of the cwd against either the workspace's `path` OR its `worktree_root`, so `cd` into a created worktree under `<repo>-worktrees/<branch>` resolves correctly) → single-config-entry → error with the candidate list. The cwd-derive is the killer ergonomic — `cd` into a worktree, run `turmctl git status`, get the right answer.
 
+### Bookmark (Phase 19.3 — BM-1)
+
+Ergonomic wrapper over the `bookmark.*` action surface. Captures URLs into `~/docs/bookmarks/YYYY-MM/<urlhash8>-<slug>.md` (override root with `TURM_BOOKMARK_ROOT`). Filesystem is the source of truth — no on-disk index, vim/git-edit safe. Every subcommand is sugar over `turmctl call bookmark.<name>`.
+
+- `turmctl bookmark add <url> [--title <t>] [--tags a,b] [--source <s>]` — wraps `bookmark.add`. Canonicalizes the URL server-side: tracking params stripped (`utm_*`, `gclid`, `fbclid`, `mc_cid`, `mc_eid`, `ref`), fragment dropped, host lowercased. Idempotent — re-adding the same canonical URL returns the existing entry with `existed: true`. ID is the first 8 hex chars of `sha1(canonical_url)`. Status starts at `queued`; BM-2 will add the fetch worker that transitions to `extracted`/`failed`.
+- `turmctl bookmark list [--status <s>] [--tag <t>] [--since <iso>] [--limit <n>]` — wraps `bookmark.list`. Default render: two lines per entry — `<id>  [<status>]  <title>` then `           <url>  tags=...`. Sorted newest-first by `captured_at`.
+- `turmctl bookmark show <id|url>` — wraps `bookmark.show`. Accepts a urlhash8 prefix (≥1 hex char) OR a full http(s) URL — the CLI auto-routes URL-shaped inputs as `{url: ...}`. Renders frontmatter + body.
+- `turmctl bookmark delete <id|url>` — wraps `bookmark.delete`. Same id-or-URL resolution as `show`.
+
+**ID resolution**: `<id>` is a prefix of the 8-char `urlhash8` identifier. Ambiguous prefix errors with the candidate list; pass a longer prefix or the full URL to disambiguate. Bookmarks are NOT workspace-scoped, so `urlhash8` collisions across the whole tree are the only ambiguity surface.
+
+**Out of scope for BM-1** (queued for later phases): async fetch + readability extraction (BM-2), keyword-based linking writing `linked_kb` frontmatter (BM-3), HTML panel (BM-4), harness `/bookmark` slash skill + offline `bookmark drain` for inbox (BM-5), embeddings-based similarity (BM-6, on demand only).
+
 ### Theme
 
 - `turmctl theme list` — list available themes and current theme
