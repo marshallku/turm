@@ -51,20 +51,37 @@ turm-macos/
 
 ## 빌드 및 실행
 
+### Dev 루프 (debug bundle, 임시)
+
 ```bash
-# 개발 중 빠른 테스트 (메뉴바 이름이 올바르지 않을 수 있음)
 cd turm-macos
-swift run
+swift run                # 빠른 테스트 — 메뉴바 이름 등이 올바르지 않을 수 있음
 
-# 제대로 된 .app 번들로 실행 (권장)
-./run.sh
-# → .build/debug/Turm.app 생성 후 open으로 실행
-
-# 빌드만
-swift build
+./run.sh                 # 권장: .build/debug/Turm.app 새로 만들고 open으로 실행
+swift build              # 빌드만
 ```
 
 `run.sh`는 매번 `Turm.app/Contents/Info.plist`를 포함한 번들을 새로 만들어서 `open`으로 실행합니다. Info.plist가 있어야 Dock 아이콘, 메뉴바 앱 이름 등이 정상 표시됩니다.
+
+### 영구 설치 (`/Applications`)
+
+```bash
+./scripts/install-macos.sh             # ~/Applications + ~/.cargo/bin/turmctl (no sudo)
+./scripts/install-macos.sh --system    # /Applications + ~/.cargo/bin/turmctl (sudo for /Applications)
+./scripts/install-macos.sh --launch    # 설치 후 바로 open
+./scripts/install-macos.sh --no-build  # 이미 .build/release/Turm 있을 때
+./scripts/install-macos.sh --no-turmctl # turmctl 재설치 스킵
+```
+
+설치 동작:
+1. `swift build -c release` → `turm-macos/.build/release/Turm` 생성
+2. `pkill -x Turm`로 실행 중 인스턴스 종료 (macOS는 실행 중 .app의 exec를 lock)
+3. tmp 디렉토리에 `.app` staging → `mv`로 atomic 설치 (실패해도 dest가 깨지지 않음)
+4. `cargo install --path turm-cli` → `~/.cargo/bin/turmctl`
+
+**왜 `cargo install`을 wrap하나:** `cargo install turm-cli` (crates.io 미배포)과 `cargo install --path .` (workspace 루트는 virtual manifest)는 모두 실패합니다. 올바른 형태는 `cargo install --path turm-cli`이고, 스크립트가 이걸 wrap합니다.
+
+**Info.plist 중복:** `run.sh`와 `install-macos.sh`가 동일 Info.plist를 인라인으로 포함합니다. 두 카피는 의도된 상태 (Rule of Three: 2회는 OK). 세 번째가 생기면 그때 템플릿화.
 
 ---
 

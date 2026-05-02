@@ -32,6 +32,17 @@ sudo pacman -S gtk4 vte4
 
 Install GTK4 and libvte-2.91-gtk4 from your distribution's package manager.
 
+### macOS
+
+Xcode Command Line Tools (for SwiftPM) and Rust (for `turmctl`).
+
+```bash
+xcode-select --install
+# https://rustup.rs for Rust
+```
+
+The macOS app targets macOS 14+. SwiftTerm is fetched as an SPM dep at build time.
+
 ## Build & Run
 
 ```bash
@@ -50,7 +61,7 @@ cargo run -p turm-cli -- <command>
 
 ## Install
 
-### From GitHub Releases (recommended)
+### Linux — From GitHub Releases (recommended)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/marshallku/turm/master/install.sh | bash
@@ -61,20 +72,33 @@ Options:
 - `--version v0.2.0` — install a specific version
 - `--system` — install to `/usr/local/bin` (requires sudo)
 
-### From source
+### Linux — From source
 
 ```bash
-cd turm-linux
-./install.sh
+./scripts/install-dev.sh           # build + install everything (sudo, /usr/local/bin)
+./scripts/install-dev.sh --user    # ~/.local/bin (no sudo)
+./scripts/install-dev.sh --restart # also pkill -x turm afterwards
 ```
 
-This builds a release binary and installs the desktop entry.
+This builds a release binary, installs the desktop entry, and lays down first-party plugins.
+
+### macOS — From source
+
+```bash
+./scripts/install-macos.sh             # ~/Applications + ~/.cargo/bin (no sudo)
+./scripts/install-macos.sh --system    # /Applications + ~/.cargo/bin (sudo for /Applications)
+./scripts/install-macos.sh --launch    # open Turm.app after installing
+```
+
+This builds the macOS app via SwiftPM (release config), installs `Turm.app`, and installs `turmctl` via `cargo install --path turm-cli` (the workspace root is a virtual manifest, so the more obvious `cargo install turm-cli` and `cargo install --path .` both fail — the script wraps the correct invocation).
+
+For dev iteration without installing, use `turm-macos/run.sh` (debug bundle under `.build/debug/Turm.app`, opened in place).
 
 ### Update
 
 ```bash
 turmctl update check    # check for new versions
-turmctl update apply    # download and install latest
+turmctl update apply    # download and install latest (Linux only — macOS users re-run install-macos.sh)
 ```
 
 ## Configuration

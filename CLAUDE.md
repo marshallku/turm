@@ -36,15 +36,23 @@ cargo run -p turm-cli -- <command>
 
 ## Local development install
 
-`install.sh` is for end users (downloads from GitHub Releases). For dev iteration on the working tree, use:
+`install.sh` is for end users on Linux (downloads from GitHub Releases). For dev iteration on the working tree, use:
 
 ```bash
+# Linux
 ./scripts/install-dev.sh           # cargo build --release + sudo install /usr/local/bin/{turm,turmctl} + plugins
 ./scripts/install-dev.sh --user    # ~/.local/bin instead of /usr/local/bin (no sudo)
 ./scripts/install-dev.sh --restart # also pkill -x turm afterwards
+
+# macOS
+./scripts/install-macos.sh             # swift build -c release + ~/Applications/Turm.app + ~/.cargo/bin/turmctl (no sudo)
+./scripts/install-macos.sh --system    # /Applications/Turm.app instead (sudo for /Applications)
+./scripts/install-macos.sh --launch    # open the installed .app afterwards
 ```
 
-Why this exists: `install.sh --system` puts turm at `/usr/local/bin/turm`. After that, `cargo build --release` only refreshes `target/release/turm` — the system binary stays at whatever Release version was last installed, so a fix in the working tree is silently shadowed when turm is launched via a desktop entry. The script also warns when `~/.local/bin/turm` and `/usr/local/bin/turm` are both present and differ.
+Why these exist:
+- **Linux**: `install.sh --system` puts turm at `/usr/local/bin/turm`. After that, `cargo build --release` only refreshes `target/release/turm` — the system binary stays at whatever Release version was last installed, so a fix in the working tree is silently shadowed when turm is launched via a desktop entry. The script also warns when `~/.local/bin/turm` and `/usr/local/bin/turm` are both present and differ.
+- **macOS**: `cargo install turm-cli` fails (not on crates.io) and `cargo install --path .` fails from the repo root (workspace virtual manifest). The `turm` GUI app is SwiftPM, not cargo. Before this script, `turm-macos/run.sh` was the only path and it only built an ephemeral debug bundle under `.build/debug/`. The script wraps `swift build -c release` + bundle layout + `cargo install --path turm-cli` so the user gets a real `/Applications`-style install.
 
 ## Install first-party plugins
 
