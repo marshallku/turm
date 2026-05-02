@@ -323,9 +323,9 @@ var commandHandler: ((_ method: String, _ params: [String: Any], _ completion: @
 
 ### Config.swift
 
-`~/.config/turm/config.toml`을 직접 파싱.
+`~/.config/turm/config.toml`을 `LebJe/TOMLKit` (SwiftPM dep, 0.6.0)으로 디코드. `TurmConfig.parse`가 `TOMLDecoder().decode(RawConfig.self, …)`로 private shadow 타입에 매핑하고, 누락된 섹션·키는 모두 optional이라 `?? defaults.X` fallback로 처리.
 
-**TOML 구조:**
+**TOML 구조 (현재 macOS가 디코드하는 키만):**
 ```toml
 [terminal]
 shell = "/bin/zsh"
@@ -334,9 +334,19 @@ font_size = 13
 
 [theme]
 name = "catppuccin-mocha"
+
+[background]
+path = "~/Pictures/wall.png"      # alias: image
+tint = 0.6
+opacity = 0.95
+
+[security]
+osc52 = "deny"                    # or "allow"
 ```
 
-파싱 규칙: `[section]` 헤더로 섹션 구분, 따옴표/인라인 주석 제거.
+Linux 쪽 schema의 `[tabs]`, `[statusbar]`, `[keybindings]`, `[[triggers]]`는 macOS가 아직 안 읽지만 TOMLKit이 unknown key를 silently 무시하므로 Linux 사용자가 같은 config 파일을 그대로 쓸 수 있음. malformed TOML은 stderr에 `[turm] config.toml parse failed: …`를 찍고 defaults로 fallback (crash 안 함).
+
+**snake_case 매핑:** TOMLKit 0.6에는 `keyDecodingStrategy`가 없어서 `font_family`, `font_size`만 `TerminalSection.CodingKeys`에서 명시적으로 매핑. 단일 단어 키는 그대로 둠.
 
 **기본 폰트:** `"JetBrains Mono"` — macOS에 기본 설치된 NSFont family 이름. Nerd Font 변형(`JetBrainsMono Nerd Font Mono`)은 별도 설치 필요하므로 기본값으로 쓰지 않습니다.
 

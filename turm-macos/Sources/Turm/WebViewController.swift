@@ -1,5 +1,5 @@
 import AppKit
-import WebKit
+@preconcurrency import WebKit
 
 // MARK: - WebViewController
 
@@ -194,12 +194,21 @@ final class WebViewController: NSViewController, TurmPanel {
     }
 
     func executeJS(_ script: String, completion: @escaping (Any?, Error?) -> Void) {
-        webView.evaluateJavaScript(script, completionHandler: completion)
+        // WKWebView's completionHandler is @Sendable in the Swift 6 SDK; the socket
+        // command chain that ultimately owns `completion` is not @Sendable-typed yet.
+        // Box the callback so the @Sendable closure literal we pass in only captures
+        // a Sendable wrapper. WebKit invokes the callback on the main thread, so the
+        // unchecked-sendable bridge is sound.
+        let box = SendableBox(completion)
+        webView.evaluateJavaScript(script) { result, error in
+            box.value(result, error)
+        }
     }
 
     func getContent(completion: @escaping (String) -> Void) {
+        let box = SendableBox(completion)
         webView.evaluateJavaScript("document.documentElement.outerHTML") { result, _ in
-            completion(result as? String ?? "")
+            box.value(result as? String ?? "")
         }
     }
 
@@ -252,7 +261,6 @@ extension WebViewController: WKNavigationDelegate {
         Task { @MainActor in
             let title = webView.title
             let host = webView.url?.host
-            let urlStr = webView.url?.absoluteString ?? ""
             self.currentTitle = (title?.isEmpty == false ? title! : host) ?? "Web"
             NotificationCenter.default.post(name: .terminalTitleChanged, object: self)
             let id = self.panelID
@@ -268,5 +276,17 @@ extension WebViewController: WKNavigationDelegate {
             let id = self.panelID
             eventBus?.broadcast(event: "webview.navigated", data: ["panel_id": id, "url": urlStr])
         }
+    }
+}
+
+// MARK: - SendableBox
+
+/// Type-erased Sendable bridge for non-Sendable closures captured into @Sendable
+/// callback positions (e.g. WKWebView.evaluateJavaScript). Sound when the captured
+/// callback is invoked on a single, known thread (the main thread in our case).
+private final class SendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) {
+        self.value = value
     }
 }

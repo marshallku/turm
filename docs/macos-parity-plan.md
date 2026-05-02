@@ -93,7 +93,7 @@ Source-of-truth audit of the working tree at HEAD (`master`):
 
 ### Tier 0 — Pre-requisites (must land before Tier 1)
 
-- **0.1 Real TOML parser in `Config.swift`** (I3) — SwiftPM dep, round-trip test against existing Linux config files.
+- **0.1 Real TOML parser in `Config.swift`** (I3) ✅ — SwiftPM dep `LebJe/TOMLKit` (0.6.0). `TurmConfig.parse` decodes via `TOMLDecoder` into a private `RawConfig` shadow type whose sections (`[terminal]`, `[theme]`, `[background]`, `[security]`) are all-optional so any subset (including the empty file) round-trips to defaults. Snake-case keys (`font_family`, `font_size`) handled with manual `CodingKeys` since TOMLKit 0.6 has no `keyDecodingStrategy`. Unknown sections from the Linux schema (`[tabs]`, `[statusbar]`, `[keybindings]`, `[[triggers]]` with nested inline tables) parse without error and are silently dropped — confirmed against a stand-in test that loads the user's existing `~/.config/turm/config.toml` plus a synthetic full-Linux-shape config. Malformed TOML logs a `[turm] config.toml parse failed: …` line to stderr and falls through to defaults instead of crashing.
 - **0.2 Stable panel ids on `TurmPanel`** (I1 prep) — UUID per panel, `TabViewController.panel(id:)` lookup. (Note: `TerminalViewController.panelID` already exists; need to surface a lookup API and adopt it on webview commands.)
 - **0.3 OSC 52 deny-by-default** (C1) ✅ — `TurmTerminalDelegate` proxy owns SwiftTerm's `terminalDelegate` slot, gates `clipboardCopy` on `[security] osc52` (default `"deny"`, opt-in `"allow"`). Hot-reload via `applyOSC52Policy`. VTE on Linux is already deny-by-default, so this fix is macOS-only. Tri-state plan deferred — `"ask"` requires modal-on-PTY-thread UX design; ship binary deny/allow first.
 

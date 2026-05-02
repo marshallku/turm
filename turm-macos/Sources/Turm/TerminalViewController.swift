@@ -61,7 +61,8 @@ private class TurmTerminalView: LocalProcessTerminalView {
 /// `requestOpenLink`, `bell`, `iTermContent` are intentionally not implemented: their
 /// protocol-extension defaults match what `LocalProcessTerminalView` would do, and
 /// re-declaring them here would override the defaults with no benefit.
-private final class TurmTerminalDelegate: NSObject, TerminalViewDelegate {
+@MainActor
+private final class TurmTerminalDelegate: NSObject, @preconcurrency TerminalViewDelegate {
     weak var host: LocalProcessTerminalView?
     var policy: OSC52Policy
 
