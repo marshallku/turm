@@ -4,8 +4,10 @@ import AppKit
 /// Panels can be terminals or webviews.
 @MainActor
 final class TabViewController: NSViewController {
-    private let config: TurmConfig
-    private let theme: TurmTheme
+    /// Mutable so config hot-reload affects panes spawned AFTER the reload (theme/font/security).
+    /// Existing panes are updated separately via `applyConfig` fan-out.
+    private var config: TurmConfig
+    private var theme: TurmTheme
 
     private var tabBar: TabBarView!
     private var contentArea: NSView!
@@ -273,10 +275,13 @@ final class TabViewController: NSViewController {
     /// running terminals. Background is re-applied only if the path/tint changed.
     /// Shell changes do not affect existing terminals — only new ones pick them up.
     func applyConfig(_ newConfig: TurmConfig, theme: TurmTheme) {
-        // Theme colors + font (family + base size updated; current zoom preserved)
+        // Update stored config/theme so tabs spawned AFTER hot-reload pick up the new values.
+        config = newConfig
+        self.theme = theme
+
+        // Fan out to existing pane trees (theme/font/security; current zoom preserved).
         for paneManager in paneManagers {
-            paneManager.applyTheme(theme)
-            paneManager.applyFont(family: newConfig.fontFamily, baseSize: CGFloat(newConfig.fontSize))
+            paneManager.applyConfig(newConfig, theme: theme)
         }
 
         // Background: apply/clear based on new config

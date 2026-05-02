@@ -178,7 +178,14 @@ focus A → split →
 ### TerminalViewController.swift (`@MainActor`)
 
 **`TurmTerminalView` (private subclass):**
-SwiftTerm 버그 우회를 위한 래퍼. `installExitMonitor()`에서 별도 `DispatchSource.makeProcessSource`를 설치. 자세한 내용은 troubleshooting.md 참조.
+두 가지 역할의 래퍼:
+1. SwiftTerm의 `processTerminated` 미호출 버그 우회 — `installExitMonitor()`에서 별도 `DispatchSource.makeProcessSource`를 설치.
+2. OSC 52 clipboard write를 정책으로 게이트 — `installDelegateProxy(policy:)`에서 `TurmTerminalDelegate` proxy를 SwiftTerm의 `terminalDelegate` slot에 install. SwiftTerm의 `clipboardCopy`가 `public`(non-`open`)이라 직접 override 불가하기 때문에 delegate slot 자체를 가로챔. 자세한 배경은 troubleshooting.md 참조.
+
+**`TurmTerminalDelegate` (private proxy):**
+`TerminalViewDelegate`를 구현. host(`LocalProcessTerminalView`)에 weak ref. `sizeChanged` / `setTerminalTitle` / `hostCurrentDirectoryUpdate` / `send` / `scrolled` / `rangeChanged`은 host의 `public` 구현에 forward (PTY winsize 갱신, 타이틀 업데이트, OSC 7, 키 입력 등 정상 동작). `clipboardCopy`만 `OSC52Policy`로 분기 — `.deny`(기본)는 stderr 한 줄 로그 + drop, `.allow`는 SwiftTerm 원래 동작 (`NSPasteboard.general`에 write). `requestOpenLink` / `bell` / `iTermContent`는 protocol extension의 default를 그대로 둠.
+
+정책은 `[security] osc52 = "deny" | "allow"` (config), hot-reload는 `applyOSC52Policy(_:)` → `delegateProxy?.policy = ...`로 전달.
 
 **`startIfNeeded()`:**
 Shell은 뷰가 계층에 추가되고 `layoutSubtreeIfNeeded()` 이후에만 시작. frame 없이 `startProcess`를 호출하면 SwiftTerm이 행/열 수를 0으로 계산합니다.
@@ -407,7 +414,7 @@ turmctl ──Unix socket──► SocketServer (background thread)
 
 ### Phase 5: Distribution & Ecosystem
 - Session persistence / restore
-- Clipboard integration (OSC 52)
+- ~~Clipboard integration (OSC 52)~~ ✅ deny-by-default 구현 (`[security] osc52`); Linux 측 VTE는 이미 deny 기본
 - URL detection + click-to-open
 - Plugin system
 - Status bar

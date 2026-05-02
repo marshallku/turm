@@ -63,8 +63,11 @@ enum InitialPanel {
 /// contents on every split/close using fresh NSSplitView instances.
 @MainActor
 final class PaneManager {
-    private let config: TurmConfig
-    private let theme: TurmTheme
+    /// Mutable so split-spawned panes after a config hot-reload pick up the new values
+    /// (theme/font/security). `applyTheme` / `applyFont` / `applyOSC52Policy` already
+    /// fan out to existing panes; updating the snapshot here keeps new splits in step.
+    private var config: TurmConfig
+    private var theme: TurmTheme
 
     private(set) var root: SplitNode
     private(set) var activePane: any TurmPanel
@@ -209,12 +212,16 @@ final class PaneManager {
         allPanels().forEach { $0.setTint(alpha) }
     }
 
-    func applyTheme(_ theme: TurmTheme) {
-        allTerminals().forEach { $0.applyTheme(theme) }
-    }
-
-    func applyFont(family: String, baseSize: CGFloat) {
-        allTerminals().forEach { $0.applyFont(family: family, baseSize: baseSize) }
+    /// Single hot-reload entry: snapshot the new config/theme so split-spawned panes
+    /// pick them up, then fan out to existing terminals.
+    func applyConfig(_ newConfig: TurmConfig, theme newTheme: TurmTheme) {
+        config = newConfig
+        theme = newTheme
+        for term in allTerminals() {
+            term.applyTheme(newTheme)
+            term.applyFont(family: newConfig.fontFamily, baseSize: CGFloat(newConfig.fontSize))
+            term.applyOSC52Policy(newConfig.osc52)
+        }
     }
 
     // MARK: - View Hierarchy

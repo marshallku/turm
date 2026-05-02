@@ -99,6 +99,23 @@ Map key combinations to shell commands. Commands prefixed with `spawn:` run in t
 
 **Note:** Custom bindings override built-in shortcuts. For example, binding `ctrl+shift+b` replaces the default tab bar toggle.
 
+### [security] (macOS only, for now)
+
+Trust-boundary policies for behaviors driven by PTY output.
+
+```toml
+[security]
+osc52 = "deny"   # or "allow"
+```
+
+| Key     | Default | Values            | Effect                                                                                                                                                  |
+| ------- | ------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `osc52` | `deny`  | `deny` / `allow`  | Whether to honor OSC 52 clipboard writes from the PTY. `deny` drops the payload and logs one line to stderr; `allow` writes to `NSPasteboard.general`. |
+
+**Why `deny` by default:** SwiftTerm's `LocalProcessTerminalView.clipboardCopy` writes to the macOS pasteboard unconditionally and is `public` (not `open`), so we cannot override it. turm installs a delegate proxy that consults this policy before any pasteboard access. VTE on Linux already defaults to deny; this aligns the macOS default with that.
+
+Hot-reloads (no restart needed for live panes).
+
 ## Notes
 
 - All fields have defaults; config file is optional

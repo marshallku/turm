@@ -1,5 +1,17 @@
 import Foundation
 
+/// Policy for OSC 52 clipboard writes from the PTY.
+///
+/// Background: SwiftTerm's `LocalProcessTerminalView` writes to `NSPasteboard.general`
+/// unconditionally on OSC 52. That lets any program in the terminal silently overwrite
+/// the user's clipboard. We intercept by replacing `terminalDelegate` with a proxy
+/// that consults this policy. Default is `deny`; matches VTE's hardened default on
+/// Linux (VTE has OSC 52 disabled unless explicitly opted in).
+enum OSC52Policy: String {
+    case deny
+    case allow
+}
+
 struct TurmConfig {
     let shell: String
     let fontFamily: String
@@ -10,6 +22,7 @@ struct TurmConfig {
     /// Opacity of the background image layer itself (0.0 = invisible, 1.0 = fully visible).
     /// Distinct from `backgroundTint`, which darkens the image via an overlay.
     let backgroundOpacity: Double
+    let osc52: OSC52Policy
 
     static func load() -> TurmConfig {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -33,6 +46,7 @@ struct TurmConfig {
         var backgroundPath: String? = nil
         var backgroundTint = 0.6
         var backgroundOpacity = 1.0
+        var osc52: OSC52Policy = .deny
 
         var currentSection = ""
 
@@ -75,6 +89,8 @@ struct TurmConfig {
                 if let d = Double(value) { backgroundTint = max(0, min(1, d)) }
             case ("background", "opacity"):
                 if let d = Double(value) { backgroundOpacity = max(0, min(1, d)) }
+            case ("security", "osc52"):
+                if let p = OSC52Policy(rawValue: value.lowercased()) { osc52 = p }
             default:
                 break
             }
@@ -84,6 +100,7 @@ struct TurmConfig {
             shell: shell, fontFamily: fontFamily, fontSize: fontSize,
             themeName: themeName, backgroundPath: backgroundPath,
             backgroundTint: backgroundTint, backgroundOpacity: backgroundOpacity,
+            osc52: osc52,
         )
     }
 
@@ -96,6 +113,7 @@ struct TurmConfig {
             backgroundPath: nil,
             backgroundTint: 0.6,
             backgroundOpacity: 1.0,
+            osc52: .deny,
         )
     }
 

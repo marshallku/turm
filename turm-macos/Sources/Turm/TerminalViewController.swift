@@ -9,9 +9,30 @@ extension Notification.Name {
 
 /// Wraps LocalProcessTerminalView to:
 /// 1. Fix a SwiftTerm bug where processTerminated is never delivered after shell exits.
-/// 2. Intercept PTY output bytes for terminal.output events and OSC 133 shell integration.
+/// 2. Replace `terminalDelegate` with a proxy that gates OSC 52 clipboard writes
+///    (SwiftTerm's built-in `clipboardCopy` is `public` non-`open` and unconditionally
+///    writes to `NSPasteboard.general` — we cannot override it directly, so we own the
+///    delegate slot).
+///
+/// Note on PTY output interception: SwiftTerm's `feed(byteArray:)` is an extension
+/// method, not overridable, so `terminal.output` events / OSC 133 shell integration
+/// cannot be implemented from outside SwiftTerm.
 private class TurmTerminalView: LocalProcessTerminalView {
     private var exitMonitor: (any DispatchSourceProcess)?
+    /// Strongly retained so SwiftTerm's `weak terminalDelegate` doesn't drop our proxy.
+    private var delegateProxy: TurmTerminalDelegate?
+
+    /// Replace SwiftTerm's self-as-delegate with our policy proxy. Must be called once,
+    /// after `super.init`, before any PTY frame can fire `clipboardCopy`.
+    func installDelegateProxy(policy: OSC52Policy) {
+        let proxy = TurmTerminalDelegate(host: self, policy: policy)
+        delegateProxy = proxy
+        terminalDelegate = proxy
+    }
+
+    func setOSC52Policy(_ policy: OSC52Policy) {
+        delegateProxy?.policy = policy
+    }
 
     func installExitMonitor() {
         let pid = process.shellPid
@@ -28,6 +49,63 @@ private class TurmTerminalView: LocalProcessTerminalView {
 
     deinit {
         exitMonitor?.cancel()
+    }
+}
+
+// MARK: - TurmTerminalDelegate
+
+/// Proxy that owns SwiftTerm's `terminalDelegate` slot so we can gate `clipboardCopy`
+/// (OSC 52). All other methods are forwarded to the host `LocalProcessTerminalView`'s
+/// own implementations — those are `public` and callable from outside the module.
+///
+/// `requestOpenLink`, `bell`, `iTermContent` are intentionally not implemented: their
+/// protocol-extension defaults match what `LocalProcessTerminalView` would do, and
+/// re-declaring them here would override the defaults with no benefit.
+private final class TurmTerminalDelegate: NSObject, TerminalViewDelegate {
+    weak var host: LocalProcessTerminalView?
+    var policy: OSC52Policy
+
+    init(host: LocalProcessTerminalView, policy: OSC52Policy) {
+        self.host = host
+        self.policy = policy
+    }
+
+    func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+        host?.sizeChanged(source: source, newCols: newCols, newRows: newRows)
+    }
+
+    func setTerminalTitle(source: TerminalView, title: String) {
+        host?.setTerminalTitle(source: source, title: title)
+    }
+
+    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
+        host?.hostCurrentDirectoryUpdate(source: source, directory: directory)
+    }
+
+    func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        host?.send(source: source, data: data)
+    }
+
+    func scrolled(source: TerminalView, position: Double) {
+        host?.scrolled(source: source, position: position)
+    }
+
+    func rangeChanged(source: TerminalView, startY: Int, endY: Int) {
+        host?.rangeChanged(source: source, startY: startY, endY: endY)
+    }
+
+    func clipboardCopy(source _: TerminalView, content: Data) {
+        switch policy {
+        case .deny:
+            let msg = "[turm] OSC 52 clipboard write blocked (\(content.count) bytes). " +
+                "Set [security] osc52 = \"allow\" in config.toml to enable.\n"
+            FileHandle.standardError.write(Data(msg.utf8))
+        case .allow:
+            guard let str = String(bytes: content, encoding: .utf8) else { return }
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.writeObjects([str as NSString])
+        }
     }
 }
 
@@ -105,6 +183,10 @@ class TerminalViewController: NSViewController, TurmPanel {
         tv.autoresizingMask = [.width, .height]
         tv.wantsLayer = true
         tv.layer?.isOpaque = false
+        // Install our delegate proxy BEFORE any PTY data can flow, so the very first
+        // OSC 52 frame is gated. `loadView` runs before `startShell`, so this ordering
+        // is safe.
+        tv.installDelegateProxy(policy: config.osc52)
         configureColors(tv)
         configureFont(tv, size: currentFontSize)
         tv.processDelegate = self
@@ -203,6 +285,11 @@ class TerminalViewController: NSViewController, TurmPanel {
         tv.needsDisplay = true
         // Update the stored theme so clearBackground() uses the new color.
         theme = newTheme
+    }
+
+    /// Update the OSC 52 clipboard-write policy on a running terminal (config hot-reload).
+    func applyOSC52Policy(_ policy: OSC52Policy) {
+        terminalView?.setOSC52Policy(policy)
     }
 
     /// Re-apply font family and base size to a running terminal (called on config hot-reload).

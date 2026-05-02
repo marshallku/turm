@@ -179,6 +179,16 @@ func installExitMonitor() {
 
 **Status:** Not implemented. Shell integration signals (`terminal.shell_precmd` / `terminal.shell_preexec`) are sent via socket commands from the shell script directly instead of OSC 133 parsing.
 
+### macOS: OSC 52 clipboard write was unconditional (security regression)
+
+**Cause:** SwiftTerm's `LocalProcessTerminalView.clipboardCopy(source:content:)` is declared `public` (not `open`) and unconditionally writes the OSC 52 payload to `NSPasteboard.general`. Because the method is `public`, subclasses outside the SwiftTerm module cannot override it. Pre-fix, any program in a pane could silently overwrite the user's clipboard.
+
+**Fix:** `TurmTerminalView` installs a custom `TurmTerminalDelegate` proxy into SwiftTerm's `terminalDelegate` slot. The proxy forwards `sizeChanged` / `setTerminalTitle` / `hostCurrentDirectoryUpdate` / `send` / `scrolled` / `rangeChanged` to the host's public methods (so PTY winsize, title updates, OSC 7, key input, etc. continue to work) and applies an `OSC52Policy` gate on `clipboardCopy`. `requestOpenLink` / `bell` / `iTermContent` are left to the protocol-extension defaults — overriding them would change behavior with no benefit.
+
+The policy is read from `[security] osc52` in config (`"deny"` default, `"allow"` opts back into legacy behavior). Hot-reload propagates through `applyConfig` → `paneManager.applyOSC52Policy` so live panes pick up the change without restart.
+
+VTE on Linux already disables OSC 52 by default, so this fix is macOS-only.
+
 ### macOS: Nerd Font icons show as boxes or render broken
 
 **Cause 1 — Font not found by family name:** `NSFont(name:size:)` only accepts PostScript names and full names (e.g. `JetBrains Mono Regular`), not bare family names like `JetBrainsMono Nerd Font Mono`. When the lookup fails, the terminal falls back to the system monospace font which has no Nerd Font PUA glyphs.

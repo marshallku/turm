@@ -181,7 +181,7 @@ Goal: full Linux feature parity. Phase 1 MVP complete; porting remaining Linux f
 
 **Phase 5 — Distribution & Ecosystem**
 - [ ] Session persistence / restore
-- [ ] Clipboard integration (OSC 52)
+- [x] Clipboard integration (OSC 52) — `TurmTerminalDelegate` proxy gates SwiftTerm's `clipboardCopy` on `[security] osc52` (default `deny`, opt-in `allow`). Closes the prior unconditional-write security regression on macOS. Linux (VTE) already deny-by-default. See [macos-parity-plan.md Tier 0.3](./macos-parity-plan.md) and [troubleshooting.md](./troubleshooting.md#macos-osc-52-clipboard-write-was-unconditional-security-regression).
 - [ ] URL detection + click-to-open
 - [ ] Plugin system (HTML/JS panels + shell commands via plugin.toml)
 - [ ] Status bar (Waybar-style modules)
