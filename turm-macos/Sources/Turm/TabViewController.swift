@@ -46,6 +46,22 @@ final class TabViewController: NSViewController {
         activePaneManager?.activeWebView()
     }
 
+    /// Cross-tab panel lookup by stable UUID. Used by socket commands that take an
+    /// `id` param (parity with Linux's `find_panel_by_id`). Walks every tab's split
+    /// tree — O(N panels) but N is small in practice.
+    func panel(id: String) -> (any TurmPanel)? {
+        for manager in paneManagers {
+            if let p = manager.allPanels().first(where: { $0.panelID == id }) {
+                return p
+            }
+        }
+        return nil
+    }
+
+    func webView(id: String) -> WebViewController? {
+        panel(id: id) as? WebViewController
+    }
+
     init(config: TurmConfig, theme: TurmTheme) {
         self.config = config
         self.theme = theme

@@ -1,6 +1,21 @@
 import Darwin
 import Foundation
 
+/// Sentinel completion value: handlers that need to surface a JSON-RPC error
+/// envelope (`{ok:false, error:{code, message}}`) instead of a success result
+/// pass an instance of this struct to their `completion` closure. SocketServer
+/// detects it in `dispatch()` and emits the proper error frame.
+///
+/// Why a sentinel rather than a typed `Result`-style completion: the existing
+/// command handler signature is `(_ value: Any?) -> Void` and is used by ~30
+/// handlers. Sending an `RPCError` through the same channel keeps the
+/// signature stable while letting webview commands report `not_found` /
+/// `wrong_panel_type` / `invalid_params` matching the Linux `socket.rs` shape.
+struct RPCError: Error {
+    let code: String
+    let message: String
+}
+
 /// Unix socket server that accepts turmctl connections.
 /// Mirrors the role of socket.rs in turm-linux.
 ///
@@ -168,6 +183,9 @@ final class SocketServer: @unchecked Sendable {
 
         sema.wait()
 
+        if let err = box.value as? RPCError {
+            return error(id: id, code: err.code, message: err.message)
+        }
         if let result = box.value {
             return success(id: id, result: result)
         } else {

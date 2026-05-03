@@ -372,60 +372,139 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             completion(["ok": true])
 
         case "webview.navigate":
-            guard let urlString = params["url"] as? String else { completion(nil); return }
-            guard let webVC = vc.activeWebView else { completion(["error": "no active webview"]); return }
-            webVC.navigate(to: urlString)
-            completion(["ok": true])
+            guard let urlString = params["url"] as? String else {
+                completion(RPCError(code: "invalid_params", message: "Missing 'url' param"))
+                return
+            }
+            switch resolveWebView(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(webVC):
+                webVC.navigate(to: urlString)
+                completion(["status": "ok"])
+            }
 
         case "webview.back":
-            guard let webVC = vc.activeWebView else { completion(["error": "no active webview"]); return }
-            webVC.goBack()
-            completion(["ok": true])
+            switch resolveWebView(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(webVC):
+                webVC.goBack()
+                completion(["status": "ok"])
+            }
 
         case "webview.forward":
-            guard let webVC = vc.activeWebView else { completion(["error": "no active webview"]); return }
-            webVC.goForward()
-            completion(["ok": true])
+            switch resolveWebView(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(webVC):
+                webVC.goForward()
+                completion(["status": "ok"])
+            }
 
         case "webview.reload":
-            guard let webVC = vc.activeWebView else { completion(["error": "no active webview"]); return }
-            webVC.reload()
-            completion(["ok": true])
+            switch resolveWebView(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(webVC):
+                webVC.reload()
+                completion(["status": "ok"])
+            }
 
         case "webview.execute_js":
-            guard let script = params["script"] as? String else { completion(nil); return }
-            guard let webVC = vc.activeWebView else { completion(["error": "no active webview"]); return }
-            webVC.executeJS(script) { result, error in
-                if let error {
-                    completion(["error": error.localizedDescription])
-                } else {
-                    completion(["result": result ?? NSNull()])
+            // Param name is `code` (Linux + turm-cli convention). Older callers that
+            // sent `script` get a fallback so existing macOS-only consumers don't break.
+            guard let code = (params["code"] as? String) ?? (params["script"] as? String) else {
+                completion(RPCError(code: "invalid_params", message: "Missing 'code' param"))
+                return
+            }
+            switch resolveWebView(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(webVC):
+                webVC.executeJS(code) { result, error in
+                    if let error {
+                        completion(RPCError(code: "js_error", message: error.localizedDescription))
+                    } else {
+                        completion(["result": result ?? NSNull()])
+                    }
                 }
             }
 
         case "webview.get_content":
-            guard let webVC = vc.activeWebView else { completion(["error": "no active webview"]); return }
-            webVC.getContent { html in
-                completion(["html": html])
+            switch resolveWebView(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(webVC):
+                webVC.getContent { html in
+                    completion(["html": html])
+                }
             }
 
         case "webview.devtools":
-            guard let webVC = vc.activeWebView else { completion(["error": "no active webview"]); return }
-            webVC.toggleDevTools()
-            completion(["ok": true])
+            // Linux accepts `action: show/close/attach/detach`. macOS WKWebView
+            // exposes no public API to programmatically open the inspector
+            // window — `developerExtrasEnabled` only enables the right-click
+            // → "Inspect Element" menu. We accept the action verb for protocol
+            // parity but treat show/attach/detach as "ensure enabled" and
+            // close as "no-op" (the user closes the inspector window manually).
+            let action = (params["action"] as? String) ?? "show"
+            switch resolveWebView(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(webVC):
+                switch action {
+                case "show", "attach", "detach", "toggle":
+                    webVC.toggleDevTools()
+                    completion(["status": "ok"])
+                case "close":
+                    completion(["status": "ok"])
+                default:
+                    completion(RPCError(
+                        code: "invalid_params",
+                        message: "Unknown action: \(action). Use show/close/attach/detach/toggle",
+                    ))
+                }
+            }
 
         case "webview.state":
-            guard let webVC = vc.activeWebView else { completion(["error": "no active webview"]); return }
-            completion([
-                "url": webVC.currentURL,
-                "title": webVC.currentTitle,
-                "can_go_back": webVC.canGoBack,
-                "can_go_forward": webVC.canGoForward,
-                "is_loading": webVC.isLoading,
-            ])
+            switch resolveWebView(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(webVC):
+                completion([
+                    "url": webVC.currentURL,
+                    "title": webVC.currentTitle,
+                    "can_go_back": webVC.canGoBack,
+                    "can_go_forward": webVC.canGoForward,
+                    "is_loading": webVC.isLoading,
+                ])
+            }
 
         default:
             completion(nil)
         }
+    }
+
+    /// Resolves the target WebViewController for an `id`-aware webview command.
+    ///
+    /// - If `params["id"]` is a non-empty string, look it up across all tabs and
+    ///   return the panel (errors out on `not_found` / `wrong_panel_type`,
+    ///   matching Linux `socket.rs` codes).
+    /// - If `id` is absent, fall back to the active webview. Linux's handlers
+    ///   require `id`; macOS keeps the lenient default per the parity plan
+    ///   (Tier 1.6) so existing turmctl-without-id calls keep working.
+    private func resolveWebView(
+        _ params: [String: Any],
+        in vc: TabViewController,
+    ) -> Result<WebViewController, RPCError> {
+        if let id = params["id"] as? String, !id.isEmpty {
+            guard let panel = vc.panel(id: id) else {
+                return .failure(RPCError(code: "not_found", message: "Panel not found: \(id)"))
+            }
+            guard let webVC = panel as? WebViewController else {
+                return .failure(RPCError(code: "wrong_panel_type", message: "Panel is not a webview"))
+            }
+            return .success(webVC)
+        }
+        guard let webVC = vc.activeWebView else {
+            return .failure(RPCError(
+                code: "no_active_webview",
+                message: "No active webview and no 'id' provided",
+            ))
+        }
+        return .success(webVC)
     }
 }

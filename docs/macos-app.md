@@ -408,14 +408,18 @@ turmctl ──Unix socket──► SocketServer (background thread)
 | `background.clear` | — | 배경 이미지 제거 |
 | `agent.approve` | `message`, `title?`, `actions?` | NSAlert 모달 표시, 비동기 응답 |
 | `webview.open` | `url?`, `mode?` (tab/split_h/split_v) | 웹뷰 패널 생성 |
-| `webview.navigate` | `url` | 활성 웹뷰 URL 이동 |
-| `webview.back` | — | 뒤로 |
-| `webview.forward` | — | 앞으로 |
-| `webview.reload` | — | 새로고침 |
-| `webview.execute_js` | `script` | JS 평가 (비동기 응답) |
-| `webview.get_content` | — | 페이지 HTML 반환 (비동기) |
-| `webview.devtools` | — | Safari Web Inspector 토글 |
-| `webview.state` | — | url/title/can_go_back/forward/is_loading |
+| `webview.navigate` | `url`, `id?` | 웹뷰 URL 이동 (id 없으면 active fallback) |
+| `webview.back` | `id?` | 뒤로 |
+| `webview.forward` | `id?` | 앞으로 |
+| `webview.reload` | `id?` | 새로고침 |
+| `webview.execute_js` | `code`, `id?` (alias: `script`) | JS 평가 (비동기 응답) |
+| `webview.get_content` | `id?` | 페이지 HTML 반환 (비동기) |
+| `webview.devtools` | `id?`, `action?` (show/close/attach/detach/toggle) | Safari Web Inspector 토글 (close는 no-op) |
+| `webview.state` | `id?` | url/title/can_go_back/forward/is_loading |
+
+**`id` 파라미터**: 모든 `webview.*` 커맨드는 `params["id"]` (UUID)로 특정 패널을 지정할 수 있고, 생략하면 active webview로 fallback (Linux는 필수, macOS는 lenient default — Tier 1.6 plan 결정). `id`로 못 찾으면 `not_found`, 패널이 webview가 아니면 `wrong_panel_type` 에러 envelope 반환. `webview.execute_js`의 param 이름은 Linux/turm-cli convention인 `code`로 통일했고, 기존 macOS-only 호출자를 위해 `script`도 인식.
+
+**에러 envelope**: 웹뷰 핸들러가 `RPCError(code:message:)`를 completion에 전달하면 `SocketServer.dispatch`가 감지해서 JSON-RPC 에러 형태(`{ok:false, error:{code, message}}`)로 wrap. Linux 코드와 일치 (`not_found`, `wrong_panel_type`, `invalid_params`, `no_active_webview`). 다른 핸들러는 기존 `(Any?) -> Void` completion을 그대로 사용.
 
 ---
 
