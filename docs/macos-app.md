@@ -164,10 +164,11 @@ turmctl call echo.ping --params '{"hello":"x","sleep_ms":200}'
 - `echo` (PR 3) — 프로토콜 sanity check
 - `git` (PR 4) — 6개 액션 (`git.list_workspaces`/`list_worktrees`/`worktree_add`/`worktree_remove`/`current_branch`/`status`). cross-platform deps만 사용 (serde, serde_json, toml). `~/.config/turm/workspaces.toml` (또는 `TURM_GIT_WORKSPACES_FILE` env override)에서 워크스페이스 정의 읽음. config 없으면 list_workspaces가 빈 배열 반환 (`fatal_error: null`) — graceful.
 - `llm` (PR 5a) — Anthropic provider. 3개 액션 (`llm.complete`/`llm.usage`/`llm.auth_status`). `keyring` crate `apple-native` feature 통해 macOS Keychain에 토큰 저장. spike target으로 추가됨 — 자세한 건 아래 Keychain 섹션.
+- `calendar` (PR 5b) — Google Calendar (read-only). 3개 액션 (`calendar.list_events`/`calendar.event_details`/`calendar.auth_status`). `onStartup` polling daemon: 백그라운드 thread가 `TURM_CALENDAR_POLL_SECS` 간격으로 Google API polling, `TURM_CALENDAR_LEAD_MINUTES` 시점에 `calendar.event_imminent` 이벤트 publish. credential 없으면 RPC 액션은 `not_authenticated` 반환하고 poller는 idle 대기 — `Config::minimal()` fallback 덕에 supervisor handshake는 통과. polling-daemon supervisor lifecycle 검증 차원에서 추가됨.
 
 **아직 enabled 못 된 plugins:**
 - `kb`, `todo`, `bookmark` — `renameat2` / `O_NOFOLLOW` 같은 Linux-only filesystem primitives 의존. atomic-create / symlink-safety 백엔드를 Apple File System 호환 형태로 갈아엎어야 함.
-- `slack`, `calendar`, `discord` — `unix` cfg gate라 컴파일은 macOS에서 OK. `keyring` 코드 경로가 llm과 동일해서 Keychain 자체는 unblock됐음 (PR 5a). 남은 작업은 plugin별 auth flow (Slack Socket Mode token setup, Calendar Google OAuth, Discord Gateway token).
+- `slack`, `discord` — `unix` cfg gate라 컴파일은 macOS에서 OK. `keyring` 코드 경로가 llm/calendar와 동일해서 macOS plumbing은 unblock됐음 (PR 5a-b). 남은 작업은 plugin별 auth flow: Slack은 Socket Mode token setup (xoxb- bot + xapp- app-level), Discord는 Gateway token.
 
 ### Keychain / `keyring` 통합 (PR 5a 발견)
 
@@ -188,6 +189,16 @@ plugin은 두 가지 모드로 실행:
 - `auth` subcommand — user가 직접 실행: `ANTHROPIC_API_KEY=sk-ant-... turm-plugin-llm auth`. API call로 키 validate 후 keychain에 `{api_key, validated_at}` 저장. 이 시점에 macOS Keychain prompt가 뜰 수 있음. 한 번 저장되면 후속 turm launch에서 supervisor가 같은 binary path 사용하므로 keychain ACL이 그대로 유효 (signed/unsigned 무관).
 
 binary path: `~/Library/Application Support/turm/plugins/llm/turm-plugin-llm`. install-macos.sh가 매 install마다 같은 path에 copy하므로 keychain ACL re-prompt 안 일어남 (path가 ACL 키의 일부).
+
+**Calendar는 OAuth device-code flow 사용** (`turm-plugin-calendar auth`):
+1. user가 Google Cloud Console에서 OAuth 2.0 client (Desktop type) 만들고 Calendar API 활성화 → `client_id` + `client_secret` 받음
+2. `TURM_CALENDAR_CLIENT_ID=<id> TURM_CALENDAR_CLIENT_SECRET=<secret> turm-plugin-calendar auth` 실행
+3. plugin이 stderr에 `user_code`와 verification URL 출력, Google 토큰 endpoint를 polling
+4. user가 브라우저에서 코드 입력 + 권한 승인
+5. plugin이 token + refresh_token 받아서 keychain에 `{access_token, refresh_token, ...}` 저장 (이때 macOS Keychain prompt 발생 가능)
+6. 후속 turm launch 시 supervisor가 spawn한 calendar 프로세스가 keychain에서 token 읽어서 polling 시작
+
+Slack/Discord도 동일하게 별도 `auth` subcommand로 토큰 setup (Slack은 Socket Mode token, Discord는 Bot Token). 셋 다 turm GUI launch와 무관한 out-of-band 한 번-실행 setup.
 
 ---
 

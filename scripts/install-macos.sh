@@ -55,13 +55,15 @@ DO_LAUNCH=false
 # they depend on Linux-only filesystem primitives (renameat2, O_NOFOLLOW)
 # and won't compile — see codex round-2 finding in docs/macos-parity-plan.md.
 # PR 4 added git (no platform-specific deps).
-# PR 5 added llm as the Keychain-spike target — it's the cheapest of the
-# `keyring`-using plugins to verify (no websocket, no OAuth, dedicated
-# `llm.auth_status` action that exercises the Keychain backend without
-# making any HTTP call). Slack / Calendar / Discord share the same
-# `apple-native` keyring code path; once llm proves Keychain works,
-# they're safe to add behind their respective auth-flow PRs.
-MACOS_PLUGINS=(echo git llm)
+# PR 5a added llm as the Keychain-spike target — proved that
+# `keyring` `apple-native` reaches Apple Keychain at runtime.
+# PR 5b adds calendar to validate the polling-daemon supervisor
+# lifecycle on macOS (different from llm's pure-RPC mode — calendar
+# spawns a background poller thread that publishes lead-time
+# `calendar.event_imminent` events). RPC actions still work without
+# Google OAuth credentials thanks to `Config::minimal()` fallback.
+# Slack / Discord remain blocked on Socket Mode / Gateway token setup.
+MACOS_PLUGINS=(echo git llm calendar)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
