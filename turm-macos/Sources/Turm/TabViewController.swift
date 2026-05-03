@@ -15,9 +15,9 @@ final class TabViewController: NSViewController {
     private(set) var activeIndex: Int = -1
 
     // Retained so new tabs inherit the current background state
-    private var currentBackgroundPath: String?
-    private var currentBackgroundTint: Double = 0.6
-    private var currentBackgroundOpacity: Double = 1.0
+    private(set) var currentBackgroundPath: String?
+    private(set) var currentBackgroundTint: Double = 0.6
+    private(set) var currentBackgroundOpacity: Double = 1.0
 
     // Tab bar collapsed state.
     // Default: collapsed (icon-only). Auto-expands on 1→2 tab transition
@@ -112,17 +112,32 @@ final class TabViewController: NSViewController {
         contentArea.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(contentArea)
 
-        NSLayoutConstraint.activate([
-            tabBar.topAnchor.constraint(equalTo: root.topAnchor),
+        // Tier 1.4 — tabs position. The tabBar is always full-width and at
+        // either the top or bottom of root; contentArea fills the rest.
+        // left/right would need a 90-degree rotation of the bar view itself
+        // (different layout pass) and is deferred until requested.
+        var constraints: [NSLayoutConstraint] = [
             tabBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             tabBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             tabBar.heightAnchor.constraint(equalToConstant: TabBarView.height),
-
-            contentArea.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
             contentArea.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             contentArea.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            contentArea.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-        ])
+        ]
+        switch config.tabsPosition {
+        case .top:
+            constraints.append(contentsOf: [
+                tabBar.topAnchor.constraint(equalTo: root.topAnchor),
+                contentArea.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
+                contentArea.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            ])
+        case .bottom:
+            constraints.append(contentsOf: [
+                contentArea.topAnchor.constraint(equalTo: root.topAnchor),
+                contentArea.bottomAnchor.constraint(equalTo: tabBar.topAnchor),
+                tabBar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            ])
+        }
+        NSLayoutConstraint.activate(constraints)
 
         // Sync view to controller's initial state (single source of truth: isBarCollapsed)
         tabBar.setCollapsed(isBarCollapsed)
@@ -257,6 +272,12 @@ final class TabViewController: NSViewController {
 
     func splitActivePane(orientation: SplitOrientation) {
         activePaneManager?.splitActive(orientation: orientation)
+    }
+
+    /// Tier 1.1 — proxy to active tab's PaneManager.focusNextPane. No-op
+    /// when no tab is active (no panes to cycle).
+    func focusNextPane(direction: Int = 1) {
+        activePaneManager?.focusNextPane(direction: direction)
     }
 
     func splitActivePaneWithWebView(url: URL? = nil, orientation: SplitOrientation = .horizontal) {

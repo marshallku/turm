@@ -61,6 +61,15 @@ private class TurmTerminalView: LocalProcessTerminalView {
 /// `requestOpenLink`, `bell`, `iTermContent` are intentionally not implemented: their
 /// protocol-extension defaults match what `LocalProcessTerminalView` would do, and
 /// re-declaring them here would override the defaults with no benefit.
+///
+/// Tier 1.5 note — OSC 8 hyperlinks (clickable links emitted by programs like
+/// `ls --hyperlink`, `gh`, etc.) work on macOS via SwiftTerm's default
+/// `requestOpenLink` implementation in `Mac/MacTerminalView.swift:1614`,
+/// which calls `NSWorkspace.shared.open(url)`. We don't override it, so click
+/// + open already happens for free. Plain-text URL detection (Cmd+click on
+/// a bare `https://example.com` in unstructured terminal output) is NOT yet
+/// implemented — that needs a mouse-event interceptor + cell-coordinate
+/// walker on the SwiftTerm view, which is its own larger piece of work.
 @MainActor
 private final class TurmTerminalDelegate: NSObject, @preconcurrency TerminalViewDelegate {
     weak var host: LocalProcessTerminalView?

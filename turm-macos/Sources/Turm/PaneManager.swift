@@ -184,6 +184,23 @@ final class PaneManager {
         root.allLeaves()
     }
 
+    /// Tier 1.1 — pane focus navigation. Cycle the active pane forward (`+1`)
+    /// or backward (`-1`) over the DFS order of leaves under `root`. Wraps
+    /// at both ends. No-op when the tab has only one pane. Used by the
+    /// Cmd+Shift+] / Cmd+Shift+[ menu items in `AppDelegate`.
+    func focusNextPane(direction: Int = 1) {
+        let leaves = root.allLeaves()
+        guard leaves.count > 1 else { return }
+        let currentIdx = leaves.firstIndex { ObjectIdentifier($0 as AnyObject) == ObjectIdentifier(activePane as AnyObject) }
+        guard let idx = currentIdx else { return }
+        let count = leaves.count
+        // Modulo handles both directions including negative wrap.
+        let nextIdx = ((idx + direction) % count + count) % count
+        let next = leaves[nextIdx]
+        setActive(next)
+        next.view.window?.makeFirstResponder(next.view)
+    }
+
     func allTerminals() -> [TerminalViewController] {
         root.allLeaves().compactMap { $0 as? TerminalViewController }
     }

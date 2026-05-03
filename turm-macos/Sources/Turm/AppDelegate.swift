@@ -14,6 +14,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// time `applicationDidFinishLaunching` references it.
     private lazy var turmEngine = TurmEngine()
     private var configWatcher: ConfigWatcher?
+    /// Tier 1.2 — compiled keybindings + the active NSEvent monitor token.
+    /// Hot-reload swaps `keybindings` in place; the monitor closure reads
+    /// the latest snapshot via `self`.
+    private var keybindings: [Keybindings.Binding] = []
+    private var keybindingMonitor: Any?
 
     func applicationDidFinishLaunching(_: Notification) {
         // PR 1 (Tier 2.1) FFI smoke test. Proves the Rust staticlib linked
@@ -64,6 +69,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             FileHandle.standardError.write(Data("[turm-engine] loaded \(count) trigger(s) from config.toml\n".utf8))
         }
 
+        // Tier 1.2 — custom keybindings. Install BEFORE menu bar + window
+        // so the monitor catches first-keystroke; built-in menu shortcuts
+        // still take precedence (menu-driven keyEquivalents fire before
+        // local monitors). Hot-reload calls `applyKeybindings` to swap.
+        applyKeybindings(config.keybindings)
+        installKeybindingMonitor()
+
         setupMenuBar()
 
         let window = NSWindow(
@@ -109,6 +121,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         pluginSupervisor.shutdown()
         socketServer.stop()
         configWatcher?.stop()
+        if let token = keybindingMonitor {
+            NSEvent.removeMonitor(token)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool {
@@ -156,6 +171,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         splitVItem.keyEquivalentModifierMask = [.command, .shift]
         splitVItem.target = self
         shellMenu.addItem(splitVItem)
+
+        shellMenu.addItem(.separator())
+
+        // Tier 1.1 — pane focus navigation. Cmd+Shift+] / Cmd+Shift+[
+        // cycle DFS-forward / DFS-backward over leaves of the active
+        // tab's split tree. No-op on tabs with one pane.
+        let nextPaneItem = NSMenuItem(title: "Next Pane", action: #selector(focusNextPane), keyEquivalent: "]")
+        nextPaneItem.keyEquivalentModifierMask = [.command, .shift]
+        nextPaneItem.target = self
+        shellMenu.addItem(nextPaneItem)
+
+        let prevPaneItem = NSMenuItem(title: "Previous Pane", action: #selector(focusPrevPane), keyEquivalent: "[")
+        prevPaneItem.keyEquivalentModifierMask = [.command, .shift]
+        prevPaneItem.target = self
+        shellMenu.addItem(prevPaneItem)
 
         shellMenu.addItem(.separator())
 
@@ -233,6 +263,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func splitVertical() {
         tabVC?.splitActivePane(orientation: .vertical)
+    }
+
+    @objc private func focusNextPane() {
+        tabVC?.focusNextPane(direction: 1)
+    }
+
+    @objc private func focusPrevPane() {
+        tabVC?.focusNextPane(direction: -1)
     }
 
     @objc private func switchTabByNumber(_ sender: NSMenuItem) {
@@ -330,7 +368,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let count = turmEngine.setTriggers(triggerJSON) {
             FileHandle.standardError.write(Data("[turm-engine] reloaded \(count) trigger(s) on config.toml change\n".utf8))
         }
+        // Reload keybindings — hot-swap into the existing monitor's snapshot.
+        applyKeybindings(newConfig.keybindings)
         eventBus.broadcast(event: "config.reloaded", data: ["theme": newTheme.name])
+    }
+
+    // MARK: - Keybindings (Tier 1.2)
+
+    private func applyKeybindings(_ raw: [String: String]) {
+        keybindings = Keybindings.compile(raw)
+        if !keybindings.isEmpty {
+            FileHandle.standardError.write(Data("[turm] loaded \(keybindings.count) custom keybinding(s)\n".utf8))
+        }
+    }
+
+    private func installKeybindingMonitor() {
+        // .keyDown so we get repeats too; the local monitor returns the
+        // event when no binding matches, so the standard responder chain
+        // (menu shortcuts, terminal input) sees it normally. Returning nil
+        // swallows the event — only on a positive match.
+        keybindingMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            for binding in keybindings where Keybindings.matches(event, binding) {
+                Keybindings.dispatch(binding, registry: actionRegistry, socketPath: socketServer.path)
+                return nil
+            }
+            return event
+        }
     }
 
     private func startSocketServer() {
@@ -414,6 +478,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             vc.splitActivePane(orientation: .vertical)
             completion(["ok": true])
 
+        // Tier 1.1 — pane focus navigation, also exposed over socket so
+        // turmctl + triggers can drive it (not just menu Cmd+Shift+]).
+        case "pane.focus_next":
+            vc.focusNextPane(direction: 1)
+            completion(["status": "ok"])
+
+        case "pane.focus_prev":
+            vc.focusNextPane(direction: -1)
+            completion(["status": "ok"])
+
         case "session.list":
             completion(vc.sessionList())
 
@@ -469,6 +543,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case "background.clear":
             vc.clearBackground()
             completion(["ok": true])
+
+        // Tier 1.3 — random wallpaper rotation. Same wire shape as Linux:
+        // both commands return `{status, mode}` so trigger configs can
+        // detect deactive state without parsing free-form messages.
+        case "background.next":
+            guard BackgroundRotator.isActive else {
+                completion(["status": "ok", "mode": "deactive"])
+                return
+            }
+            guard let img = BackgroundRotator.nextRandomImage() else {
+                completion(RPCError(
+                    code: "no_wallpapers",
+                    message: "wallpaper list missing or empty (tried ~/Library/Caches/turm/wallpapers.txt and ~/.cache/terminal-wallpapers.txt)",
+                ))
+                return
+            }
+            // Reuse the existing tint/opacity from the live state so a rotation
+            // doesn't bake the defaults if the user customized them.
+            vc.applyBackground(
+                path: img,
+                tint: vc.currentBackgroundTint,
+                opacity: vc.currentBackgroundOpacity,
+            )
+            completion(["status": "ok", "mode": "active", "path": img])
+
+        case "background.toggle":
+            let nowActive = BackgroundRotator.toggle()
+            if nowActive {
+                if let img = BackgroundRotator.nextRandomImage() {
+                    vc.applyBackground(
+                        path: img,
+                        tint: vc.currentBackgroundTint,
+                        opacity: vc.currentBackgroundOpacity,
+                    )
+                }
+            } else {
+                vc.clearBackground()
+            }
+            completion(["status": "ok", "mode": nowActive ? "active" : "deactive"])
 
         // MARK: WebView commands
 

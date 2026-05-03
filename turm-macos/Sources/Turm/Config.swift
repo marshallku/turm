@@ -13,6 +13,25 @@ enum OSC52Policy: String, Decodable {
     case allow
 }
 
+/// Where the tab bar sits relative to the content area. Linux supports
+/// `top`/`bottom`/`left`/`right`; macOS implements top/bottom now and
+/// defers vertical orientation (left/right) — they require a separate
+/// layout pass that's not worth doing until somebody asks for it.
+enum TabsPosition: String, Decodable {
+    case top
+    case bottom
+
+    /// Decode permissively: an unrecognized value (e.g. user wrote
+    /// `position = "left"` as on Linux) falls back to `.top` with a
+    /// stderr warning rather than crashing.
+    static func parse(_ raw: String) -> TabsPosition {
+        if let p = TabsPosition(rawValue: raw.lowercased()) { return p }
+        let msg = "[turm] [tabs] position '\(raw)' not yet supported on macOS — using 'top'\n"
+        FileHandle.standardError.write(Data(msg.utf8))
+        return .top
+    }
+}
+
 struct TurmConfig {
     let shell: String
     let fontFamily: String
@@ -24,6 +43,13 @@ struct TurmConfig {
     /// Distinct from `backgroundTint`, which darkens the image via an overlay.
     let backgroundOpacity: Double
     let osc52: OSC52Policy
+    /// Tier 1.4 — `[tabs] position` (top/bottom). left/right deferred.
+    let tabsPosition: TabsPosition
+    /// Tier 1.2 — `[keybindings]` flat dict: combo string → command string.
+    /// Compiled to `Keybindings.Binding` at AppDelegate init time and
+    /// matched in the NSEvent local monitor. Empty when no `[keybindings]`
+    /// section is present.
+    let keybindings: [String: String]
     /// PR 5c — raw `[[triggers]]` array from config.toml, walked from the
     /// TOMLKit table tree into JSON-friendly `[[String: Any]]` so it can be
     /// JSON-encoded and shipped to the Rust trigger engine via FFI. We don't
@@ -73,6 +99,8 @@ struct TurmConfig {
             backgroundTint: clamp01(raw.background?.tint ?? defaults.backgroundTint),
             backgroundOpacity: clamp01(raw.background?.opacity ?? defaults.backgroundOpacity),
             osc52: raw.security?.osc52 ?? defaults.osc52,
+            tabsPosition: raw.tabs?.position.map(TabsPosition.parse) ?? defaults.tabsPosition,
+            keybindings: parseKeybindings(from: contents),
             triggers: parseTriggersArray(from: contents),
         )
     }
@@ -95,6 +123,8 @@ struct TurmConfig {
             backgroundTint: 0.6,
             backgroundOpacity: 1.0,
             osc52: .deny,
+            tabsPosition: .top,
+            keybindings: [:],
             triggers: [],
         )
     }
@@ -141,6 +171,24 @@ struct TurmConfig {
         return dict
     }
 
+    /// Walk the `[keybindings]` table into a `[combo: command]` dict. Same
+    /// rationale as triggers — the schema is a flat string-to-string dict
+    /// and we don't want a separate Decodable struct just for that.
+    private static func parseKeybindings(from contents: String) -> [String: String] {
+        guard let table = try? TOMLTable(string: contents),
+              let kb = table["keybindings"]?.table
+        else {
+            return [:]
+        }
+        var dict: [String: String] = [:]
+        for key in kb.keys {
+            if let val = kb[key], let s = val.string {
+                dict[key] = s
+            }
+        }
+        return dict
+    }
+
     private static func tomlValueToAny(_ v: TOMLValueConvertible) -> Any? {
         // Order matters: check leaf types before composites because TOMLValue
         // may report multiple accessors as non-nil for ambiguous cases.
@@ -177,6 +225,12 @@ private struct RawConfig: Decodable {
     var theme: ThemeSection?
     var background: BackgroundSection?
     var security: SecuritySection?
+    var tabs: TabsSection?
+}
+
+private struct TabsSection: Decodable {
+    var position: String?
+    // Linux schema also has `width` and `collapsed`; not consumed on macOS yet.
 }
 
 private struct TerminalSection: Decodable {
