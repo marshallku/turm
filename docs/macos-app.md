@@ -155,6 +155,19 @@ turmctl call echo.ping --params '{"hello":"x","sleep_ms":200}'
 # {"echoed":{"hello":"x","sleep_ms":200}, "from":"turm-plugin-echo"}  # 200ms+ blocking
 ```
 
+**Activation 처리 (PR 4 확장):**
+- `onStartup` → eager spawn (PR 3 원래 동작)
+- `onAction:<glob>` → eager spawn + 로그 (`lazy not yet implemented, spawning eagerly`). 진짜 lazy는 placeholder handler 등록 → first call에서 spawn → 후속 호출 큐잉 패턴이 필요해서 PR 5 (트리거 엔진)와 같이 갈 예정. git처럼 spawn cost < 100ms인 plugin은 eager가 손해 거의 없음. Slack/Calendar처럼 startup이 무거운 (auth, network) plugin들이 들어오기 시작하면 진짜 lazy 구현이 의미를 가짐.
+- `onEvent:<glob>` → 로그 후 skip. event-driven plugin을 eager로 띄우면 자원만 낭비 — 매칭되는 이벤트가 와야만 의미가 있고, 이벤트 라우팅은 트리거 엔진이 한다.
+
+**MACOS_PLUGINS (현재 install-macos.sh에서 자동 빌드/설치):**
+- `echo` (PR 3) — 프로토콜 sanity check
+- `git` (PR 4) — 6개 액션 (`git.list_workspaces`/`list_worktrees`/`worktree_add`/`worktree_remove`/`current_branch`/`status`). cross-platform deps만 사용 (serde, serde_json, toml). `~/.config/turm/workspaces.toml` (또는 `TURM_GIT_WORKSPACES_FILE` env override)에서 워크스페이스 정의 읽음. config 없으면 list_workspaces가 빈 배열 반환 (`fatal_error: null`) — graceful.
+
+**아직 enabled 못 된 plugins:**
+- `kb`, `todo`, `bookmark` — `renameat2` / `O_NOFOLLOW` 같은 Linux-only filesystem primitives 의존. atomic-create / symlink-safety 백엔드를 Apple File System 호환 형태로 갈아엎어야 함.
+- `slack`, `calendar`, `llm`, `discord` — `unix` cfg gate라 컴파일은 됨. 미검증: `keyring` `apple-native` Keychain prompt UX (특히 unsigned binary), 실제 OAuth 플로우.
+
 ---
 
 ## 파일별 구현 세부사항

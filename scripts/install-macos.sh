@@ -51,13 +51,13 @@ DO_TURMCTL=true
 DO_PLUGINS=true
 DO_LAUNCH=false
 
-# macOS-buildable plugins. KB / Todo / Bookmark are excluded today because
+# macOS-buildable plugins. KB / Todo / Bookmark are excluded because
 # they depend on Linux-only filesystem primitives (renameat2, O_NOFOLLOW)
 # and won't compile — see codex round-2 finding in docs/macos-parity-plan.md.
 # Slack / Calendar / LLM / Discord are Unix-gated and theoretically build
-# on macOS but their Keychain/auth UX hasn't been verified yet (PR 4+).
-# For PR 3 we only ship echo so the plugin host has something to talk to.
-MACOS_PLUGINS=(echo)
+# on macOS but their Keychain/auth UX hasn't been verified yet (PR 5+).
+# PR 4 added git (no platform-specific deps, just argv shell-out to /usr/bin/git).
+MACOS_PLUGINS=(echo git)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

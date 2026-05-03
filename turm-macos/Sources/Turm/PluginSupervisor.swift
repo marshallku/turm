@@ -55,10 +55,32 @@ final class PluginSupervisor {
         let manifests = PluginManifestStore.discover()
         for loaded in manifests {
             for service in loaded.manifest.services {
-                // PR 3 only handles onStartup. Other activations sit dormant
-                // until PR 5 wires deferred spawn into the trigger engine.
-                guard service.activation == "onStartup" else {
-                    let msg = "[turm-plugin] skipping \(loaded.manifest.plugin.name)/\(service.name) — activation \(service.activation) not yet implemented on macOS\n"
+                // Activation handling (PR 4 expansion):
+                //
+                // - `onStartup` → spawn eagerly (PR 3, original).
+                // - `onAction:<glob>` → spawn eagerly + log "lazy not yet
+                //   implemented". Real lazy activation needs a placeholder-handler
+                //   strategy (register provides[] with a deferred shim, spawn on
+                //   first call, queue subsequent calls until init completes).
+                //   That belongs with the trigger engine work (PR 5) where
+                //   action-pattern matching gets centralized. For light plugins
+                //   like git the eager-spawn cost is < 100ms; revisit when
+                //   slack/calendar/llm land where startup includes auth/network.
+                // - `onEvent:<glob>` → genuinely needs lazy because the plugin
+                //   only matters when matching events arrive — eager spawn
+                //   would burn resources. Skip with log.
+                let activation = service.activation
+                if activation == "onStartup" {
+                    // No log — common case, no surprise.
+                } else if activation.hasPrefix("onAction:") {
+                    let msg = "[turm-plugin] \(loaded.manifest.plugin.name)/\(service.name): activation \(activation) — lazy not yet implemented, spawning eagerly\n"
+                    FileHandle.standardError.write(Data(msg.utf8))
+                } else if activation.hasPrefix("onEvent:") {
+                    let msg = "[turm-plugin] \(loaded.manifest.plugin.name)/\(service.name): activation \(activation) needs trigger engine (PR 5) — skipping\n"
+                    FileHandle.standardError.write(Data(msg.utf8))
+                    continue
+                } else {
+                    let msg = "[turm-plugin] \(loaded.manifest.plugin.name)/\(service.name): unknown activation '\(activation)' — skipping\n"
                     FileHandle.standardError.write(Data(msg.utf8))
                     continue
                 }
