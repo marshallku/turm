@@ -1,30 +1,35 @@
 import Foundation
 
-/// Minimal macOS service plugin supervisor. PR 3 (Tier 3 spike) scope:
-/// discover manifests, spawn `onStartup` services, run the init handshake,
-/// register `provides[]` actions in `ActionRegistry`, route `action.invoke`
-/// frames over stdio, send `shutdown` notification on app quit.
+/// macOS service plugin supervisor. Discovers manifests, spawns services
+/// (eager or lazy depending on activation), runs the init handshake, registers
+/// `provides[]` actions in `ActionRegistry`, routes `action.invoke` over
+/// stdio, fans `event.publish` notifications onto `EventBus` so the trigger
+/// engine sees them, sends `shutdown` on app quit.
 ///
-/// What's intentionally NOT here yet (codex round-2 said do these later):
+/// Activation supported:
 ///
-/// - **Activation gating** beyond `onStartup`. `onAction:<glob>` and
-///   `onEvent:<glob>` need a deferred-spawn registry that wakes the plugin
-///   the first time a matching method/event lands. PR 5 (trigger engine).
+/// - `onStartup` (PR 3) — eager spawn at app launch. Required for plugins
+///   that must publish events from boot (echo heartbeat, calendar poller).
+/// - `onAction:<glob>` (PR 6a) — register placeholder handlers per
+///   `provides[]`; spawn on first matching action call via `LazyEntry.ensure`.
+///   Spawn runs off main thread so the 5s init-handshake ceiling can't
+///   freeze the UI. Concurrent first-callers serialize behind the entry's
+///   lock.
+///
+/// Still missing:
+///
+/// - **`onEvent:<glob>`** activation. Eager spawn defeats the point (plugin
+///   should only run when matching events arrive); needs the trigger engine
+///   to drive a "spawn on event match" path. Skipped with log today.
 /// - **Restart-on-crash policy.** A crashed plugin stays dead for the
-///   lifetime of this turm process. PR 4+ adds the supervisor loop.
-/// - **Event subscription** (`event.dispatch` outbound). Echo doesn't
-///   subscribe to anything, and we have no trigger engine yet to drive
-///   subscribed events. Wired in PR 5.
-/// - **Inbound `event.publish` forwarding to EventBus.** Plugin can emit
-///   events; we currently just log them. Will fan them onto `eventBus` once
-///   the trigger engine cares (PR 5).
-/// - **`provides[]` conflict resolution** across plugins. We have one
-///   plugin (echo) so no conflict can happen yet. Linux's
-///   `service_supervisor::resolve_provides` ports cleanly when needed.
+///   lifetime of this turm process. Hot-reload of the config doesn't
+///   recreate `LazyEntry` either, so an entry in `.failed` stays failed.
+/// - **Outbound `event.dispatch`.** Plugins that subscribe to bus events
+///   (`subscribes = [...]`) don't yet receive forwarded events.
+/// - **`provides[]` conflict resolution** across plugins.
 /// - **Process-group ownership + signal handlers + crash-recovery PID
-///   file** (codex I5). Today we just `terminate()` on `applicationWillTerminate`.
-///   Add when we have multiple production plugins (Slack/Calendar) where
-///   leaked processes start mattering.
+///   file** (codex I5). We rely today on stdin-EOF cascade + `shutdown`
+///   notification + `process.terminate()`.
 ///
 /// Threading model:
 ///
@@ -40,7 +45,13 @@ import Foundation
 final class PluginSupervisor {
     private let registry: ActionRegistry
     let eventBus: EventBus
+    /// Eagerly-spawned (`onStartup`) processes. Lazy processes are owned by
+    /// LazyEntry instances after first spawn — collected separately at
+    /// shutdown time.
     private var processes: [PluginProcess] = []
+    /// Lazy `onAction:<glob>` entries keyed by the service identifier so we
+    /// can iterate them at shutdown.
+    private var lazyEntries: [String: LazyEntry] = [:]
 
     init(registry: ActionRegistry, eventBus: EventBus) {
         self.registry = registry
@@ -55,49 +66,42 @@ final class PluginSupervisor {
         let manifests = PluginManifestStore.discover()
         for loaded in manifests {
             for service in loaded.manifest.services {
-                // Activation handling (PR 4 expansion):
+                // Activation handling:
                 //
-                // - `onStartup` → spawn eagerly (PR 3, original).
-                // - `onAction:<glob>` → spawn eagerly + log "lazy not yet
-                //   implemented". Real lazy activation needs a placeholder-handler
-                //   strategy (register provides[] with a deferred shim, spawn on
-                //   first call, queue subsequent calls until init completes).
-                //   That belongs with the trigger engine work (PR 5) where
-                //   action-pattern matching gets centralized. For light plugins
-                //   like git the eager-spawn cost is < 100ms; revisit when
-                //   slack/calendar/llm land where startup includes auth/network.
-                // - `onEvent:<glob>` → genuinely needs lazy because the plugin
-                //   only matters when matching events arrive — eager spawn
-                //   would burn resources. Skip with log.
+                // - `onStartup` → spawn eagerly. Plugins that need to publish
+                //   events from boot (slack, calendar, echo heartbeat) need
+                //   to be alive before the first user interaction.
+                // - `onAction:<glob>` → register placeholder handlers per
+                //   provides[]; spawn on first call. Saves cold-start cost
+                //   for plugins that may not be invoked every session
+                //   (git, llm, kb-when-it-lands).
+                // - `onEvent:<glob>` → skip with log. Eager spawn defeats
+                //   the point (plugin should only run when matching events
+                //   arrive) and the trigger engine doesn't yet drive
+                //   spawn-on-event. Future work.
                 let activation = service.activation
                 if activation == "onStartup" {
-                    // No log — common case, no surprise.
+                    spawnEager(loaded: loaded, service: service)
                 } else if activation.hasPrefix("onAction:") {
-                    let msg = "[turm-plugin] \(loaded.manifest.plugin.name)/\(service.name): activation \(activation) — lazy not yet implemented, spawning eagerly\n"
-                    FileHandle.standardError.write(Data(msg.utf8))
+                    registerLazy(loaded: loaded, service: service)
                 } else if activation.hasPrefix("onEvent:") {
-                    let msg = "[turm-plugin] \(loaded.manifest.plugin.name)/\(service.name): activation \(activation) needs trigger engine (PR 5) — skipping\n"
+                    let msg = "[turm-plugin] \(loaded.manifest.plugin.name)/\(service.name): activation \(activation) needs event-driven spawn — skipping (TODO)\n"
                     FileHandle.standardError.write(Data(msg.utf8))
-                    continue
                 } else {
                     let msg = "[turm-plugin] \(loaded.manifest.plugin.name)/\(service.name): unknown activation '\(activation)' — skipping\n"
                     FileHandle.standardError.write(Data(msg.utf8))
-                    continue
                 }
-                guard let proc = PluginProcess.spawn(loaded: loaded, service: service) else {
-                    continue
-                }
-                proc.eventBus = eventBus
-                processes.append(proc)
-                registerActions(for: proc)
             }
         }
     }
 
-    private func registerActions(for proc: PluginProcess) {
+    private func spawnEager(loaded: LoadedPluginManifest, service: PluginServiceDef) {
+        guard let proc = PluginProcess.spawn(loaded: loaded, service: service) else {
+            return
+        }
+        proc.eventBus = eventBus
+        processes.append(proc)
         for actionName in proc.provides {
-            // Capture proc weakly so a future shutdown doesn't keep the
-            // pipes alive via the registry's strong reference.
             registry.register(actionName) { [weak proc, actionName] params, completion in
                 guard let proc else {
                     completion(RPCError(
@@ -111,6 +115,37 @@ final class PluginSupervisor {
         }
     }
 
+    /// Register placeholder handlers for each `provides[]` entry without
+    /// spawning the plugin yet. First call to any of these handlers triggers
+    /// `LazyEntry.ensure` which kicks the spawn off-main and serializes
+    /// concurrent first-callers behind a lock. Once the plugin is up the
+    /// same handler stays in place; ensure() is a fast lock + early-return
+    /// on subsequent calls.
+    private func registerLazy(loaded: LoadedPluginManifest, service: PluginServiceDef) {
+        let key = "\(loaded.manifest.plugin.name)/\(service.name)"
+        let entry = LazyEntry(loaded: loaded, service: service, eventBus: eventBus)
+        lazyEntries[key] = entry
+        for actionName in service.provides {
+            registry.register(actionName) { [weak entry, actionName] params, completion in
+                guard let entry else {
+                    completion(RPCError(
+                        code: "plugin_unavailable",
+                        message: "lazy plugin entry for \(actionName) is gone",
+                    ))
+                    return
+                }
+                entry.ensure { result in
+                    switch result {
+                    case let .failure(err):
+                        completion(err)
+                    case let .success(proc):
+                        proc.invoke(action: actionName, params: params, completion: completion)
+                    }
+                }
+            }
+        }
+    }
+
     /// Send `shutdown` notification to every plugin and wait briefly before
     /// force-terminating. Called from `applicationWillTerminate`.
     func shutdown() {
@@ -118,6 +153,136 @@ final class PluginSupervisor {
             p.shutdown()
         }
         processes.removeAll()
+        for entry in lazyEntries.values {
+            entry.shutdown()
+        }
+        lazyEntries.removeAll()
+    }
+}
+
+// MARK: - LazyEntry
+
+/// Tracks a `onAction:<glob>` plugin's spawn lifecycle. State machine:
+///
+/// - `.notStarted` — initial. First `ensure` call moves to `.spawning` and
+///   kicks off the spawn worker.
+/// - `.spawning` — a background thread is running `PluginProcess.spawn`
+///   right now. New `ensure` callers append their completion to `waiters`
+///   and block (well, store-and-return — completion fires async when
+///   spawn finishes).
+/// - `.ready(proc)` — plugin alive. `ensure` returns the cached proc
+///   immediately.
+/// - `.failed(err)` — spawn failed and we're not retrying. `ensure`
+///   returns the cached error so callers see a consistent message instead
+///   of attempting to spawn again per-call (cheap to retry, but log spam
+///   from a permanently-broken plugin gets old fast). Hot-reload (PR 5c
+///   `setTriggers` reapply) is the user's escape hatch — we don't
+///   currently re-create LazyEntry on config reload, so a `failed` entry
+///   stays failed for the lifetime of this turm process.
+final class LazyEntry: @unchecked Sendable {
+    private let loaded: LoadedPluginManifest
+    private let service: PluginServiceDef
+    private weak var eventBus: EventBus?
+
+    private let lock = NSLock()
+    private var state: State = .notStarted
+    private var waiters: [(Result<PluginProcess, RPCError>) -> Void] = []
+
+    enum State {
+        case notStarted
+        case spawning
+        case ready(PluginProcess)
+        case failed(RPCError)
+    }
+
+    init(loaded: LoadedPluginManifest, service: PluginServiceDef, eventBus: EventBus) {
+        self.loaded = loaded
+        self.service = service
+        self.eventBus = eventBus
+    }
+
+    /// Resolve the proc synchronously if `.ready`, otherwise kick off (or
+    /// join an in-flight) spawn and call completion when ready. Completion
+    /// fires on the spawn worker thread for the first caller, or directly
+    /// on the calling thread for the cached-state cases.
+    func ensure(completion: @escaping (Result<PluginProcess, RPCError>) -> Void) {
+        lock.lock()
+        switch state {
+        case let .ready(proc):
+            lock.unlock()
+            completion(.success(proc))
+        case let .failed(err):
+            lock.unlock()
+            completion(.failure(err))
+        case .spawning:
+            waiters.append(completion)
+            lock.unlock()
+        case .notStarted:
+            state = .spawning
+            waiters.append(completion)
+            lock.unlock()
+            // Off-main background spawn. We avoid main actor here because
+            // spawn includes a 5s init-handshake semaphore wait — blocking
+            // main for that long during a plugin first-call would freeze UI.
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.runSpawn()
+            }
+        }
+    }
+
+    private func runSpawn() {
+        let pluginName = loaded.manifest.plugin.name
+        let serviceName = service.name
+        FileHandle.standardError.write(Data("[turm-plugin] \(pluginName)/\(serviceName): lazy spawn (first call)\n".utf8))
+
+        let result: Result<PluginProcess, RPCError>
+        if let proc = PluginProcess.spawn(loaded: loaded, service: service) {
+            // Hook event bus same as eager path so plugin event.publish
+            // notifications still flow into the trigger engine.
+            proc.eventBus = eventBus
+            result = .success(proc)
+        } else {
+            result = .failure(RPCError(
+                code: "spawn_failed",
+                message: "lazy spawn failed for \(pluginName)/\(serviceName) — see [turm-plugin] stderr for details",
+            ))
+        }
+
+        lock.lock()
+        switch result {
+        case let .success(proc):
+            state = .ready(proc)
+        case let .failure(err):
+            state = .failed(err)
+        }
+        let toFire = waiters
+        waiters.removeAll()
+        lock.unlock()
+
+        for waiter in toFire {
+            waiter(result)
+        }
+    }
+
+    /// Tear down the spawned process if any. Called from supervisor.shutdown.
+    func shutdown() {
+        lock.lock()
+        let toShutdown: PluginProcess? = if case let .ready(proc) = state {
+            proc
+        } else {
+            nil
+        }
+        // Move state to a terminal so any future ensure() reports cleanly
+        // rather than racing with an in-progress shutdown.
+        state = .failed(RPCError(code: "supervisor_shutdown", message: "supervisor shutdown"))
+        let strandedWaiters = waiters
+        waiters.removeAll()
+        lock.unlock()
+
+        toShutdown?.shutdown()
+        for waiter in strandedWaiters {
+            waiter(.failure(RPCError(code: "supervisor_shutdown", message: "supervisor shutdown before lazy spawn completed")))
+        }
     }
 }
 
