@@ -6,6 +6,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var tabVC: TabViewController?
     private let socketServer = SocketServer()
     private let eventBus = EventBus()
+    private let actionRegistry = ActionRegistry()
     private var configWatcher: ConfigWatcher?
 
     func applicationDidFinishLaunching(_: Notification) {
@@ -14,6 +15,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Remove once Tier 2.4 (TriggerEngine via FFI) replaces it with real
         // engine startup.
         TurmFFI.runSmokeTest()
+
+        // PR 2 (Tier 2.3) registry seam — register first-party actions so the
+        // socket dispatcher can hand off to them via tryDispatch BEFORE the
+        // legacy switch fires. Plugin host (PR 3) and trigger engine (PR 5)
+        // will register additional actions through this same path.
+        registerBuiltinActions()
 
         let config = TurmConfig.load()
         let theme = TurmTheme.byName(config.themeName) ?? .catppuccinMocha
@@ -210,6 +217,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         tabVC?.activeTerminal?.zoomReset()
     }
 
+    // MARK: - Action Registry
+
+    /// First-party `system.*` actions that should be reachable through
+    /// the registry from day one. Plugin host (PR 3) and trigger engine
+    /// (PR 5) will register their own handlers via the same registry.
+    private func registerBuiltinActions() {
+        // system.ffi_test — proxy to TurmFFI.callJSON. Two purposes:
+        //   1. Proves the registry seam is reachable from `turmctl call`,
+        //      end-to-end through SocketServer.dispatch.
+        //   2. Gives PR 5 (trigger engine via FFI) a smoke test target it
+        //      can dispatch as a registered action — same code path as a
+        //      plugin will use.
+        actionRegistry.register("system.ffi_test") { params, completion in
+            // Pass through whatever the caller sent; if absent, send an
+            // empty object so the FFI side still gets a valid JSON object.
+            let payload = params.isEmpty ? ["caller": "system.ffi_test"] : params
+            if let echoed = TurmFFI.callJSON(payload) {
+                completion(["echoed": echoed, "ffi_version": TurmFFI.version()])
+            } else {
+                completion(RPCError(
+                    code: "ffi_error",
+                    message: TurmFFI.lastError() ?? "TurmFFI.callJSON returned nil",
+                ))
+            }
+        }
+
+        // system.list_actions — introspection for diagnostics. Returns
+        // every name registered through the action registry. Mirrors
+        // Linux's debug behavior of being able to query "what actions
+        // exist right now".
+        actionRegistry.register("system.list_actions") { [weak self] _, completion in
+            guard let self else {
+                completion(RPCError(code: "no_app", message: "AppDelegate gone"))
+                return
+            }
+            completion([
+                "count": actionRegistry.count,
+                "names": actionRegistry.names(),
+            ])
+        }
+    }
+
     // MARK: - Socket Server
 
     // MARK: - Config Watcher
@@ -239,6 +288,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleCommand(method: String, params: [String: Any], completion: @escaping (Any?) -> Void) {
+        // Registry takes precedence over the legacy switch — PR 3 (plugin
+        // supervisor) and PR 5 (trigger engine) register their handlers
+        // here. tryDispatch returns false when nothing's registered under
+        // `method`, in which case completion is untouched and we fall
+        // through to the hardcoded handlers below.
+        if actionRegistry.tryDispatch(method, params: params, completion: completion) {
+            return
+        }
+
         guard let vc = tabVC else { completion(nil); return }
 
         switch method {

@@ -128,6 +128,23 @@ swift build                          →  Turm (links libturm_ffi.a)
 **Find 메뉴 (in-terminal search):**
 `performFindPanelAction(_:)` 메서드를 AppDelegate에 직접 선언하고, 활성 터미널 뷰에 동일한 셀렉터로 포워딩합니다. SwiftTerm의 `MacTerminalView`가 `performFindPanelAction(_:)`을 구현하고 있어서 Cmd+F / Cmd+G / Cmd+Shift+G가 SwiftTerm 내장 검색바를 트리거합니다. 검색바에는 case-sensitive, regex, whole-word 옵션이 포함됩니다.
 
+**ActionRegistry seam (PR 2 / Tier 2.3):**
+`handleCommand(method:params:completion:)`의 첫 줄이 `actionRegistry.tryDispatch(method, params:, completion:)`를 호출. 등록된 핸들러가 있으면 거기서 처리하고 리턴; 없으면 (`tryDispatch` returns `false`) 기존 hardcoded switch로 fall-through. PR 3(플러그인 슈퍼바이저)와 PR 5(트리거 엔진)가 이 registry에 자기 핸들러를 등록할 예정.
+
+`registerBuiltinActions()`에서 launch 시점에 `system.*` 액션 등록:
+- **`system.ffi_test`** — `params`(없으면 `{caller: "system.ffi_test"}`)를 `TurmFFI.callJSON`으로 통과시키고 `{echoed, ffi_version}` 반환. socket → registry → FFI → Rust → 다시 socket까지 entire seam을 단발 호출로 검증 가능. PR 5가 트리거 엔진 dispatch target 으로도 재사용 예정.
+- **`system.list_actions`** — `{count, names: [...]}` 반환. 디버깅 + 추후 플러그인 등록 확인용.
+
+```bash
+turmctl call system.list_actions
+# {"count": 2, "names": ["system.ffi_test", "system.list_actions"]}
+
+turmctl call system.ffi_test --params '{"hello":"x"}'
+# {"echoed": {"echoed_at": <ms>, "hello": "x"}, "ffi_version": "turm-ffi 0.1.0"}
+```
+
+`ActionRegistry`는 Linux full surface(`register_silent` / `register_blocking` / `invoke` / `try_invoke` / completion bus)의 일부만 가져옴. `register_blocking`은 의도적으로 보류 — Linux는 dispatch 즉시 리턴 후 worker thread에서 blocking 핸들러 실행하지만, macOS 소켓 dispatch가 main-actor completion 까지 socket thread를 세마포어로 잡아두는 모델이라 섞으면 데드락 위험 있음. PR 5에서 트리거 엔진 wiring할 때 async boundary 다시 설계.
+
 ### TabViewController.swift (`@MainActor`)
 
 탭 목록을 `[PaneManager]`로 관리. `contentArea`에 현재 탭의 `containerView`를 embed합니다.
