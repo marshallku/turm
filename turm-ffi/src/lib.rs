@@ -35,13 +35,26 @@
 //!
 //! Anything beyond this set is for follow-up PRs (PR 2+: registry seam, then
 //! supervisor, then trigger engine). Keep this file boring on purpose.
+//!
+//! ## PR 5c additions — engine surface
+//!
+//! Wraps `turm_core::trigger::TriggerEngine` so the macOS Swift host can
+//! load triggers, dispatch events, and receive action-fire callbacks
+//! without reimplementing the engine semantics in Swift. The engine
+//! itself stays in Rust (single source of truth across Linux + macOS);
+//! this module is just the C-ABI bridge.
 
 use std::cell::RefCell;
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use turm_core::action_registry::ActionResult;
+use turm_core::event_bus::Event;
+use turm_core::protocol::ResponseError;
+use turm_core::trigger::{Trigger, TriggerEngine, TriggerSink};
 
 thread_local! {
     /// Per-thread last-error slot. Cleared by every successful FFI call.
@@ -189,4 +202,261 @@ pub extern "C" fn turm_ffi_last_error() -> *const c_char {
         Some(cs) => cs.as_ptr(),
         None => ptr::null(),
     })
+}
+
+// ============================================================================
+// PR 5c — Engine FFI surface
+// ============================================================================
+
+/// Opaque handle wrapping `Arc<TriggerEngine>` plus the C-side action
+/// callback. Kept at module level (not behind `LAST_ERROR`-style thread
+/// locals) so the Swift host can hold a single engine instance for the
+/// lifetime of the app and serialize calls into it through its own
+/// `DispatchQueue`. The struct is `pub` for the FFI but its body is
+/// opaque from C — callers only ever see `*mut EngineHandle`.
+pub struct EngineHandle {
+    engine: Arc<TriggerEngine>,
+    /// We keep the FfiSink Arc here so it shares lifetime with the
+    /// engine — engine internally also holds an Arc to the same sink
+    /// via `Arc<dyn TriggerSink>` (cloned at `TriggerEngine::new`),
+    /// but holding our own ref makes "callback is set" testable.
+    _sink: Arc<FfiSink>,
+}
+
+/// `TriggerSink` impl that forwards action dispatch into a C function
+/// pointer registered by the Swift host. Fire-and-forget — we don't
+/// wait for Swift's ActionRegistry to actually run the action. This
+/// matches Linux's `LiveTriggerSink` shape (returns `{queued: true}`
+/// immediately; real result arrives async or via completion-event
+/// fan-out later). For PR 5c the spike doesn't exercise the await
+/// primitive, so the placeholder result is enough.
+struct FfiSink {
+    /// Atomic-pointer-like cell so the callback can be installed AFTER
+    /// `turm_engine_create`. Stored as `usize` (not `AtomicPtr`) because
+    /// the C function-pointer type is fixed at compile time and we
+    /// only need swap-on-set, not lock-free updates.
+    callback: std::sync::Mutex<Option<ActionCallback>>,
+    /// Swift-owned context pointer (typically `Unmanaged<TurmEngine>.toOpaque()`).
+    /// Stored as `usize` so the struct stays `Send + Sync` automatically;
+    /// we cast back to `*mut c_void` only at invocation time. Lifetime
+    /// is the host's responsibility — the host must keep its receiver
+    /// alive at least until `turm_engine_destroy` returns.
+    user_data: std::sync::Mutex<usize>,
+}
+
+/// C-callable signature the Swift host registers via
+/// `turm_engine_set_action_callback`. The engine calls this on
+/// whatever thread `turm_engine_dispatch_event` was invoked from
+/// (Swift's serial DispatchQueue today). The callback receives
+/// borrowed strings — must NOT free them. To bridge into a Swift
+/// closure the host typically copies via `String(cString:)` and
+/// re-dispatches to the main actor.
+pub type ActionCallback = unsafe extern "C" fn(
+    user_data: *mut c_void,
+    action_name: *const c_char,
+    params_json: *const c_char,
+);
+
+impl TriggerSink for FfiSink {
+    fn dispatch_action(&self, action: &str, params: Value) -> ActionResult {
+        let cb_opt = *self.callback.lock().unwrap();
+        let user = *self.user_data.lock().unwrap();
+        let Some(cb) = cb_opt else {
+            // No callback registered yet — log and treat as "no sink available"
+            // so the engine doesn't keep retrying. Returning an Err here would
+            // be cleaner but ActionResult's Err type is ResponseError which
+            // requires a code/message — `{queued:false, reason:"no callback"}`
+            // in Ok keeps the engine moving without polluting the error path.
+            eprintln!("[turm-ffi] dispatch_action({action}) but no Swift callback registered");
+            return Ok(json!({ "queued": false, "reason": "no callback registered" }));
+        };
+        // Hand-rolled CString ladder. CString::new fails on NUL bytes;
+        // for action names that's defensive (action keys are well-formed),
+        // for params it's the caller's problem if their JSON contains NULs.
+        let action_cstr = match CString::new(action) {
+            Ok(c) => c,
+            Err(_) => {
+                return Err(ResponseError {
+                    code: "ffi_error".into(),
+                    message: format!("action name {action:?} contained NUL byte"),
+                });
+            }
+        };
+        let params_str = serde_json::to_string(&params).unwrap_or_else(|_| "null".to_string());
+        let params_cstr = match CString::new(params_str) {
+            Ok(c) => c,
+            Err(_) => {
+                return Err(ResponseError {
+                    code: "ffi_error".into(),
+                    message: "params JSON contained NUL byte".into(),
+                });
+            }
+        };
+        // SAFETY: callback is a function pointer the host registered;
+        // user_data is the host-owned pointer the host promised to keep
+        // alive until destroy. Both the action and params CStrings live
+        // until end-of-function.
+        unsafe {
+            cb(
+                user as *mut c_void,
+                action_cstr.as_ptr(),
+                params_cstr.as_ptr(),
+            );
+        }
+        Ok(json!({ "queued": true }))
+    }
+}
+
+/// Construct a fresh trigger engine + FfiSink. No triggers loaded yet —
+/// host calls `turm_engine_set_triggers` next. No callback registered —
+/// host calls `turm_engine_set_action_callback` next.
+///
+/// # Safety
+///
+/// The returned pointer must be passed to `turm_engine_destroy` exactly
+/// once, after no concurrent FFI call into the engine is still in flight.
+#[unsafe(no_mangle)]
+pub extern "C" fn turm_engine_create() -> *mut EngineHandle {
+    let sink = Arc::new(FfiSink {
+        callback: std::sync::Mutex::new(None),
+        user_data: std::sync::Mutex::new(0),
+    });
+    let engine = Arc::new(TriggerEngine::new(sink.clone()));
+    let handle = Box::new(EngineHandle {
+        engine,
+        _sink: sink,
+    });
+    Box::into_raw(handle)
+}
+
+/// Free the engine handle. After this call any further FFI use of the
+/// pointer is UB.
+///
+/// # Safety
+///
+/// Pointer must come from `turm_engine_create` and not have been freed
+/// already. Caller must ensure no other thread is mid-call into the
+/// engine when destroy runs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn turm_engine_destroy(handle: *mut EngineHandle) {
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: caller contract guarantees `handle` came from `Box::into_raw`
+    // in `turm_engine_create` and hasn't been freed.
+    let _ = unsafe { Box::from_raw(handle) };
+}
+
+/// Install or replace the action callback. NULL `callback` clears the
+/// slot (engine reverts to "no callback registered" log + skip).
+///
+/// # Safety
+///
+/// `handle` must be a valid pointer from `turm_engine_create`. `user_data`
+/// must remain alive until either (a) replaced by a subsequent
+/// `set_action_callback` call, or (b) `turm_engine_destroy` returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn turm_engine_set_action_callback(
+    handle: *mut EngineHandle,
+    callback: Option<ActionCallback>,
+    user_data: *mut c_void,
+) {
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: caller contract.
+    let h = unsafe { &*handle };
+    *h._sink.callback.lock().unwrap() = callback;
+    *h._sink.user_data.lock().unwrap() = user_data as usize;
+}
+
+/// Parse a JSON array of triggers and replace the engine's trigger set.
+/// Returns the number of triggers loaded on success, -1 on JSON parse
+/// failure (use `turm_ffi_last_error` for the message).
+///
+/// JSON shape mirrors the TOML `[[triggers]]` table — each element
+/// matches `turm_core::trigger::Trigger`'s Deserialize impl. Hot-reload
+/// just calls this again with the new array; the engine atomically
+/// swaps the trigger list and drops any in-flight await state.
+///
+/// # Safety
+///
+/// `handle` must be a valid engine pointer. `triggers_json` must be a
+/// NUL-terminated UTF-8 string. Both must remain valid for the duration
+/// of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn turm_engine_set_triggers(
+    handle: *mut EngineHandle,
+    triggers_json: *const c_char,
+) -> i32 {
+    if handle.is_null() || triggers_json.is_null() {
+        set_last_error("turm_engine_set_triggers: NULL pointer");
+        return -1;
+    }
+    // SAFETY: caller contract.
+    let h = unsafe { &*handle };
+    let json_str = unsafe { CStr::from_ptr(triggers_json) }.to_string_lossy();
+    let triggers: Vec<Trigger> = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(format!("turm_engine_set_triggers: JSON parse error: {e}"));
+            return -1;
+        }
+    };
+    let count = triggers.len() as i32;
+    h.engine.set_triggers(triggers);
+    clear_last_error();
+    count
+}
+
+/// Dispatch an event into the engine. Engine matches against loaded
+/// triggers and fires the C action callback for each match. Returns
+/// the number of triggers that fired.
+///
+/// # Safety
+///
+/// `handle` must be a valid engine pointer. `event_kind` and `payload_json`
+/// must be NUL-terminated UTF-8 (payload may be NULL → defaults to `null`).
+/// All pointers must outlive the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn turm_engine_dispatch_event(
+    handle: *mut EngineHandle,
+    event_kind: *const c_char,
+    payload_json: *const c_char,
+) -> i32 {
+    if handle.is_null() || event_kind.is_null() {
+        set_last_error("turm_engine_dispatch_event: NULL pointer");
+        return -1;
+    }
+    // SAFETY: caller contract.
+    let h = unsafe { &*handle };
+    let kind = unsafe { CStr::from_ptr(event_kind) }
+        .to_string_lossy()
+        .into_owned();
+    let payload: Value = if payload_json.is_null() {
+        Value::Null
+    } else {
+        let s = unsafe { CStr::from_ptr(payload_json) }.to_string_lossy();
+        serde_json::from_str(&s).unwrap_or(Value::Null)
+    };
+    let event = Event::new(kind, "macos.eventbus", payload);
+    let fired = h.engine.dispatch(&event, None);
+    clear_last_error();
+    fired as i32
+}
+
+/// Number of triggers currently loaded. Diagnostic — useful for
+/// `system.list_triggers`-equivalent introspection.
+///
+/// # Safety
+///
+/// `handle` must be a valid engine pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn turm_engine_count_triggers(handle: *mut EngineHandle) -> i32 {
+    if handle.is_null() {
+        return -1;
+    }
+    // SAFETY: caller contract.
+    let h = unsafe { &*handle };
+    h.engine.count() as i32
 }

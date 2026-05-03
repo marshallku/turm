@@ -11,6 +11,13 @@ final class EventBus: @unchecked Sendable {
     private let lock = NSLock()
     private var channels: [EventChannel] = []
 
+    /// Optional fan-out hook fired BEFORE channel broadcast, on the
+    /// caller's thread. Set by AppDelegate to forward every event into
+    /// the trigger engine (PR 5c) without making EventBus aware of
+    /// TurmEngine. Closure must be cheap — runs synchronously on the
+    /// broadcast call's thread.
+    nonisolated(unsafe) var onBroadcast: (@Sendable (_ kind: String, _ data: [String: Any]) -> Void)?
+
     func subscribe() -> EventChannel {
         let ch = EventChannel()
         lock.withLock { channels.append(ch) }
@@ -19,6 +26,12 @@ final class EventBus: @unchecked Sendable {
 
     /// Broadcast an event to all live subscribers. Dead subscribers are pruned.
     func broadcast(event: String, data: [String: Any] = [:]) {
+        // Fire the trigger-engine hook first — keeps the engine in
+        // the same logical "tick" as the channel publish so a trigger
+        // that itself broadcasts (chained workflows) gets its event
+        // ordered immediately after the original.
+        onBroadcast?(event, data)
+
         let payload: [String: Any] = ["event": event, "data": data]
         guard
             let jsonData = try? JSONSerialization.data(withJSONObject: payload),

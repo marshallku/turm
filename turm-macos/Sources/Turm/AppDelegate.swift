@@ -8,6 +8,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let eventBus = EventBus()
     private let actionRegistry = ActionRegistry()
     private lazy var pluginSupervisor = PluginSupervisor(registry: actionRegistry, eventBus: eventBus)
+    /// PR 5c — Rust trigger engine via FFI. Lazy because the underlying
+    /// turm_engine_create() must run AFTER process startup; constructing it
+    /// at property-init time risks a cold-launch race. Created the first
+    /// time `applicationDidFinishLaunching` references it.
+    private lazy var turmEngine = TurmEngine()
     private var configWatcher: ConfigWatcher?
 
     func applicationDidFinishLaunching(_: Notification) {
@@ -33,6 +38,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let config = TurmConfig.load()
         let theme = TurmTheme.byName(config.themeName) ?? .catppuccinMocha
+
+        // PR 5c (Tier 2.4) trigger engine via FFI — wire EventBus broadcasts
+        // (including plugin event.publish forwards) into the Rust trigger
+        // engine, which fires actions via the ActionRegistry callback.
+        // Order: registry must already exist (PR 2), supervisor must already
+        // have registered plugin provides[] (above) so triggers can target
+        // plugin actions on the very first event, config must be loaded so
+        // the [[triggers]] array is available.
+        turmEngine.actionRegistry = actionRegistry
+        eventBus.onBroadcast = { [weak turmEngine] kind, data in
+            // EventBus.broadcast can fire from any thread (plugin reader
+            // thread for event.publish, main actor for tab.opened, etc.).
+            // dispatchEvent enters the Rust engine which has its own
+            // RwLock — safe to call from any thread. Log only when a
+            // trigger actually matches so heartbeat noise doesn't drown
+            // the useful signal.
+            let n = turmEngine?.dispatchEvent(kind: kind, payload: data) ?? 0
+            if n > 0 {
+                FileHandle.standardError.write(Data("[turm-engine] event \(kind) fired \(n) trigger(s)\n".utf8))
+            }
+        }
+        let triggerJSON = TurmConfig.triggersJSON(from: config)
+        if let count = turmEngine.setTriggers(triggerJSON) {
+            FileHandle.standardError.write(Data("[turm-engine] loaded \(count) trigger(s) from config.toml\n".utf8))
+        }
 
         setupMenuBar()
 
@@ -68,10 +98,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_: Notification) {
-        // Plugin supervisor first so plugins receive `shutdown` before we
-        // stop accepting incoming socket commands; ordering doesn't matter
-        // for correctness (socket clients can't reach already-terminated
-        // plugins) but ensures clean teardown when both shutdowns log.
+        // Order matters:
+        // 1. Engine first — clears the C action callback so no in-flight
+        //    plugin event.publish can fire into a stale ActionRegistry.
+        // 2. Supervisor — sends `shutdown` to plugins so they stop
+        //    publishing further events.
+        // 3. Socket — stops accepting new turmctl connections.
+        // 4. Config watcher — stops file watching.
+        turmEngine.shutdown()
         pluginSupervisor.shutdown()
         socketServer.stop()
         configWatcher?.stop()
@@ -290,6 +324,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let newConfig = TurmConfig.load()
         let newTheme = TurmTheme.byName(newConfig.themeName) ?? .catppuccinMocha
         tabVC?.applyConfig(newConfig, theme: newTheme)
+        // Reload triggers — engine swap is atomic; old await state drops
+        // (matches Linux core-lib.md docs: "all-or-nothing reload").
+        let triggerJSON = TurmConfig.triggersJSON(from: newConfig)
+        if let count = turmEngine.setTriggers(triggerJSON) {
+            FileHandle.standardError.write(Data("[turm-engine] reloaded \(count) trigger(s) on config.toml change\n".utf8))
+        }
         eventBus.broadcast(event: "config.reloaded", data: ["theme": newTheme.name])
     }
 

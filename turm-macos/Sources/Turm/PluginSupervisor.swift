@@ -39,7 +39,7 @@ import Foundation
 @MainActor
 final class PluginSupervisor {
     private let registry: ActionRegistry
-    private let eventBus: EventBus
+    let eventBus: EventBus
     private var processes: [PluginProcess] = []
 
     init(registry: ActionRegistry, eventBus: EventBus) {
@@ -87,6 +87,7 @@ final class PluginSupervisor {
                 guard let proc = PluginProcess.spawn(loaded: loaded, service: service) else {
                     continue
                 }
+                proc.eventBus = eventBus
                 processes.append(proc)
                 registerActions(for: proc)
             }
@@ -132,6 +133,11 @@ final class PluginSupervisor {
 final class PluginProcess: @unchecked Sendable {
     let pluginName: String
     private(set) var provides: [String] = []
+    /// Set by the supervisor before spawn returns. Plugin notifications
+    /// of kind `event.publish` get fanned onto this bus so the trigger
+    /// engine (and any other subscriber) sees them. Optional so unit
+    /// tests / dry-runs can construct a process without an event bus.
+    weak var eventBus: EventBus?
 
     private let process: Process
     private let stdinHandle: FileHandle
@@ -405,15 +411,19 @@ final class PluginProcess: @unchecked Sendable {
             return
         }
 
-        // Notification from plugin (no id). Today we only log event.publish;
-        // PR 5 will fan it onto the EventBus for the trigger engine.
+        // Notification from plugin (no id). PR 5c: event.publish frames
+        // get fanned onto EventBus so the trigger engine (and any other
+        // subscriber) can observe the event. AppDelegate wires
+        // eventBus.onBroadcast → TurmEngine.dispatchEvent so the chain
+        // closes plugin → eventBus → engine → callback → ActionRegistry.
         if let method = obj["method"] as? String {
             switch method {
             case "event.publish":
                 if let params = obj["params"] as? [String: Any],
                    let kind = params["kind"] as? String
                 {
-                    log("[turm-plugin] \(pluginName): event.publish \(kind) (not forwarded yet — PR 5)")
+                    let payload = (params["payload"] as? [String: Any]) ?? [:]
+                    eventBus?.broadcast(event: kind, data: payload)
                 }
             default:
                 log("[turm-plugin] \(pluginName): unknown notification \(method)")

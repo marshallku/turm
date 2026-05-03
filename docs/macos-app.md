@@ -105,7 +105,63 @@ swift build                          →  Turm (links libturm_ffi.a)
 - `turm-macos/Package.swift` — `Turm` exec target에 `linkerSettings: [.unsafeFlags(["-L../target/release"]), .linkedLibrary("turm_ffi")]`. 상대경로 `../target/release`는 link 시점에 패키지 루트(`turm-macos/`) 기준으로 풀려 cargo workspace target 디렉토리를 가리킴.
 - `turm-macos/Sources/Turm/FFIBridge.swift` — `TurmFFI` enum 파사드. C 포인터를 Swift 호출자에게 노출하지 않음. `String(cString:)` copy 후 즉시 `turm_ffi_free_string`으로 free, ownership round-trip 닫힘.
 
-**Smoke test:** `AppDelegate.applicationDidFinishLaunching`의 `TurmFFI.runSmokeTest()`가 매 launch마다 stderr에 `[turm-ffi] version = ...` + `[turm-ffi] echo round-trip = ...`를 찍음. `echoed_at`는 Rust가 만든 unix-ms timestamp이므로 round-trip이 진짜로 일어나는지 확인 가능. Tier 2.4 (TriggerEngine via FFI)에서 실제 엔진 startup으로 교체 예정.
+**Smoke test:** `AppDelegate.applicationDidFinishLaunching`의 `TurmFFI.runSmokeTest()`가 매 launch마다 stderr에 `[turm-ffi] version = ...` + `[turm-ffi] echo round-trip = ...`를 찍음. `echoed_at`는 Rust가 만든 unix-ms timestamp이므로 round-trip이 진짜로 일어나는지 확인 가능. PR 5c가 실제 trigger engine startup도 같은 staticlib로 추가했음 (아래 Trigger Engine 섹션 참고).
+
+### Trigger Engine via FFI (PR 5c / Tier 2.4)
+
+`turm_core::trigger::TriggerEngine`을 그대로 wrap. Engine 자체는 Rust에 있고(Linux/macOS 공통 단일 진실), macOS는 C-ABI 다리만 소유. await preflight + completion fan-out + `covering_patterns` dedup + reload reconcile 같은 미묘한 시맨틱은 모두 Rust 코어가 처리.
+
+**Layered chain:**
+```
+echo plugin → event.publish (stdio)
+   ↓
+PluginSupervisor reader thread → eventBus.broadcast(event:, data:)
+   ↓
+EventBus.onBroadcast hook → TurmEngine.dispatchEvent(kind:, payload:)
+   ↓
+turm_engine_dispatch_event (FFI) → Rust TriggerEngine.dispatch
+   ↓ (per matched trigger)
+FfiSink.dispatch_action → C action callback
+   ↓
+Swift @convention(c) trampoline → Task { @MainActor in }
+   ↓
+ActionRegistry.tryDispatch(action, params, completion)
+   ↓
+matched handler (system.ffi_test, plugin action, etc.) → completion
+```
+
+**FFI surface (5 신규 심볼, `turm-ffi/src/lib.rs`):**
+- `turm_engine_create()` → `*mut EngineHandle`
+- `turm_engine_destroy(*mut)` 
+- `turm_engine_set_action_callback(handle, fn_ptr, user_data)`
+- `turm_engine_set_triggers(handle, triggers_json)` — JSON array of trigger objects, returns count or -1
+- `turm_engine_dispatch_event(handle, kind, payload_json)` — returns # triggers fired
+- `turm_engine_count_triggers(handle)` — diagnostic
+
+**Swift wrapper (`TurmEngine` in `FFIBridge.swift`):**
+`@unchecked Sendable` (NOT `@MainActor`) — Rust engine 자체가 thread-safe (`RwLock` 내부)이라 main actor pinning 불필요. `dispatchEvent`가 plugin reader thread에서 직접 호출됨. C action callback 안에서만 `Task { @MainActor in }`으로 hop해서 ActionRegistry 접근. lifetime은 `Unmanaged.passRetained(self)`로 engine이 self를 retain → `shutdown()`이 명시적으로 release.
+
+**Trigger 정의 (config.toml):**
+```toml
+[[triggers]]
+name = "heartbeat-to-ffi-demo"
+action = "system.ffi_test"
+params = { source = "trigger", note = "fired by heartbeat" }
+
+[triggers.when]
+event_kind = "system.heartbeat"
+```
+
+`Config.swift`가 raw TOMLKit `TOMLTable`로 walk해서 `[[String: Any]]`로 추출 (specific Swift Decodable 타입 안 만듦 — params/payload_match가 임의 nested 값이라 Rust serde Deserialize에 위임). `setTriggers`로 engine에 push, hot-reload 시 재적용.
+
+**Critical bug (검증 중 발견):**
+초기엔 `TurmEngine`을 `@MainActor`로 마킹했음. 이러면 모든 plugin 이벤트가 main actor를 거쳐야 해서 reader thread → main hop이 매 이벤트마다 발생. 더 큰 문제: 이미 main이 다른 작업 중이면 trigger dispatch가 backlog. 수정: `@unchecked Sendable` + `nonisolated(unsafe)` for `actionRegistry` slot. Rust 엔진 lock이 동시성 처리, Swift는 callback 시점에만 main hop.
+
+**Deferred (Rust 엔진은 지원하지만 spike 데모에 없음):**
+- await/preflight chains (`[triggers.await]` 절)
+- `<action>.completed` / `<action>.failed` fan-out (Phase 14.1)
+- `covering_patterns` dedup (overlapping globs)
+- 진짜 lazy `onAction:<glob>` activation (현재는 eager spawn + log)
 
 **Universal binary:** 현재 spike는 cargo 호스트 아키텍처(arm64) only. x86_64 사용자가 생기면 `cargo build --target aarch64-apple-darwin && cargo build --target x86_64-apple-darwin && lipo -create … -output target/release/libturm_ffi.a` recipe로 합치면 됨 (PR 1 시점에 deferred).
 

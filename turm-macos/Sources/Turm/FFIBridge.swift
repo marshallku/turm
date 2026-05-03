@@ -79,3 +79,197 @@ enum TurmFFI {
         }
     }
 }
+
+// MARK: - TurmEngine (PR 5c)
+
+/// Swift wrapper around the Rust `TriggerEngine` exposed via turm-ffi.
+///
+/// Lifecycle:
+/// - `init()` creates the Rust engine + retains `self` so the C action
+///   callback can safely cast `user_data` back to a TurmEngine instance.
+/// - `setTriggers([...])` JSON-encodes and forwards. Hot-reload safe —
+///   engine swaps the trigger list atomically.
+/// - `dispatchEvent(kind:, payload:)` enters the engine; engine matches
+///   triggers and fires the C callback synchronously for each match.
+/// - `shutdown()` clears the callback slot, destroys the handle, releases
+///   `self`. After shutdown the instance must NOT be used again.
+///
+/// Threading:
+/// - `dispatchEvent` runs on the calling thread (main actor in our use).
+///   The C action callback consequently fires inline on the main actor too,
+///   which is fine because it just records into a thread-safe Swift slot
+///   and dispatches to the registry asynchronously.
+/// - We deliberately do NOT pin the engine to a serial DispatchQueue here:
+///   the Rust `TriggerEngine` uses `RwLock` internally so concurrent
+///   dispatches are safe; pin-to-serial would only be necessary if we
+///   needed strict ordering between dispatch + setTriggers, which our
+///   AppDelegate-only call sites don't.
+/// Not `@MainActor` because EventBus.broadcast fires from any thread (plugin
+/// reader threads forward `event.publish` from there). The Rust engine itself
+/// is thread-safe (internal `RwLock`), so dispatching from any thread is fine
+/// at the Rust layer; the C action callback hops into main actor before
+/// touching `ActionRegistry`. `@unchecked Sendable` because the OpaquePointer
+/// handle isn't Sendable per se but ownership stays single-instance.
+final class TurmEngine: @unchecked Sendable {
+    private var handle: OpaquePointer?
+    /// Captured at init so the action callback (which has no Swift closure
+    /// context) can find its way back to ActionRegistry. Set ONCE by
+    /// AppDelegate immediately after construction; read from the C callback
+    /// thread. `nonisolated(unsafe)` is the Swift 6 escape hatch for the
+    /// "set once, read many" pattern that doesn't need a lock.
+    nonisolated(unsafe) var actionRegistry: ActionRegistry?
+
+    init() {
+        // turm_engine_create returns OpaquePointer? directly (Swift's clang
+        // importer maps the forward-declared C struct that way). No cast.
+        guard let h = turm_engine_create() else {
+            FileHandle.standardError.write(Data("[turm-engine] turm_engine_create returned NULL\n".utf8))
+            return
+        }
+        handle = h
+
+        // Register the static C trampoline. user_data is a retained Swift
+        // pointer to self — paired with `Unmanaged.passRetained` on init
+        // and `takeRetainedValue` on shutdown, so the engine can safely
+        // dereference it for the entire lifetime of this instance.
+        let userData = Unmanaged.passRetained(self).toOpaque()
+        turm_engine_set_action_callback(
+            handle,
+            TurmEngine.actionCallback,
+            userData,
+        )
+    }
+
+    // No deinit. The Rust engine holds a retained pointer to `self`
+    // through `Unmanaged.passRetained` (so the C action callback can
+    // safely deref user_data). That retain count means deinit only
+    // fires AFTER `shutdown()` has run `passUnretained.release()`,
+    // which is the explicit teardown path AppDelegate must call.
+    // Adding a fallback destroy here would race with the retained
+    // pointer and isn't needed in practice — the app only constructs
+    // one TurmEngine and shutdown() is always reached on app quit.
+
+    /// Replace the engine's trigger list. Pass an array of trigger dicts
+    /// shaped like the TOML `[[triggers]]` blocks (decoded into JSON-friendly
+    /// values). Returns the count of loaded triggers, or nil on JSON
+    /// encoding failure.
+    @discardableResult
+    func setTriggers(_ triggers: [[String: Any]]) -> Int? {
+        guard let handle else { return nil }
+        guard let data = try? JSONSerialization.data(withJSONObject: triggers),
+              let str = String(data: data, encoding: .utf8)
+        else {
+            FileHandle.standardError.write(Data("[turm-engine] failed to encode triggers JSON\n".utf8))
+            return nil
+        }
+        return str.withCString { ptr in
+            let count = turm_engine_set_triggers(handle, ptr)
+            if count < 0 {
+                let err = TurmFFI.lastError() ?? "<no message>"
+                FileHandle.standardError.write(Data("[turm-engine] setTriggers failed: \(err)\n".utf8))
+                return nil
+            }
+            return Int(count)
+        }
+    }
+
+    /// Dispatch an event to the engine. Triggers matching the kind/payload
+    /// fire their actions synchronously via the C callback (which then
+    /// hops to the action registry). Returns # triggers fired.
+    @discardableResult
+    func dispatchEvent(kind: String, payload: [String: Any]) -> Int {
+        guard let handle else { return 0 }
+        let payloadStr: String = if let data = try? JSONSerialization.data(withJSONObject: payload),
+                                    let s = String(data: data, encoding: .utf8)
+        {
+            s
+        } else {
+            "null"
+        }
+        return kind.withCString { kindPtr in
+            payloadStr.withCString { payloadPtr in
+                let n = turm_engine_dispatch_event(
+                    handle,
+                    kindPtr,
+                    payloadPtr,
+                )
+                return n < 0 ? 0 : Int(n)
+            }
+        }
+    }
+
+    /// Diagnostic — current number of triggers loaded.
+    var triggerCount: Int {
+        guard let handle else { return 0 }
+        let n = turm_engine_count_triggers(handle)
+        return n < 0 ? 0 : Int(n)
+    }
+
+    /// Tear down the engine. After this call the instance is unusable.
+    /// AppDelegate calls this from `applicationWillTerminate`.
+    func shutdown() {
+        guard let handle else { return }
+        // Clear callback first so any in-flight dispatch can't invoke
+        // a stale function pointer between here and destroy.
+        turm_engine_set_action_callback(
+            handle,
+            nil,
+            nil,
+        )
+        // Reclaim the retained self pointer so ARC can finalize this
+        // instance after AppDelegate drops its reference.
+        Unmanaged<TurmEngine>.passUnretained(self).release()
+        turm_engine_destroy(handle)
+        self.handle = nil
+    }
+
+    // MARK: - C callback trampoline
+
+    /// `@convention(c)` so the function pointer matches the C signature.
+    /// Cannot capture context, hence `user_data` carries the TurmEngine
+    /// instance pointer.
+    ///
+    /// Engine calls this from whatever thread invoked dispatchEvent.
+    /// We hop to the main actor before touching ActionRegistry (which is
+    /// `@MainActor`-isolated) or any other Swift state.
+    private static let actionCallback: turm_action_callback = { userData, actionPtr, paramsPtr in
+        guard let userData, let actionPtr, let paramsPtr else { return }
+        // Take a borrowed reference; the engine owns the retained pointer
+        // and only releases it via TurmEngine.shutdown.
+        let unmanaged = Unmanaged<TurmEngine>.fromOpaque(userData)
+        let engine = unmanaged.takeUnretainedValue()
+        let actionName = String(cString: actionPtr)
+        let paramsJson = String(cString: paramsPtr)
+
+        // Decode params back into [String: Any] so ActionRegistry handlers
+        // can use the dict shape they expect from socket dispatch.
+        let params: [String: Any] = if let data = paramsJson.data(using: .utf8),
+                                       let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        {
+            dict
+        } else {
+            [:]
+        }
+
+        // Fire-and-forget dispatch. We deliberately don't await the result —
+        // this matches the `{queued: true}` return from the Rust side and
+        // keeps the engine's dispatch loop non-blocking. ActionRegistry is
+        // @MainActor-isolated, so we hop via Task { @MainActor in ... }.
+        let registryRef = engine.actionRegistry
+        Task { @MainActor in
+            guard let registry = registryRef else {
+                FileHandle.standardError.write(Data("[turm-engine] action callback fired but no ActionRegistry attached: \(actionName)\n".utf8))
+                return
+            }
+            let dispatched = registry.tryDispatch(actionName, params: params) { _ in
+                // Fire-and-forget — discard the action's own completion result.
+                // Triggers don't currently consume completion data on macOS;
+                // when await semantics land we'll plumb this back into the
+                // Rust engine via a separate FFI call.
+            }
+            if !dispatched {
+                FileHandle.standardError.write(Data("[turm-engine] trigger fired \(actionName) but no handler registered (registry has: \(registry.names()))\n".utf8))
+            }
+        }
+    }
+}
