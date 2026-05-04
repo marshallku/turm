@@ -2,46 +2,87 @@
 
 <img width="3440" height="1440" alt="image" src="https://github.com/user-attachments/assets/a1392646-1255-40ed-9722-ea8523a5c342" />
 
-A custom terminal emulator built with a shared Rust core and platform-native UIs. GPU-rendered background images, Catppuccin Mocha theme, and a control API designed for both human and AI agent use.
+A cross-platform terminal emulator built around a shared Rust core and platform-native UIs. nestty fuses the terminal with a workflow runtime — Event Bus, Action Registry, Context Service, Trigger Engine — and a plugin system, so calendars, notes, Slack, todos, and Claude Code spawns can compose with the editor as one orchestratable surface.
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ## Features
 
-- **GPU-rendered backgrounds** — wallpaper images composited behind the terminal with configurable tint and opacity
-- **Catppuccin Mocha theme** — hardcoded color palette
-- **Tabs** — create, switch, and split terminal tabs (horizontal/vertical)
-- **Dynamic font scaling** — `Ctrl+=`/`Ctrl+-`/`Ctrl+0`
-- **D-Bus control** — change backgrounds, tint, and more at runtime
-- **CLI tool (`nestctl`)** — control the terminal from the command line
-- **TOML configuration** — simple config at `~/.config/nestty/config.toml`
+### Terminal
 
-## Screenshots
+- **GPU-rendered backgrounds** — wallpaper image composited behind the terminal with configurable tint and opacity; random rotation supported
+- **Tabs + splits** — horizontal/vertical splits, drag-to-resize, focus tracking, drag-to-reorder tabs, double-click rename, collapsible icon-only tab bar
+- **In-terminal search** — `Ctrl+Shift+F` (Linux) / `Cmd+F` (macOS), regex with case/whole-word toggle
+- **10 built-in themes** — Catppuccin (Mocha/Latte/Frappé/Macchiato), Dracula, Nord, Tokyo Night, Gruvbox Dark, One Dark, Solarized Dark; hot-reload on config save
+- **Dynamic font scaling** — `Ctrl+=`/`Ctrl+-`/`Ctrl+0` (Linux) / `Cmd+=`/`Cmd+-`/`Cmd+0` (macOS)
+- **Custom keybindings** — bind any chord to a shell command (`spawn:`) or socket action (`action:`)
 
-_Coming soon_
+### Panels
+
+- **Terminal panel** — VTE4 on Linux, SwiftTerm on macOS; PTY handled internally on both platforms
+- **WebView panel** — WebKitGTK 6.0 (Linux) / WKWebView (macOS) as a first-class panel; URL toolbar, DevTools toggle, side-by-side with terminals
+- **Plugin panels** — HTML/JS panels loaded from `~/.config/nestty/plugins/` with an injected `nestty` JS bridge for socket calls and event subscriptions
+- **Status bar** — Waybar-style 3-zone bar (left/center/right) populated by plugin modules
+
+### Control API
+
+- **`nestctl` CLI** — full programmatic control over tabs, splits, panels, terminals, webviews, plugins, and the event stream
+- **Unix socket** at `/tmp/nestty-{PID}.sock` (auto-discovered via `NESTTY_SOCKET`), newline-delimited JSON
+- **Event stream** — `event.subscribe` for live `terminal.output`, `panel.focused`, `tab.created`, `webview.navigated`, plus all bus events
+- **Terminal agent API** — `terminal.read` / `state` / `exec` / `feed` / `history` / `context` for AI agents
+- **Approval workflow** — `agent.approve` shows a modal and returns the user's choice
+- **`claude.start`** — spawn a Claude Code session inside a tmux session in a target worktree
+
+### Workflow Runtime
+
+- **Event Bus** — pub/sub with glob patterns, bounded delivery, drop-newest overflow
+- **Action Registry** — name → handler map; the same registry serves CLI dispatch, plugin RPC, and triggers
+- **Context Service** — active panel, per-panel cwd cache, snapshots; exposed via `context.snapshot`
+- **Trigger Engine** — declarative triggers in `config.toml` (`when`, `match`, `do`); fires actions on bus events with `{event.*}` / `{context.*}` interpolation; hot-reloads with subscriber reconciliation
+
+### First-party Plugins
+
+`examples/plugins/<name>/` — install with `./scripts/install-plugins.sh`. All plugins implement the service-plugin protocol (newline-JSON over stdio, supervised by nestty).
+
+| Plugin | Purpose |
+|---|---|
+| `kb` | Grep + filename search and atomic read/append/ensure over `~/docs` |
+| `calendar` | Google Calendar event polling with lead-time dedupe |
+| `slack` | Slack Socket Mode — mention/DM events + `chat.postMessage` |
+| `llm` | Anthropic Messages API client with JSONL usage log |
+| `todo` | Markdown-checkbox todos in `~/docs/todos/<workspace>/` (vim/git compatible) |
+| `git` | Worktree create/remove + branch / status queries |
+| `discord` | Discord integration |
+| `bookmark` | Bookmarks plugin |
+| `echo` | Reference / E2E plugin |
+
+### Platforms
+
+- **Linux** — GTK4 + VTE4, full feature set
+- **macOS** — Swift/AppKit + SwiftTerm, near-parity (terminal, tabs, splits, search, themes, webview, plugins, status bar, keybindings, background images, AI agent API). See [`docs/macos-parity-plan.md`](./docs/macos-parity-plan.md).
 
 ## Requirements
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S gtk4 vte4
+sudo pacman -S gtk4 vte4 webkitgtk-6.0 gst-plugins-good gst-plugins-bad
 ```
+
+`gst-plugins-good`/`gst-plugins-bad` are required by WebKitGTK for media playback.
 
 ### Other Linux
 
-Install GTK4 and libvte-2.91-gtk4 from your distribution's package manager.
+Install GTK4, libvte-2.91-gtk4, and webkitgtk-6.0 from your distribution's package manager.
 
 ### macOS
 
-Xcode Command Line Tools (for SwiftPM) and Rust (for `nestctl`).
+Xcode Command Line Tools (Swift 6, macOS 14+) and Rust (for `nestctl` and the FFI staticlib).
 
 ```bash
 xcode-select --install
 # https://rustup.rs for Rust
 ```
-
-The macOS app targets macOS 14+. SwiftTerm is fetched as an SPM dep at build time.
 
 ## Build & Run
 
@@ -49,7 +90,7 @@ The macOS app targets macOS 14+. SwiftTerm is fetched as an SPM dep at build tim
 # Build all crates
 cargo build
 
-# Run the terminal
+# Run the terminal (Linux)
 cargo run -p nestty-linux
 
 # Generate a default config file
@@ -59,18 +100,17 @@ cargo run -p nestty-linux -- --init-config
 cargo run -p nestty-cli -- <command>
 ```
 
+For macOS dev iteration: `cd nestty-macos && ./run.sh` (debug bundle, opened in place).
+
 ## Install
 
-### Linux — From GitHub Releases (recommended)
+### Linux — GitHub Releases (recommended)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/marshallku/nestty/master/install.sh | bash
 ```
 
-Options:
-
-- `--version v0.2.0` — install a specific version
-- `--system` — install to `/usr/local/bin` (requires sudo)
+Options: `--version vX.Y.Z` to pin a release, `--system` to install to `/usr/local/bin` (requires sudo).
 
 ### Linux — From source
 
@@ -80,7 +120,7 @@ Options:
 ./scripts/install-dev.sh --restart # also pkill -x nestty afterwards
 ```
 
-This builds a release binary, installs the desktop entry, and lays down first-party plugins.
+Builds a release binary, installs the desktop entry, and lays down all first-party plugins via `install-plugins.sh`.
 
 ### macOS — From source
 
@@ -90,9 +130,16 @@ This builds a release binary, installs the desktop entry, and lays down first-pa
 ./scripts/install-macos.sh --launch    # open Nestty.app after installing
 ```
 
-This builds the macOS app via SwiftPM (release config), installs `Nestty.app`, and installs `nestctl` via `cargo install --path nestty-cli` (the workspace root is a virtual manifest, so the more obvious `cargo install nestty-cli` and `cargo install --path .` both fail — the script wraps the correct invocation).
+Builds `libnestty_ffi.a` (Rust staticlib) → links into the SwiftPM release build → stages and atomically installs `Nestty.app` → installs `nestctl` via `cargo install --path nestty-cli`.
 
-For dev iteration without installing, use `nestty-macos/run.sh` (debug bundle under `.build/debug/Nestty.app`, opened in place).
+### Plugins only
+
+```bash
+./scripts/install-plugins.sh           # install all first-party plugins
+./scripts/install-plugins.sh todo git  # install just these
+```
+
+Restart nestty after installing/updating plugins — `discover_plugins()` only runs at startup.
 
 ### Update
 
@@ -103,7 +150,7 @@ nestctl update apply    # download and install latest (Linux only — macOS user
 
 ## Configuration
 
-Config file: `~/.config/nestty/config.toml`
+Config file: `~/.config/nestty/config.toml` (entirely optional — all fields have defaults).
 
 ```toml
 [terminal]
@@ -112,32 +159,61 @@ font_family = "JetBrainsMono Nerd Font Mono"
 font_size = 14
 
 [background]
+# image = "/path/to/wallpaper.jpg"   # single image (takes priority over directory)
 directory = "/path/to/wallpapers/"
-tint = 0.85
-opacity = 0.95
+tint = 0.85       # tint overlay opacity (0.0–1.0)
+opacity = 0.95    # terminal opacity
 
 [tabs]
-position = "top"  # top, bottom, left, right
+position = "left"   # top, bottom, left, right
+collapsed = true    # start with tab bar collapsed (icon-only)
+width = 200         # tab bar width for vertical positions
 
 [socket]
 path = "/tmp/nestty.sock"
 
 [theme]
 name = "catppuccin-mocha"
+
+[keybindings]
+"ctrl+shift+g" = "spawn:~/scripts/wallpaper.sh --next"
+"ctrl+shift+m" = "action:background.toggle"
+
+[security]   # macOS only, for now
+osc52 = "deny"   # or "allow" — gates OSC 52 clipboard writes from the PTY
 ```
 
-All fields have defaults — the config file is entirely optional.
+See [`docs/config.md`](./docs/config.md) for the full reference, and [`docs/workflow-runtime.md`](./docs/workflow-runtime.md) for `[[triggers]]` declarations.
 
 ## Project Structure
 
 ```
 nestty/
-├── nestty-core/    # Shared Rust library (config, background, protocol, state)
-├── nestty-linux/   # GTK4 + VTE4 native terminal app
-├── nestty-cli/     # CLI control tool (nestctl)
-├── nestty-macos/   # Swift/AppKit app (stub)
-└── docs/            # Internal documentation
+├── nestty-core/                # Shared Rust library (config, protocol, event bus,
+│                                 # action registry, context, triggers, themes, fs_atomic)
+├── nestty-ffi/                 # Rust staticlib for Swift FFI (macOS bridge)
+├── nestty-linux/               # GTK4 + VTE4 native terminal app (binary: nestty)
+├── nestty-macos/               # Swift/AppKit + SwiftTerm app (Nestty.app)
+├── nestty-cli/                 # CLI control tool (binary: nestctl)
+├── nestty-plugin-{echo,kb,calendar,slack,llm,todo,git,discord,bookmark}/
+│                                 # First-party service plugins
+├── examples/plugins/           # Plugin manifests + assets (installed into ~/.config/nestty/plugins/)
+├── scripts/                    # install-dev.sh, install-macos.sh, install-plugins.sh
+└── docs/                       # Project documentation — start at docs/INDEX.md
 ```
+
+## Documentation
+
+Start at [`docs/INDEX.md`](./docs/INDEX.md). Highlights:
+
+- [`architecture.md`](./docs/architecture.md) — crate layout, socket protocol, panel system
+- [`workflow-runtime.md`](./docs/workflow-runtime.md) — Event Bus, Action Registry, Context Service, triggers
+- [`plugins.md`](./docs/plugins.md) — plugin manifest, JS bridge API, service-plugin RPC
+- [`service-plugins.md`](./docs/service-plugins.md) — long-running supervised subprocess design
+- [`cli.md`](./docs/cli.md) — `nestctl` reference
+- [`linux-app.md`](./docs/linux-app.md) / [`macos-app.md`](./docs/macos-app.md) — platform internals
+- [`troubleshooting.md`](./docs/troubleshooting.md) — known issues + fixes
+- [`roadmap.md`](./docs/roadmap.md) — implementation phases
 
 ## License
 
