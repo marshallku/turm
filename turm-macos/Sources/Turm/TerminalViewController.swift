@@ -153,13 +153,26 @@ class TerminalViewController: NSViewController, TurmPanel {
     /// Set by AppDelegate after EventBus is created.
     weak var eventBus: EventBus?
 
-    init(config: TurmConfig, theme: TurmTheme) {
+    /// PR 8 — optional cwd + initial-input passed to `startShell`. Used by
+    /// `claude.start` to land the user in a worktree directory and feed
+    /// the `tmux new-session` command without relying on a separate
+    /// post-spawn `terminal.exec` (which has a startup race against
+    /// SwiftTerm's PTY readiness). SwiftTerm's `startProcess` accepts a
+    /// `currentDirectory` arg natively; the initial-input string is sent
+    /// to the master PTY immediately after spawn — bytes sit in the
+    /// kernel buffer until the child shell reads them, so no race.
+    private let initialCwd: String?
+    private let initialInput: String?
+
+    init(config: TurmConfig, theme: TurmTheme, cwd: String? = nil, initialInput: String? = nil) {
         self.config = config
         self.theme = theme
         let baseFontSize = CGFloat(config.fontSize)
         configFontSize = baseFontSize
         currentFontSize = baseFontSize
         currentFontFamily = config.fontFamily
+        initialCwd = cwd
+        self.initialInput = initialInput
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -389,8 +402,23 @@ class TerminalViewController: NSViewController, TurmPanel {
         env.append("COLORTERM=truecolor")
         env.append("TURM_SOCKET=\(socketPath)")
 
-        tv.startProcess(executable: config.shell, args: [], environment: env, execName: nil)
+        tv.startProcess(
+            executable: config.shell,
+            args: [],
+            environment: env,
+            execName: nil,
+            currentDirectory: initialCwd,
+        )
         tv.installExitMonitor()
+
+        // Initial input gets buffered in the master PTY; the child shell
+        // reads it once its own startup (rcfiles) completes. No race —
+        // PTY input is kernel-buffered. Used by `claude.start` to feed
+        // `tmux new-session …` so the user doesn't see a bare shell
+        // prompt before tmux takes over.
+        if let initialInput {
+            tv.send(txt: initialInput)
+        }
     }
 
     // MARK: - Socket Commands (called on main thread by SocketServer)

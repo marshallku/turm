@@ -373,6 +373,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 "names": actionRegistry.names(),
             ])
         }
+
+        // PR 8 — register `claude.start` through the registry so the
+        // trigger engine's C callback can reach it. Codex cross-review
+        // CRITICAL: macOS trigger callback dispatches exclusively via
+        // `ActionRegistry.tryDispatch` (no fallthrough to the legacy
+        // switch-arm). Without this registration the Vision Flow 3
+        // chain `git.worktree_add.completed → claude.start` would stall
+        // at the second arrow because `tryDispatch` returns false for
+        // unregistered actions. Noisy (not silent) so chained triggers
+        // can observe `claude.start.completed` for downstream steps if
+        // they want to.
+        actionRegistry.register("claude.start") { [weak self] params, completion in
+            guard let self else {
+                completion(RPCError(code: "no_app", message: "AppDelegate gone"))
+                return
+            }
+            ClaudeStart.dispatch(params: params, tabVC: tabVC, completion: completion)
+        }
     }
 
     // MARK: - Socket Server

@@ -512,7 +512,10 @@ Original spec for reference (kept while slice 2 is pending):
 
 Closes the loop: after a workflow stages a worktree + context, drop the user into Claude Code **inside a tmux session** so the work persists across turm restarts and is reattachable from any terminal.
 
-**Phase 18.1 — `claude.start` action** (slice 1) — **shipped**:
+**Phase 18.1 — `claude.start` action** (slice 1) — **shipped (Linux + macOS)**:
+
+macOS port at PR 8 in `docs/macos-parity-plan.md` (`turm-macos/Sources/Turm/ClaudeStart.swift`) is a 1:1 functional mirror — same param contract, same shell-quote helpers, same two-gate seeder. Combined with PR 7's completion fan-out, Vision Flow 3's `todo.start_requested → git.worktree_add → git.worktree_add.completed → claude.start` chain is now traversable on macOS too. tmux is a runtime requirement on both platforms (`/usr/bin/env tmux` shell-out — homebrew/system path agnostic).
+
 
 - [x] **Built as a turm-internal socket action** (not a stdio plugin) — composes `tab.new` + `terminal.feed_input` directly against the GTK tab manager, which is the natural home since the action inherently needs window/tab access.
 - [x] **`claude.start {workspace_path, session_name?, resume_session?}`**: validates `workspace_path` exists and is a directory (canonicalized). Two distinct paths for `session_name` to keep the contract predictable: when the caller OMITS the field, we DERIVE one from the path (last-2 components, lowercased, non-`[A-Za-z0-9_-]` replaced with `-`); when the caller supplies it EXPLICITLY, we VALIDATE strictly (refuse empty, leading `-`, anything outside `[A-Za-z0-9_-]`) and return `invalid_params` rather than silently rewriting — silent rewrites would mask user typos and break `re-running on the same name re-attaches the same tmux session`. Spawns a new tab whose terminal cwd is `workspace_path` (`TerminalPanel::new_with_cwd` threads `Option<&Path>` through to VTE's `spawn_async`), then feeds `tmux new-session -A -s <name> 'claude [...]'` into the terminal. `-A` re-attaches existing sessions instead of stacking duplicates. Returns `{panel_id, tab, tmux_session, workspace_path}` (matches the `tab.created` event payload shape — `panel_id` is the UUID consumed by `session.info`, `tab` is the numeric index).

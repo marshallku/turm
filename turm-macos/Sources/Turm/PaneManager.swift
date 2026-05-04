@@ -55,6 +55,12 @@ private class EqualSplitView: NSSplitView, NSSplitViewDelegate {
 
 enum InitialPanel {
     case terminal
+    /// PR 8 — terminal seeded with a specific cwd and/or initial PTY
+    /// input. Used by `claude.start` to land the user in a worktree
+    /// directory and feed the `tmux new-session` command. Separate
+    /// case (rather than associated values on `.terminal`) so existing
+    /// `.terminal` callers stay unchanged.
+    case terminalSeed(cwd: String?, initialInput: String?)
     case webview(url: URL?)
     /// Tier 4.1 — pre-constructed plugin panel. Caller (TabViewController)
     /// builds the PluginPanelController itself because it needs the registry
@@ -106,6 +112,8 @@ final class PaneManager {
         let panel: any TurmPanel = switch initialPanel {
         case .terminal:
             TerminalViewController(config: config, theme: theme)
+        case let .terminalSeed(cwd, initialInput):
+            TerminalViewController(config: config, theme: theme, cwd: cwd, initialInput: initialInput)
         case let .webview(url):
             WebViewController(url: url)
         case let .pluginPanel(p):

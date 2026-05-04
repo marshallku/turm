@@ -215,6 +215,49 @@ Fix: `turm_engine_dispatch_event` C signature 에 `source` 인자 추가, Swift 
 3. `turmctl call kb.read --params '{"id":"nope"}'` → stderr `[turm-engine] event kb.read.failed fired 1 trigger(s)`
 4. Source-plumbing fix 적용 후에도 두 chain 모두 정상 발화 (regression 없음). Await-promotion path 는 코드 inspection 으로 검증 — Swift `publishCompletion` 의 source 가 FFI 까지 그대로 전달되어 `Event::new(kind, source_str, payload)` 시점에 `"turm.action"` 으로 stamp 되고 trigger.rs:482 의 trust check 를 통과. 라이브 `[triggers.await]` chain test 는 별도 PR (Vision Flow 3 자체가 await 안 쓰고, await 는 Phase 14.2 chained workflow 용으로 예약).
 
+### `claude.start` (PR 8 / Phase 18)
+
+Linux 의 `socket.rs::handle_claude_start` 1:1 포팅. Vision Flow 3 (Todo start → Slack 컨텍스트 → Jira → worktree → tmux + Claude REPL with pre-seeded prompt) 의 macOS 마지막 한 조각. PR 7 의 completion fan-out 과 결합돼서, `todo.start_requested → git.worktree_add → git.worktree_add.completed → claude.start` 의 chain 이 macOS 에서도 fully 작동.
+
+**구조:**
+```
+turmctl call claude.start --params {workspace_path, [session_name], [resume_session], [prompt]}
+    ↓
+ClaudeStart.dispatch (@MainActor) → param validation + canonicalize
+    ↓
+deriveSessionName / sanitizeSessionName / validateTmuxSessionName (Linux 1:1)
+    ↓
+shellSingleQuote(sessionName) + shellSingleQuote(claudeCmd)
+    ↓
+TabViewController.newTerminalTab(cwd:, initialInput:)
+    ↓
+PaneManager(initialPanel: .terminalSeed(cwd:, initialInput:))
+    ↓
+TerminalViewController(cwd:, initialInput:)
+    ↓
+SwiftTerm startProcess(currentDirectory: cwd) + tv.send(txt: initialInput)
+    ↓ (background thread)
+spawnPromptSeeder(sessionName, prompt)
+    ↓ (poll tmux capture-pane for marker, max 8s)
+    ↓ (cross-check tmux display-message #{pane_current_command} == claude|node)
+    ↓ tmux load-buffer + paste-buffer + send-keys Enter Enter
+```
+
+**Race-safety:** SwiftTerm 의 `startProcess` 은 PTY 를 먼저 열고 child fork → exec 순서. master fd 에 `tv.send(txt:)` 로 쓴 바이트는 kernel buffer 에 머물다가 child shell 이 read 할 때 소비됨. Linux 의 VTE `spawn_async` callback 트릭이 macOS 에선 불필요.
+
+**Prompt seeder 의 두 readiness gate:**
+1. `tmux capture-pane -p -t <session>` 출력에 claude-specific marker (`Anthropic`, `Try "`, `claude --`, "claude code") 존재
+2. `tmux display-message -p -t <session> '#{pane_current_command}'` 결과가 `claude` 또는 `node`
+
+둘 중 하나라도 실패하면 stderr 에 `[claude.start] refusing to paste prompt into session ...` 로그 + return. `claude.start` 는 이미 success reply 한 상태라 caller 에 영향 없음. Shell-injection 가드 — `tmux new-session -A` 가 동명의 기존 session 에 attach 만 할 때, 그 session 이 shell 이면 prompt 가 raw shell command 로 실행될 위험을 차단.
+
+**End-to-end 검증:**
+- 5 개 validation path 전부 정확한 RPCError 반환 (missing workspace_path / 존재하지 않는 path / file-not-dir / prompt+resume mutual exclusion / `-flag-like` session_name)
+- happy path: `turmctl call claude.start --params '{"workspace_path":"/tmp/turm-claude-test","prompt":"..."}'` → 새 tab spawned, tmux session created, claude 부팅, seeder 가 prompt paste, claude 응답 확인됨
+- refuse-to-paste guard: `tmux new-session -d -s shell-only "sleep 60"` 으로 미리 생성한 shell session 대상 `claude.start` → seeder 가 `saw_claude_marker=false, pane_current_command="sleep"` 감지 후 paste 거부, sleep pane 손상 없음
+
+**Deferred:** macOS 에서 `vision-flow-3.toml` 의 trigger chain 을 e2e 로 dry-run 한 적은 없음 — Phase 14.2 chained workflow 작업 때 같이 검증 예정. tmux 는 런타임 의존 (`/usr/bin/env tmux` 로 shell-out), 번들링 안 함 (Linux 도 동일 posture).
+
 ### Plugin Supervisor (`PluginManifest` + `PluginSupervisor`)
 
 PR 3 / Tier 3 spike. Linux의 `service_supervisor.rs` (1794 LOC)를 native Swift로 최소 surface만 포팅. echo plugin 하나 굴리는 데 필요한 것만 들어감.

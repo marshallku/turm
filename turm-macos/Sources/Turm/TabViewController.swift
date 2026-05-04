@@ -185,6 +185,22 @@ final class TabViewController: NSViewController {
         addTab(manager: makeTerminalManager())
     }
 
+    /// PR 8 — terminal tab seeded with cwd + initial-input. Used by
+    /// `claude.start` so the user lands in a worktree directory with
+    /// `tmux new-session …` already running. Returns `(panel_id, tab)`
+    /// so the socket reply can include both — same shape as Linux's
+    /// `add_tab_with_cwd_and_initial_input` return tuple.
+    @discardableResult
+    func newTerminalTab(cwd: String?, initialInput: String?) -> (panelID: String, tab: Int) {
+        let manager = PaneManager(
+            config: config,
+            theme: theme,
+            initialPanel: .terminalSeed(cwd: cwd, initialInput: initialInput),
+        )
+        addTab(manager: manager)
+        return (manager.activePane.panelID, paneManagers.count - 1)
+    }
+
     func newWebViewTab(url: URL? = nil) {
         let manager = PaneManager(config: config, theme: theme, initialPanel: .webview(url: url))
         addTab(manager: manager)
