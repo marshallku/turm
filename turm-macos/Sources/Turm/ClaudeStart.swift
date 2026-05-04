@@ -312,7 +312,21 @@ enum ClaudeStart {
                 ))
                 return
             }
-            guard runTmuxStatus(["paste-buffer", "-t", sessionName, "-b", bufName, "-d"]) else {
+            // `-p` activates bracketed-paste mode — wraps the paste in
+            // ESC [ 200 ~ … ESC [ 201 ~ so claude's terminal sees the
+            // entire buffer as one paste rather than treating each
+            // embedded `\n` as a separate Enter. Without `-p`, a
+            // multi-line prompt arrives at claude as N separate user
+            // turns (each Line gets its own ⏺ echo). Linux's path
+            // works either because of differing tmux defaults or
+            // because the Linux desktop terminal happens to forward
+            // bracketed-paste through VTE+claude — adding `-p`
+            // explicitly here matches the documented intent without
+            // depending on environment quirks.
+            //
+            // `-d` drops the buffer after pasting (cleanup, not
+            // semantically required).
+            guard runTmuxStatus(["paste-buffer", "-t", sessionName, "-b", bufName, "-p", "-d"]) else {
                 FileHandle.standardError.write(Data(
                     "[claude.start] tmux paste-buffer failed\n".utf8,
                 ))
