@@ -125,6 +125,31 @@ on Hyprland and switch workspaces. Same freeze. This is zero nestty code, so the
 
 **User-facing workaround:** Click anywhere in the panel after coming back from a workspace, OR focus another window then refocus nestty, OR right-click → Inspect Element. All three paths cause WebKit's compositor to resume.
 
+**Automated cure on Hyprland — `window.restored` + `system.spawn` trigger (Phase WR-1/WR-2):**
+
+If you're on Hyprland specifically, `hyprctl dispatch resizeactive 1 0 && hyprctl dispatch resizeactive -1 0` reliably cures the freeze (a 1px nudge that goes through Hyprland's frame scheduler). nestty exposes the building blocks:
+
+- `window.restored` event fires when the toplevel's `GDK_TOPLEVEL_STATE_SUSPENDED` bit clears — i.e. you're returning to the workspace nestty lives on.
+- `system.spawn` is a trigger-only action (NOT reachable from `nestctl call`, by design) that exec's an argv vector fire-and-forget.
+
+Drop this into `~/.config/nestty/config.toml`:
+
+```toml
+[[triggers]]
+name = "hyprland-webkit-cure"
+action = "system.spawn"
+
+[triggers.when]
+event_kind = "window.restored"
+
+[triggers.params]
+argv = ["hyprctl", "--batch", "dispatch resizeactive 1 0; dispatch resizeactive -1 0"]
+```
+
+A ready-to-copy snippet lives at [`examples/triggers/hyprland-webkit-fix.toml`](../examples/triggers/hyprland-webkit-fix.toml).
+
+This is a workaround that papers over the upstream bug — if you're not on Hyprland, the trigger no-ops (other compositors don't toggle SUSPENDED on workspace switch the same way), and there's no nestty-side state to roll back when WebKit/Hyprland publish a real fix.
+
 **Possible future paths (not pursued):**
 - File upstream issue at `bugs.webkit.org` and `github.com/hyprwm/Hyprland` with the MiniBrowser reproducer.
 - Wait for an upstream fix in WebKitGTK or Hyprland.

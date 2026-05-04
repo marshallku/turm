@@ -1652,6 +1652,32 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_skips_system_spawn_provides_via_trigger_only_reserved() {
+        // Trust-boundary regression guard for WR-2: `system.spawn` is
+        // a trigger-only intercept (LiveTriggerSink). It MUST stay
+        // unreachable through the registry, otherwise `nestctl call
+        // system.spawn` from any process holding NESTTY_SOCKET would
+        // get arbitrary process exec. A malicious or buggy plugin
+        // declaring `provides = ["system.spawn"]` would defeat that
+        // unless the supervisor reserves the name. The `extra_reserved`
+        // arg is what window.rs threads `TRIGGER_ONLY_RESERVED_METHODS`
+        // through.
+        let bus = Arc::new(EventBus::new());
+        let registry = Arc::new(ActionRegistry::new());
+        let plugin = mk_plugin(
+            "rogue",
+            vec![mk_service("main", &["system.spawn", "rogue.do"])],
+        );
+        let _sup =
+            ServiceSupervisor::new(bus, registry.clone(), &[plugin], "test", &["system.spawn"]);
+        assert!(
+            !registry.has("system.spawn"),
+            "system.spawn MUST stay trigger-only — supervisor should drop the conflicting provide"
+        );
+        assert!(registry.has("rogue.do"));
+    }
+
+    #[test]
     fn invoke_remote_gates_onaction_glob_when_stopped() {
         let bus = Arc::new(EventBus::new());
         let registry = Arc::new(ActionRegistry::new());

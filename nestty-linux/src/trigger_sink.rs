@@ -1,12 +1,24 @@
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc;
 
-use nestty_core::action_registry::{ActionRegistry, ActionResult, internal_error};
+use nestty_core::action_registry::{ActionRegistry, ActionResult, internal_error, invalid_params};
 use nestty_core::protocol::{Request, Response};
 use nestty_core::trigger::TriggerSink;
 use serde_json::{Value, json};
 
 use crate::socket::SocketCommand;
+
+/// Action names handled exclusively at `LiveTriggerSink::dispatch_action`
+/// — neither registered in `ActionRegistry` nor present in
+/// `socket::dispatch`'s legacy match arm. The `ServiceSupervisor` MUST
+/// treat these as reserved when approving plugin `provides[]` so a
+/// plugin manifest declaring `provides = ["system.spawn"]` can't
+/// register the name into the registry and thereby make it reachable
+/// through `nestctl call` (the unix socket is reachable from any
+/// process running as the user; arbitrary process spawn from socket =
+/// trust break).
+pub const TRIGGER_ONLY_RESERVED_METHODS: &[&str] = &["system.spawn"];
 
 /// `TriggerSink` impl that tries the in-process `ActionRegistry` first,
 /// then falls through to `socket::dispatch` (via the same channel that
@@ -68,8 +80,95 @@ impl LiveTriggerSink {
     }
 }
 
+impl LiveTriggerSink {
+    /// `system.spawn` — trigger-only fire-and-forget process exec.
+    ///
+    /// Intercepted here (NOT registered in `ActionRegistry`, NOT in
+    /// `socket::dispatch`'s match arm) so it's reachable ONLY from
+    /// `[[triggers]]` config — the same trust surface as
+    /// `[keybindings]` `spawn:`. `nestctl call system.spawn` returns
+    /// `unknown_method` by design, since the unix socket is reachable
+    /// from any process running as the user (including arbitrary
+    /// scripts that pull `NESTTY_SOCKET` from env).
+    ///
+    /// Param shape: `{ argv: ["program", "arg1", ...] }`. argv-only —
+    /// no `sh -c`, no shell expansion, no string-form command. Triggers
+    /// pass interpolated values directly as argv elements, so a
+    /// malicious payload field can't inject `; rm -rf ~` the way a
+    /// shell-string form would.
+    ///
+    /// Designed for the Hyprland WebKit-freeze cure: `[triggers.params]
+    /// argv = ["hyprctl", "--batch", "dispatch resizeactive 1 0; ..."]`
+    /// drives the empirically-confirmed unfreeze without baking
+    /// compositor-specific knowledge into nestty.
+    ///
+    /// Spawned children are reaped on a worker thread so they don't
+    /// become zombies; non-zero exits log to stderr.
+    fn handle_system_spawn(params: Value) -> ActionResult {
+        let argv = params
+            .get("argv")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| invalid_params("system.spawn: argv must be a non-empty string array"))?;
+        if argv.is_empty() {
+            return Err(invalid_params("system.spawn: argv must not be empty"));
+        }
+        let argv_strs: Vec<String> = argv
+            .iter()
+            .map(|v| {
+                v.as_str().map(String::from).ok_or_else(|| {
+                    invalid_params("system.spawn: argv elements must all be strings")
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        if argv_strs[0].is_empty() {
+            return Err(invalid_params(
+                "system.spawn: argv[0] (program name) must not be an empty string",
+            ));
+        }
+
+        let program = argv_strs[0].clone();
+        let mut child = Command::new(&program)
+            .args(&argv_strs[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                internal_error(format!("system.spawn: failed to exec {program:?}: {e}"))
+            })?;
+
+        let pid = child.id();
+        eprintln!("[nestty] trigger system.spawn pid={pid} argv={argv_strs:?}");
+
+        // Reap on a worker thread so the child doesn't become a
+        // zombie. Trigger-spawned processes are fire-and-forget; we
+        // discard the exit status on success and log on non-zero so a
+        // misconfigured cure command is visible.
+        let argv_log = argv_strs;
+        std::thread::spawn(move || match child.wait() {
+            Ok(status) if !status.success() => {
+                eprintln!(
+                    "[nestty] trigger system.spawn pid={pid} argv={argv_log:?} exited {status}"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[nestty] trigger system.spawn pid={pid} wait failed: {e}");
+            }
+        });
+
+        Ok(json!({ "queued": true, "pid": pid }))
+    }
+}
+
 impl TriggerSink for LiveTriggerSink {
     fn dispatch_action(&self, action: &str, params: Value) -> ActionResult {
+        // `system.spawn` is intercepted before the registry check —
+        // not registered, not in socket::dispatch's match arm — so the
+        // unix socket can't reach it. See `handle_system_spawn` for
+        // rationale.
+        if action == "system.spawn" {
+            return Self::handle_system_spawn(params);
+        }
         if self.registry.has(action) {
             // Branch on blocking flag so we preserve the prior
             // synchronous error semantics for sync registry actions.
@@ -188,5 +287,96 @@ mod tests {
         let cmd = rx.try_recv().expect("expected one queued legacy command");
         assert_eq!(cmd.request.method, "legacy.thing");
         assert_eq!(cmd.request.params, json!({"x": 1}));
+    }
+
+    #[test]
+    fn system_spawn_rejects_missing_argv() {
+        let (_r, sink, _rx) = mk_sink_with_registry();
+        let err = sink.dispatch_action("system.spawn", json!({})).unwrap_err();
+        assert_eq!(err.code, "invalid_params");
+        assert!(err.message.contains("argv"));
+    }
+
+    #[test]
+    fn system_spawn_rejects_non_array_argv() {
+        let (_r, sink, _rx) = mk_sink_with_registry();
+        let err = sink
+            .dispatch_action("system.spawn", json!({ "argv": "true" }))
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_params");
+    }
+
+    #[test]
+    fn system_spawn_rejects_empty_argv() {
+        let (_r, sink, _rx) = mk_sink_with_registry();
+        let err = sink
+            .dispatch_action("system.spawn", json!({ "argv": [] }))
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_params");
+        assert!(err.message.contains("must not be empty"));
+    }
+
+    #[test]
+    fn system_spawn_rejects_empty_program_name() {
+        let (_r, sink, _rx) = mk_sink_with_registry();
+        let err = sink
+            .dispatch_action("system.spawn", json!({ "argv": ["", "--flag"] }))
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_params");
+        assert!(err.message.contains("program name"));
+    }
+
+    #[test]
+    fn system_spawn_rejects_non_string_argv_element() {
+        let (_r, sink, _rx) = mk_sink_with_registry();
+        let err = sink
+            .dispatch_action("system.spawn", json!({ "argv": ["true", 123] }))
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_params");
+        assert!(err.message.contains("strings"));
+    }
+
+    #[test]
+    fn system_spawn_executes_program_and_reports_pid() {
+        let (_r, sink, rx) = mk_sink_with_registry();
+        // /bin/true exits 0, exists on every Linux/macOS dev box; the
+        // intent here is to assert the spawn path returns Ok with a
+        // pid AND does NOT fall through to socket::dispatch (rx
+        // empty).
+        let r = sink
+            .dispatch_action("system.spawn", json!({ "argv": ["/bin/true"] }))
+            .unwrap();
+        assert_eq!(r["queued"], json!(true));
+        assert!(r["pid"].as_u64().unwrap() > 0);
+        assert!(
+            rx.try_recv().is_err(),
+            "system.spawn must not fall through to socket dispatch"
+        );
+    }
+
+    #[test]
+    fn system_spawn_reports_exec_failure() {
+        let (_r, sink, _rx) = mk_sink_with_registry();
+        let err = sink
+            .dispatch_action(
+                "system.spawn",
+                json!({ "argv": ["/nonexistent/binary/that/does/not/exist"] }),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, "internal_error");
+        assert!(err.message.contains("failed to exec"));
+    }
+
+    #[test]
+    fn system_spawn_is_not_registered_in_action_registry() {
+        // Trust-boundary regression guard: `system.spawn` MUST NOT be
+        // reachable through the registry, otherwise `nestctl call
+        // system.spawn` (which goes registry-first via socket::dispatch)
+        // would arbitrary-spawn from any process holding NESTTY_SOCKET.
+        let (registry, _sink, _rx) = mk_sink_with_registry();
+        assert!(
+            !registry.has("system.spawn"),
+            "system.spawn must remain trigger-only — not in ActionRegistry"
+        );
     }
 }

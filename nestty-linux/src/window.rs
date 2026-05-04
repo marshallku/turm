@@ -237,12 +237,25 @@ impl NesttyWindow {
         // built-ins, so socket dispatch and triggers reach service
         // plugins identically. The Arc is stored on the window struct
         // so the lifetime is explicit.
+        // Reserve both the socket legacy match-arm names AND the
+        // trigger-only intercept names so service plugins can't claim
+        // either via `provides[]`. See comments on each constant for
+        // why both are needed and why they're separate.
+        let reserved_methods: Vec<&str> = socket::LEGACY_DISPATCH_METHODS
+            .iter()
+            .copied()
+            .chain(
+                crate::trigger_sink::TRIGGER_ONLY_RESERVED_METHODS
+                    .iter()
+                    .copied(),
+            )
+            .collect();
         let service_supervisor = ServiceSupervisor::new(
             event_bus.clone(),
             actions.clone(),
             &plugins,
             env!("CARGO_PKG_VERSION"),
-            socket::LEGACY_DISPATCH_METHODS,
+            &reserved_methods,
         );
 
         // Socket server (per-instance, so multiple nestty windows don't collide)
