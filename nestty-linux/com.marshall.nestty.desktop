@@ -2,8 +2,9 @@
 Name=nestty
 Comment=Custom Terminal Emulator
 Exec=nestty
-Icon=utilities-terminal
+Icon=nestty
 Type=Application
 Categories=System;TerminalEmulator;
 Keywords=terminal;shell;console;
 StartupNotify=true
+StartupWMClass=com.marshall.nestty

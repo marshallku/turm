@@ -37,7 +37,13 @@ jobs:
           mkdir -p dist
           cp target/release/nestty dist/
           cp target/release/nestctl dist/
-          cp nestty-linux/nestty.desktop dist/
+          # Desktop file basename matches the GTK app_id so Wayland
+          # compositors map running windows to this launcher entry.
+          cp nestty-linux/com.marshall.nestty.desktop dist/
+          # Carry the hicolor icon set so install.sh can lay it out
+          # under share/icons/hicolor/<size>/apps/. The shape mirrors
+          # the in-repo nestty-linux/icons/ tree exactly.
+          cp -r nestty-linux/icons dist/icons
           tar -czf "${ARCHIVE}" -C dist .
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"

@@ -87,7 +87,8 @@ nestty/
 │   │   ├── service_supervisor.rs  # Service plugin host: spawn/restart, init handshake, RPC
 │   │   ├── statusbar.rs     # Waybar-style status bar (WebView + plugin modules)
 │   │   └── socket.rs        # Unix socket server + command dispatcher
-│   ├── nestty.desktop      # Desktop entry for system integration
+│   ├── com.marshall.nestty.desktop  # Desktop entry — basename matches app_id (Wayland window↔launcher mapping)
+│   ├── icons/hicolor/<size>/apps/nestty.png  # Pre-built theme icons (16,22,24,32,48,64,128,256,512)
 │   └── install.sh           # Build + install script
 ├── nestty-cli/             # CLI control tool (binary: nestctl)
 │   └── src/
@@ -388,6 +389,16 @@ nestctl plugin open my-plugin
 nestctl plugin open my-plugin --panel settings
 nestctl plugin run my-plugin.do-thing --params '{"key": "value"}'
 ```
+
+## App Icon
+
+Single master at `assets/icons/nestty.png` (1024x1024, palette PNG). `scripts/build-icons.sh` regenerates the per-platform artifacts from it:
+
+- `nestty-linux/icons/hicolor/<size>x<size>/apps/nestty.png` — sizes 16/22/24/32/48/64/128/256/512. Installed under `share/icons/hicolor/...` by `install-dev.sh` and the end-user `install.sh`. The desktop entry's `Icon=nestty` plus `gtk4::Window::set_default_icon_name("nestty")` in `app.rs` make the WM/launcher pick them up.
+- The desktop entry is named `com.marshall.nestty.desktop` (matches the GTK `application_id`) and carries `StartupWMClass=com.marshall.nestty`. Wayland compositors (Hyprland/GNOME Shell/KWin) match windows to launcher entries by `app_id ↔ desktop filename`; X11 falls back to `WM_CLASS ↔ StartupWMClass`. Without one of these, the WM shows a generic icon on the running window even when the launcher has the branded one.
+- `nestty-macos/Resources/AppIcon.icns` — multi-resolution `.icns` carrying PNG-encoded entries for icp4..icp6, ic07..ic14 (16, 32, 64, 128, 256, 512, 1024 plus retina @2x variants). Copied into `Contents/Resources/AppIcon.icns` by `scripts/install-macos.sh` and `nestty-macos/run.sh`; `Info.plist`'s `CFBundleIconFile=AppIcon` ties it in.
+
+Both bundles are checked in so a fresh clone builds with icons even on hosts without ImageMagick. Run the build script and commit the regenerated files whenever the master changes.
 
 ## System Prerequisites
 

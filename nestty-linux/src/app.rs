@@ -16,6 +16,14 @@ pub fn run() {
         if let Some(settings) = gtk4::Settings::default() {
             settings.set_gtk_application_prefer_dark_theme(true);
         }
+        // Tell GTK which hicolor icon to use for window/taskbar art.
+        // Belt-and-suspenders alongside the desktop entry: the entry
+        // is named com.marshall.nestty.desktop (matches application_id
+        // so Wayland compositors map windows ↔ launcher) and points at
+        // Icon=nestty, but compositors that haven't read the entry
+        // yet (e.g. before StartupNotify lands) still need GTK to
+        // tell them which icon to paint.
+        gtk4::Window::set_default_icon_name("nestty");
     });
 
     app.connect_activate(|app| {

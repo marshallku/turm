@@ -20,8 +20,10 @@ set -euo pipefail
 REPO="marshallku/nestty"
 INSTALL_DIR="${HOME}/.local/bin"
 DESKTOP_DIR="${HOME}/.local/share/applications"
+ICON_BASE="${HOME}/.local/share/icons/hicolor"
 TARGET_VERSION=""
 SYSTEM_INSTALL=false
+ICON_SIZES=(16 22 24 32 48 64 128 256 512)
 
 usage() {
     echo "Usage: $0 [OPTIONS]"
@@ -44,6 +46,7 @@ while [[ $# -gt 0 ]]; do
             SYSTEM_INSTALL=true
             INSTALL_DIR="/usr/local/bin"
             DESKTOP_DIR="/usr/share/applications"
+            ICON_BASE="/usr/share/icons/hicolor"
             shift
             ;;
         -h|--help)
@@ -106,16 +109,58 @@ curl -fsSL -o "${TMPDIR}/nestty.tar.gz" "${DOWNLOAD_URL}"
 echo "Extracting..."
 tar -xzf "${TMPDIR}/nestty.tar.gz" -C "${TMPDIR}"
 
+# Pre-0.2 release tarballs shipped a "nestty.desktop"; v0.2+ ship
+# "com.marshall.nestty.desktop" so the basename matches the app_id
+# and Wayland compositors associate windows with the launcher. Detect
+# whichever the tarball carries so this installer is forward- and
+# backward-compatible.
+DESKTOP_SRC=""
+DESKTOP_DEST_NAME=""
+for candidate in "com.marshall.nestty.desktop" "nestty.desktop"; do
+    if [[ -f "${TMPDIR}/${candidate}" ]]; then
+        DESKTOP_SRC="${TMPDIR}/${candidate}"
+        DESKTOP_DEST_NAME="$candidate"
+        break
+    fi
+done
+
 if ${SYSTEM_INSTALL}; then
     echo "Installing to ${INSTALL_DIR} (requires sudo)..."
     sudo install -Dm755 "${TMPDIR}/nestty" "${INSTALL_DIR}/nestty"
     sudo install -Dm755 "${TMPDIR}/nestctl" "${INSTALL_DIR}/nestctl"
-    sudo install -Dm644 "${TMPDIR}/nestty.desktop" "${DESKTOP_DIR}/nestty.desktop"
+    if [[ -n "$DESKTOP_SRC" ]]; then
+        sudo install -Dm644 "$DESKTOP_SRC" "${DESKTOP_DIR}/${DESKTOP_DEST_NAME}"
+        # Drop the pre-rename copy if both are about to coexist.
+        if [[ "$DESKTOP_DEST_NAME" = "com.marshall.nestty.desktop" ]]; then
+            sudo rm -f "${DESKTOP_DIR}/nestty.desktop"
+        fi
+    fi
+    for size in "${ICON_SIZES[@]}"; do
+        src="${TMPDIR}/icons/hicolor/${size}x${size}/apps/nestty.png"
+        [[ -f "$src" ]] || continue
+        sudo install -Dm644 "$src" "${ICON_BASE}/${size}x${size}/apps/nestty.png"
+    done
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        sudo gtk-update-icon-cache -q -t "${ICON_BASE}" || true
+    fi
 else
     mkdir -p "${INSTALL_DIR}" "${DESKTOP_DIR}"
     install -m755 "${TMPDIR}/nestty" "${INSTALL_DIR}/nestty"
     install -m755 "${TMPDIR}/nestctl" "${INSTALL_DIR}/nestctl"
-    install -m644 "${TMPDIR}/nestty.desktop" "${DESKTOP_DIR}/nestty.desktop"
+    if [[ -n "$DESKTOP_SRC" ]]; then
+        install -Dm644 "$DESKTOP_SRC" "${DESKTOP_DIR}/${DESKTOP_DEST_NAME}"
+        if [[ "$DESKTOP_DEST_NAME" = "com.marshall.nestty.desktop" ]]; then
+            rm -f "${DESKTOP_DIR}/nestty.desktop"
+        fi
+    fi
+    for size in "${ICON_SIZES[@]}"; do
+        src="${TMPDIR}/icons/hicolor/${size}x${size}/apps/nestty.png"
+        [[ -f "$src" ]] || continue
+        install -Dm644 "$src" "${ICON_BASE}/${size}x${size}/apps/nestty.png"
+    done
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -q -t "${ICON_BASE}" || true
+    fi
 fi
 
 check_deps

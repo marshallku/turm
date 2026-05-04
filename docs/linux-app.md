@@ -145,7 +145,8 @@ Binary tree of `SplitNode` (Leaf = terminal, Branch = `gtk4::Paned` with two chi
 # Or manually
 cargo build --release -p nestty-linux
 sudo install -Dm755 target/release/nestty /usr/local/bin/nestty
-sudo install -Dm644 nestty-linux/nestty.desktop /usr/share/applications/nestty.desktop
+sudo install -Dm644 nestty-linux/com.marshall.nestty.desktop \
+    /usr/share/applications/com.marshall.nestty.desktop
 
 # Set as default terminal (GNOME)
 gsettings set org.gnome.desktop.default-applications.terminal exec nestty

@@ -52,9 +52,13 @@ done
 
 if $USER_INSTALL; then
     INSTALL_DIR="$HOME/.local/bin"
+    DESKTOP_DIR="$HOME/.local/share/applications"
+    ICON_BASE="$HOME/.local/share/icons/hicolor"
     SUDO=""
 else
     INSTALL_DIR="/usr/local/bin"
+    DESKTOP_DIR="/usr/share/applications"
+    ICON_BASE="/usr/share/icons/hicolor"
     SUDO="sudo"
 fi
 
@@ -80,6 +84,29 @@ else
     mkdir -p "$INSTALL_DIR"
     install -Dm755 "$TARGET/nestty" "$INSTALL_DIR/nestty"
     install -Dm755 "$TARGET/nestctl" "$INSTALL_DIR/nestctl"
+fi
+
+echo "==> installing desktop entry + hicolor icons into ${DESKTOP_DIR%/applications} / $ICON_BASE"
+# Desktop file basename matches the GTK app_id (com.marshall.nestty)
+# so Wayland compositors can map the running window to this launcher
+# entry. Without that mapping, the WM falls back to a generic icon
+# and the StartupNotify cookie does not flow through.
+$SUDO install -Dm644 \
+    "$REPO_ROOT/nestty-linux/com.marshall.nestty.desktop" \
+    "$DESKTOP_DIR/com.marshall.nestty.desktop"
+# Cleanup: a pre-rename "nestty.desktop" lingering at the same dest
+# would show up as a second, broken launcher entry.
+$SUDO rm -f "$DESKTOP_DIR/nestty.desktop"
+for size in 16 22 24 32 48 64 128 256 512; do
+    $SUDO install -Dm644 \
+        "$REPO_ROOT/nestty-linux/icons/hicolor/${size}x${size}/apps/nestty.png" \
+        "$ICON_BASE/${size}x${size}/apps/nestty.png"
+done
+# Refresh the icon cache so launchers pick up Icon=nestty without a logout.
+# gtk-update-icon-cache is in libgtk-4 / gtk4 packages — present on any
+# system that already builds nestty, so the missing-binary branch is rare.
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    $SUDO gtk-update-icon-cache -q -t "$ICON_BASE" || true
 fi
 
 # Sanity: user might have BOTH ~/.local/bin/nestty and

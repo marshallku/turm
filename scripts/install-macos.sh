@@ -130,6 +130,18 @@ RESOURCES="$CONTENTS/Resources"
 mkdir -p "$MACOS" "$RESOURCES"
 cp "$BUILT_BIN" "$MACOS/Nestty"
 
+# Bundle icon. CFBundleIconFile expects the basename ("AppIcon") and
+# Finder/Dock/Launchpad pull pixels from Resources/AppIcon.icns. The
+# .icns is checked in (generated from assets/icons/nestty.png — see
+# scripts/build-icons.sh) so swift build alone is enough to produce a
+# fully-iconed bundle.
+ICNS_SRC="$REPO_ROOT/nestty-macos/Resources/AppIcon.icns"
+if [[ -f "$ICNS_SRC" ]]; then
+    cp "$ICNS_SRC" "$RESOURCES/AppIcon.icns"
+else
+    echo "warn: $ICNS_SRC missing — bundle will fall back to the generic app icon" >&2
+fi
+
 # Info.plist — kept in sync with nestty-macos/run.sh by hand. Two copies is
 # acceptable (Rule of Three); a third would mean extracting to a template.
 cat > "$CONTENTS/Info.plist" <<'EOF'
@@ -139,6 +151,8 @@ cat > "$CONTENTS/Info.plist" <<'EOF'
 <dict>
     <key>CFBundleExecutable</key>
     <string>Nestty</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.marshall.nestty</string>
     <key>CFBundleName</key>
