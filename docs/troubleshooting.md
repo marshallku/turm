@@ -143,8 +143,10 @@ action = "system.spawn"
 event_kind = "window.restored"
 
 [triggers.params]
-argv = ["hyprctl", "--batch", "dispatch resizeactive 1 0; dispatch resizeactive -1 0"]
+argv = ["sh", "-c", "hyprctl dispatch resizeactive 1 0 && hyprctl dispatch resizeactive -1 0"]
 ```
+
+**Why `sh -c` here is safe — and when it would NOT be:** `system.spawn` doesn't auto-wrap argv in a shell, so by default `{event.*}` and `{context.*}` interpolations land as literal argv elements where shell metacharacters can't be re-parsed. That default safety is what protects the bare-argv form. Once the user EXPLICITLY chooses `["sh", "-c", "<string>"]`, every interpolated value spliced into that string IS shell-evaluated, so the bare-argv guarantee no longer applies — every interpolation source must be audited individually. The snippet above is safe only because it satisfies BOTH (a) the trigger doesn't interpolate any `{event.X}` or `{context.X}` value into the shell string (every argv element is a literal) AND (b) `window.restored` itself emits an empty `{}` payload, so even a typo'd `{event.X}` would resolve to a literal token rather than attacker-controlled data. Do NOT copy this `sh -c` pattern to triggers that interpolate ANY field (event payload OR context fields like `{context.active_cwd}`) into the shell string — a trigger on e.g. `slack.mention` carrying a user-controlled `text` field, or even one referencing a directory path the user happens to have, would let a Slack message or a malicious dir name run arbitrary code. Use the bare argv form (`argv = ["program", "arg1", ...]`) whenever the trigger interpolates anything. `hyprctl --batch "<cmd1>; <cmd2>"` would avoid the shell entirely but does NOT cure the freeze on Hyprland 0.54.3 — only two SEPARATE `hyprctl dispatch` calls work.
 
 A ready-to-copy snippet lives at [`examples/triggers/hyprland-webkit-fix.toml`](../examples/triggers/hyprland-webkit-fix.toml).
 

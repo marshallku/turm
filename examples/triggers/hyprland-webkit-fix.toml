@@ -29,9 +29,31 @@
 #   switch the same way, so this trigger is a no-op for them.
 # - Reversible: when WebKit/Hyprland publishes a real fix, you delete
 #   this snippet from your config — no nestty release needed.
-# - argv-only: no shell-string form means a future change to
-#   `window.restored`'s payload can't inject extra args via
-#   interpolation.
+#
+# Why this specific snippet is safe to use `sh -c`
+# ------------------------------------------------
+# `system.spawn` doesn't auto-wrap argv in a shell — by default
+# every `{event.*}` and `{context.*}` interpolation lands as a
+# literal argv element where shell metacharacters can't be
+# re-parsed. That default safety is what protects the bare-argv
+# form. Choosing `["sh", "-c", "<string>"]` opts out: every
+# interpolated value spliced into that string IS shell-evaluated.
+#
+# THIS snippet is safe only because it satisfies BOTH:
+#   (a) every argv element is a LITERAL — no `{event.X}` and no
+#       `{context.X}` substitutions inside the shell string; AND
+#   (b) `window.restored` itself emits an empty `{}` payload, so
+#       even an accidental `{event.X}` would resolve to a literal
+#       token rather than attacker-controlled data.
+#
+# DO NOT cargo-cult this `sh -c` pattern to triggers that
+# interpolate ANY field — event payload OR context fields. A
+# trigger on `slack.mention` carrying a user-controlled `text`
+# field, or one substituting `{context.active_cwd}` (a directory
+# name an attacker can craft), would let a single message or a
+# malicious dir name run arbitrary code. Use the bare argv form
+# (`argv = ["program", "arg1", ...]`) for anything with
+# interpolation.
 
 [[triggers]]
 name = "hyprland-webkit-cure"
@@ -41,13 +63,23 @@ action = "system.spawn"
 event_kind = "window.restored"
 
 [triggers.params]
-# `--batch "<cmd1>; <cmd2>"` is hyprctl's documented form for atomic
-# multi-dispatch — the two resizeactive commands run as one batch so
-# the +1/-1 nudge can't be split across compositor frames. argv-form
-# means hyprctl's own arg parser sees `--batch` and the quoted batch
-# string as a single argument, NOT as a shell-interpolated command
-# line — there's no shell involved.
-argv = ["hyprctl", "--batch", "dispatch resizeactive 1 0; dispatch resizeactive -1 0"]
+# Empirically: `hyprctl --batch "<cmd1>; <cmd2>"` (single atomic
+# Hyprland round-trip) does NOT cure the freeze on Hyprland 0.54.3 —
+# the batched dispatches don't re-enter the per-frame scheduler.
+# Two SEPARATE `hyprctl dispatch resizeactive` calls chained with
+# `&&` DO cure. `&&` is a shell operator, so we wrap in `sh -c`.
+#
+# The argv-only no-shell rule on `system.spawn` is about preventing
+# event-payload INTERPOLATION from injecting shell — `window.restored`
+# emits an empty `{}` payload, so there's nothing to interpolate, so
+# `sh -c` here adds zero injection surface. (A trigger that does
+# interpolate event fields into shell strings IS unsafe; if you copy
+# this pattern for a different event, audit the payload first.)
+argv = [
+    "sh",
+    "-c",
+    "hyprctl dispatch resizeactive 1 0 && hyprctl dispatch resizeactive -1 0",
+]
 
 # How to verify
 # -------------
@@ -63,4 +95,11 @@ argv = ["hyprctl", "--batch", "dispatch resizeactive 1 0; dispatch resizeactive 
 #
 # If hyprctl isn't on PATH at nestty's launch env (e.g. nestty
 # launched from a desktop entry that strips PATH), substitute the
-# absolute path: `argv = ["/usr/bin/hyprctl", "--batch", "..."]`.
+# absolute path inside the same `sh -c` form (the `&&` chain is
+# what cures — do NOT swap to `--batch`, see "Why this snippet"
+# above):
+#
+#   argv = [
+#       "sh", "-c",
+#       "/usr/bin/hyprctl dispatch resizeactive 1 0 && /usr/bin/hyprctl dispatch resizeactive -1 0",
+#   ]

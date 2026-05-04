@@ -91,16 +91,27 @@ impl LiveTriggerSink {
     /// from any process running as the user (including arbitrary
     /// scripts that pull `NESTTY_SOCKET` from env).
     ///
-    /// Param shape: `{ argv: ["program", "arg1", ...] }`. argv-only —
-    /// no `sh -c`, no shell expansion, no string-form command. Triggers
-    /// pass interpolated values directly as argv elements, so a
-    /// malicious payload field can't inject `; rm -rf ~` the way a
-    /// shell-string form would.
+    /// Param shape: `{ argv: ["program", "arg1", ...] }`. nestty does
+    /// NOT auto-wrap argv in a shell — by default every `{event.*}`
+    /// and `{context.*}` interpolation lands as a literal argv element
+    /// where shell metacharacters can't be re-parsed, so a malicious
+    /// payload field can't inject `; rm -rf ~`. The user CAN pick
+    /// `["sh", "-c", "<string>"]` themselves to opt into shell
+    /// evaluation, but at that point the bare-argv guarantee no
+    /// longer applies and they own auditing every value spliced into
+    /// the shell string.
     ///
-    /// Designed for the Hyprland WebKit-freeze cure: `[triggers.params]
-    /// argv = ["hyprctl", "--batch", "dispatch resizeactive 1 0; ..."]`
-    /// drives the empirically-confirmed unfreeze without baking
-    /// compositor-specific knowledge into nestty.
+    /// Designed for the Hyprland WebKit-freeze cure. Empirical finding
+    /// from end-to-end testing on Hyprland 0.54.3: `hyprctl --batch
+    /// "<cmd1>; <cmd2>"` (single Hyprland round-trip) does NOT cure;
+    /// two SEPARATE `hyprctl dispatch resizeactive` calls chained with
+    /// `&&` DO cure. The shipped example wraps the `&&` chain in
+    /// `sh -c` (see `examples/triggers/hyprland-webkit-fix.toml`).
+    /// That stays safe only because the snippet has zero `{event.X}`
+    /// or `{context.X}` interpolations and `window.restored` itself
+    /// emits an empty `{}` payload — both conditions documented in
+    /// the example file's preamble. Triggers that interpolate ANY
+    /// field into the shell string violate the safety contract.
     ///
     /// Spawned children are reaped on a worker thread so they don't
     /// become zombies; non-zero exits log to stderr.
