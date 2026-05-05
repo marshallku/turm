@@ -119,56 +119,68 @@ event_kind = "slack.mention"
 #    sketch.
 # ---------------------------------------------------------------------
 
-# ---------------------------------------------------------------------
-# 5. Emoji-react → Todo capture (parity with Discord 2.5)
+# ====================================================================
+# 5. Emoji-react → Todo capture  ★ ACTIVE BY DEFAULT ★
+# ====================================================================
+# React with :memo: on a Slack message → nestty fetches the body and
+# creates a Todo with the permalink + content. Uses Phase 14.2 `await`
+# so the get_message reply is correlated to THIS specific reaction
+# (without correlation, every successful get_message anywhere would
+# fire a Todo).
 #
-# Use case: see something in Slack, react with :memo:, nestty captures
-# the message as a Todo with the permalink + body. Uses Phase 14.2
-# `await` to correlate the get_message reply with THIS specific
-# trigger instance — without correlation every successful
-# get_message would trigger every reaction-driven todo.
+# ┌────────────────────────────────────────────────────────────┐
+# │ 🔧 EMOJI CONFIG — change ONE LINE to use a different emoji │
+# │                                                            │
+# │ Slack uses reaction NAMES (no colons). Common choices:     │
+# │   "memo"     = 📝   "bookmark" = 🔖   "star" = ⭐          │
+# │   "pushpin"  = 📌   "fire"     = 🔥   "eyes" = 👀          │
+# │   "white_check_mark" = ✅                                  │
+# │                                                            │
+# │ To find any emoji's name: in Slack open the picker, hover  │
+# │ over the emoji, the tooltip shows `:name:`. Drop the       │
+# │ colons. Custom workspace emojis use their custom name.     │
+# │                                                            │
+# │ The Discord equivalent is in                               │
+# │ `examples/plugins/discord/triggers.example.toml` — change  │
+# │ that separately because Discord uses unicode literals      │
+# │ (e.g. "📝") instead of names.                              │
+# │                                                            │
+# │ Multiple emojis fire same chain: `event.reaction == "memo" │
+# │ || event.reaction == "bookmark"`. Different actions per    │
+# │ emoji: duplicate the trigger pair with a unique `name`.    │
+# └────────────────────────────────────────────────────────────┘
 #
-# Two-trigger chain:
-#   - `slack-memo-capture-fetch` fires on `slack.reaction`,
-#     filtered to reaction="memo", and dispatches `slack.get_message`.
-#     The await waits for `slack.get_message.completed` and
-#     synthesizes `slack-memo-capture-fetch.awaited` carrying the
-#     reaction event's fields at top level + the Slack message
-#     object nested under `event.await:`.
-#   - `slack-memo-capture-create` listens for that synthesized
-#     event (unique per trigger), so other unrelated get_message
-#     calls don't trigger Todo creation.
-#
-# Reaction names in Slack don't include colons — `event.reaction ==
-# "memo"` matches the `:memo:` reaction. The condition lexer
-# supports unicode strings as well, so `event.reaction == "📝"`
-# would work for actual unicode emoji reactions.
-# ---------------------------------------------------------------------
-# [[triggers]]
-# name = "slack-memo-capture-fetch"
-# action = "slack.get_message"
-# params = { channel = "{event.channel}", ts = "{event.ts}" }
-# condition = """event.reaction == "memo" """
-# [triggers.when]
-# event_kind = "slack.reaction"
-# [triggers.await]
-# event_kind = "slack.get_message.completed"
-# timeout_seconds = 10
-# on_timeout = "abort"
-#
-# [[triggers]]
-# name = "slack-memo-capture-create"
-# action = "todo.create"
-# params = { title = "Slack capture {event.ts}", body = """
-# {event.await.text}
-#
-# Source: {event.permalink}
-# """, workspace = "default" }
-# [triggers.when]
-# event_kind = "slack-memo-capture-fetch.awaited"
-#
-# `event.permalink` reads the original reaction event's permalink
-# (top-level after build_awaited_payload nests the get_message reply
-# under `await:`), so the link points to the user's reacted-on
-# message rather than to the bot's API call. May be null if
-# chat.getPermalink failed at event time.
+# `event.await.text` reads the fetched Slack message body.
+# `event.await` carries the verbatim Slack message object so
+# object-key accesses like `event.await.user` work via the
+# dot-path interpolator. `event.permalink` is the original
+# reaction event's permalink (best-effort fetched at event time;
+# may be null if chat.getPermalink failed) — points to the user's
+# reacted-on message, not to the bot's API call.
+# ====================================================================
+[[triggers]]
+name = "slack-memo-capture-fetch"
+action = "slack.get_message"
+params = { channel = "{event.channel}", ts = "{event.ts}" }
+condition = """event.reaction == "memo" """          # ◀ EMOJI HERE
+[triggers.when]
+event_kind = "slack.reaction"
+[triggers.await]
+event_kind = "slack.get_message.completed"
+timeout_seconds = 10
+on_timeout = "abort"
+
+[[triggers]]
+name = "slack-memo-capture-create"
+action = "todo.create"
+# Title kept short and stable (always populated, never gets cut off
+# in the kanban). Body has the full content + the permalink so a
+# future claude session with a Slack-link MCP tool can re-resolve
+# thread context. Same posture as the Discord capture chain.
+params = { title = "Slack capture {event.ts}", body = """
+{event.await.text}
+
+Source: {event.permalink}
+""", workspace = "default" }
+[triggers.when]
+event_kind = "slack-memo-capture-fetch.awaited"

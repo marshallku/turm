@@ -136,76 +136,79 @@ event_kind = "discord.mention"
 #    params. Sketch only — needs a small command-router action.
 # ---------------------------------------------------------------------
 
-# ---------------------------------------------------------------------
-# 6. Emoji-react → Todo capture (slice 2.5)
+# ====================================================================
+# 6. Emoji-react → Todo capture  ★ ACTIVE BY DEFAULT ★
+# ====================================================================
+# React with 📝 on a Discord message → nestty fetches the body and
+# creates a Todo with the message URL + content. Uses Phase 14.2
+# `await` so the get_message reply is correlated to THIS specific
+# reaction (without correlation, every successful get_message
+# anywhere would fire a Todo).
 #
-# Use case: see something in Discord, react with 📝 (or :memo:), and
-# nestty captures the message as a Todo. Uses Phase 14.2 `await` to
-# correlate the get_message reply specifically to THIS trigger
-# instance — without correlation, every successful get_message would
-# trigger a Todo regardless of who initiated it.
+# ┌────────────────────────────────────────────────────────────┐
+# │ 🔧 EMOJI CONFIG — change ONE LINE to use a different emoji │
+# │                                                            │
+# │ Discord uses raw unicode emoji in `emoji_name`. To switch  │
+# │ to ⭐ for example, change `"📝"` on the `condition` line   │
+# │ below to `"⭐"`. The Slack equivalent is in                │
+# │ `examples/plugins/slack/triggers.example.toml` — change    │
+# │ those separately because Slack uses NAMES (e.g. "memo")    │
+# │ instead of unicode literals.                               │
+# │                                                            │
+# │ Want multiple emojis to fire the same chain? Use `||` in   │
+# │ the condition: `event.emoji_name == "📝" ||                │
+# │ event.emoji_name == "⭐"`. Want different actions per      │
+# │ emoji? Duplicate the trigger pair with a unique `name`.    │
+# └────────────────────────────────────────────────────────────┘
 #
-# Two-trigger chain:
-#   - `discord-memo-capture-fetch` fires on `discord.reaction`,
-#     filtered to emoji_name="📝", and dispatches `discord.get_message`.
-#     Its `[triggers.await]` block waits for the matching
-#     `discord.get_message.completed` and publishes a synthesized
-#     `discord-memo-capture-fetch.awaited` event carrying the original
-#     reaction data at top level + the message data nested under
-#     `await:` (via Phase 14.2 build_awaited_payload).
-#   - `discord-memo-capture-create` listens ONLY for that synthesized
-#     event (its name is unique per trigger), so it doesn't fire for
-#     other unrelated `get_message` calls.
-#
-# `event.await.content` reads the fetched message body. `event.await`
-# carries the verbatim Discord message JSON, so object-key accesses
-# like `event.await.author.id` work via the dot-path interpolator.
-# Note the resolver doesn't index arrays today — fields like
-# `attachments[0].url` are NOT expressible; nest the access through a
-# scalar surfaced explicitly by the plugin (or handle it from a
-# follow-up trigger that reads the captured Todo body).
-# ---------------------------------------------------------------------
-# [[triggers]]
-# name = "discord-memo-capture-fetch"
-# action = "discord.get_message"
-# params = { channel_id = "{event.channel_id}", message_id = "{event.message_id}" }
-# condition = """event.emoji_name == "📝" """
-# [triggers.when]
-# event_kind = "discord.reaction"
-# [triggers.await]
-# event_kind = "discord.get_message.completed"
-# timeout_seconds = 10
-# on_timeout = "abort"
-#
-# [[triggers]]
-# name = "discord-memo-capture-create"
-# action = "todo.create"
-# params = { title = "{event.await.content}", body = """
-# Source: {event.message_url}
-#
-# {event.await.content}
-# """, workspace = "default" }
-# [triggers.when]
-# event_kind = "discord-memo-capture-fetch.awaited"
-#
-# Note: `event.message_url` is the original reaction event's URL
-# (top-level after build_awaited_payload nests the get_message reply
-# under `await:`), so it points to the message the user reacted on,
-# not to the bot's API call. Embedding it in the body lets the user
-# (or claude in a downstream session) re-open the source thread for
-# context that doesn't fit in the captured snapshot.
+# `event.await.content` reads the fetched Discord message body.
+# `event.await` carries the verbatim Discord message JSON so
+# object-key accesses like `event.await.author.id` work via the
+# dot-path interpolator. (Array fields like `attachments[0].url`
+# don't index in the current resolver — surface what you need as
+# a scalar in the body and parse it downstream if needed.)
+# ====================================================================
+[[triggers]]
+name = "discord-memo-capture-fetch"
+action = "discord.get_message"
+params = { channel_id = "{event.channel_id}", message_id = "{event.message_id}" }
+condition = """event.emoji_name == "📝" """          # ◀ EMOJI HERE
+[triggers.when]
+event_kind = "discord.reaction"
+[triggers.await]
+event_kind = "discord.get_message.completed"
+timeout_seconds = 10
+on_timeout = "abort"
+
+[[triggers]]
+name = "discord-memo-capture-create"
+action = "todo.create"
+# Title kept short and stable (always populated, never gets cut off
+# in the kanban). Body has the full content + the URL so a future
+# claude session with a Discord-link MCP tool can re-resolve
+# context. The interpolation DSL has no truncate/fallback, so
+# deriving the title from content directly would break on
+# empty-content reactions (image-only) and explode on 2000-char
+# messages.
+params = { title = "Discord capture {event.message_id}", body = """
+{event.await.content}
+
+Source: {event.message_url}
+""", workspace = "default" }
+[triggers.when]
+event_kind = "discord-memo-capture-fetch.awaited"
 
 # ---------------------------------------------------------------------
-# 7. Star-react → archive a message
-#    Same shape as #6 but a different emoji and `kb.append` instead of
-#    `todo.create`. Multiple memo emojis are handled by repeating the
-#    pair with a different `condition` and unique trigger names.
+# 7. Star-react → KB archive (sketch — uncomment to enable)
+#    Same chain shape as #6 but a different emoji and `kb.append`
+#    instead of `todo.create`. Demonstrates how to add a SECOND
+#    capture emoji with a different destination.
 # ---------------------------------------------------------------------
 # [[triggers]]
 # name = "discord-star-archive-fetch"
 # action = "discord.get_message"
 # params = { channel_id = "{event.channel_id}", message_id = "{event.message_id}" }
-# condition = """event.emoji_name == "⭐" """
+# condition = """event.emoji_name == "⭐" """          # ◀ EMOJI HERE
 # [triggers.when]
 # event_kind = "discord.reaction"
 # [triggers.await]
