@@ -31,29 +31,16 @@ pub struct NesttyWindow {
     statusbar: Rc<StatusBar>,
     #[allow(dead_code)]
     background: Rc<BackgroundLayer>,
-    /// `connect_destroy` calls `service_supervisor.shutdown_all()` to
-    /// tear down service plugins (send the documented `shutdown`
-    /// notification, drop writer-channel sender, SIGKILL stragglers
-    /// after a grace window). Storing the supervisor on this struct
-    /// also keeps the `Arc` count >= 1 for the duration of the
-    /// window's lifetime so runtime threads aren't suddenly orphaned
-    /// by a refcount drop.
+    /// Held to keep `Arc` count ≥ 1 (so runtime threads aren't orphaned)
+    /// and to invoke `shutdown_all` from `connect_destroy`.
     #[allow(dead_code)]
     service_supervisor: Arc<ServiceSupervisor>,
-    /// Hidden 1x1 zero-opacity `WebView` loaded with a tiny
-    /// `file://$TMPDIR/nestty-prewarm-<pid>.html` stub at window
-    /// construction time so WebKit's host-side auxiliary services
-    /// (xdg-desktop-portal lazy systemd activation, bubblewrap
-    /// sandbox setup, document-portal D-Bus handshake) are already
-    /// warm by the time the user opens their first plugin panel.
-    /// Without this, on cold boot the first plugin panel's
-    /// `load_uri()` hangs in WebProcess startup until something
-    /// else (e.g. spawning a second nestty) wakes the underlying
-    /// daemons — see commit 78ebdb1 for the diagnostic
-    /// instrumentation that surfaced the symptom. Stored on the
-    /// struct so the `WebContext` stays live for the window's
-    /// lifetime; dropping it would let WebKit reap the warmed
-    /// auxiliary processes.
+    /// Hidden 1×1 zero-opacity WebView that loads a stub at window
+    /// construction time, warming WebKit's auxiliary services
+    /// (xdg-desktop-portal activation, bubblewrap sandbox, document-portal
+    /// D-Bus handshake) before the user opens their first plugin panel.
+    /// Without this, the first plugin panel's `load_uri()` hangs in
+    /// WebProcess startup on cold boot. Held to keep `WebContext` alive.
     #[allow(dead_code)]
     prewarm_webview: webkit6::WebView,
 }
@@ -475,9 +462,6 @@ impl NesttyWindow {
     }
 }
 
-/// Rebuild the window-level fallback bg CSS for the given theme. Called
-/// at startup and on every config hot reload so a theme change updates
-/// this color in lockstep with the rest of the UI.
 fn update_window_bg_css(provider: &gtk4::CssProvider, theme: &nestty_core::theme::Theme) {
     provider.load_from_string(&format!(
         "window {{ background-color: {}; }}",
@@ -539,23 +523,13 @@ fn watch_config(
         mgr.update_config(&config);
         sb.reload(&config, &pl);
         bg.apply_config(&config);
-        // `set_triggers` swaps the list atomically so a concurrent dispatch
-        // sees either the old full list or the new full list, never a mix.
         trg.set_triggers(config.triggers.clone());
-        // Pump everything on the CURRENT receiver set against the freshly-
-        // installed trigger list BEFORE reconcile potentially drops any
-        // receivers. `pump_all` is the same helper the timer uses, so:
-        //   1. context queues are drained → ContextService is up-to-date,
-        //   2. then trigger queues are drained with that fresh context for
-        //      `{context.*}` interpolation.
-        // Without step 1, a pattern-changing reload could fire pending
-        // triggers with stale `{context.*}` values; without the whole drain,
-        // a pattern edit (e.g. `terminal.cwd_changed` → `terminal.*`) would
-        // discard pending events the new trigger set would have matched.
+        // Pump_all (context drain → trigger drain) on the OLD receiver set
+        // before reconcile drops any: a pattern-narrowing reload (e.g.
+        // `terminal.*` → `terminal.cwd_changed`) would otherwise discard
+        // pending events the new trigger set would have matched, and stale
+        // `{context.*}` interpolation would feed any in-flight dispatches.
         ps.borrow().pump_all(&ctx, &trg);
-        // Reconcile bus subscriptions: keep covering patterns still in use,
-        // drop those no trigger needs (queues guaranteed empty by the pump
-        // above), add new ones.
         ps.borrow_mut().reconcile_triggers(&bus, &config.triggers);
         eprintln!(
             "[nestty] triggers reloaded: {} active ({:?}) | {} bus pattern(s) subscribed",
@@ -568,13 +542,9 @@ fn watch_config(
     std::mem::forget(monitor);
 }
 
-/// Bundles all per-tick drain targets — context-driving receivers AND the
-/// trigger engine's per-pattern subscriptions — so the GTK timer and the
-/// hot-reload callback can both invoke the same `pump_all` sequence with
-/// identical semantics. Without this, the two callsites had subtly
-/// different ordering (timer drained context first via a free function;
-/// reload drained only triggers), causing reload-time `{context.*}`
-/// interpolation to read stale state.
+/// Per-tick drain targets (context receivers + trigger subscriptions) so
+/// the GTK timer and hot-reload callback share one `pump_all` sequence
+/// with identical context-then-triggers ordering.
 pub struct PumpState {
     ctx_focused: EventReceiver,
     ctx_exited: EventReceiver,
@@ -583,9 +553,7 @@ pub struct PumpState {
 }
 
 impl PumpState {
-    /// Drain the three context receivers into the ContextService. Order
-    /// across them is not significant: focused/exited and cwd_changed for
-    /// different panels are commutative for context's state model.
+    /// Order across the three is commutative for ContextService's state.
     pub fn drain_context_only(&self, ctx: &ContextService) {
         while let Some(event) = self.ctx_focused.try_recv() {
             ctx.apply_event(&event);
@@ -598,9 +566,8 @@ impl PumpState {
         }
     }
 
-    /// Drain context first (so `{context.*}` interpolation is fresh), then
-    /// drain trigger subscriptions and dispatch them. One context snapshot
-    /// per dispatched event keeps each invocation self-consistent.
+    /// Context first (so `{context.*}` interpolation is fresh), then
+    /// triggers. One context snapshot per dispatched event.
     pub fn pump_all(&self, ctx: &ContextService, engine: &TriggerEngine) {
         self.drain_context_only(ctx);
         self.trigger_subs.drain_into(|event| {
@@ -618,12 +585,10 @@ impl PumpState {
     }
 }
 
-/// Holds one bus receiver per unique `event_kind` pattern across all
-/// currently-active triggers. Reconciled at startup and on every hot reload
-/// so patterns no longer in use are dropped (their queues GC'd lazily on
-/// the next bus publish) while still-needed patterns retain their existing
-/// receiver — pending events are not lost when a reload changes only
-/// unrelated triggers.
+/// One bus receiver per unique `event_kind` pattern across active triggers.
+/// Reconciled at startup and on hot reload: still-needed patterns keep their
+/// existing receivers (pending events preserved across unrelated reloads),
+/// removed patterns drop (queues GC'd lazily on next publish).
 pub struct TriggerSubscriptions {
     receivers: HashMap<String, EventReceiver>,
 }
@@ -639,29 +604,16 @@ impl TriggerSubscriptions {
         self.receivers.len()
     }
 
-    /// Bring the active set of subscriptions in line with the kinds declared
-    /// by `triggers`. The set is reduced via `covering_patterns` first so
-    /// overlapping declarations (e.g. `*` plus `panel.focused`) collapse to a
-    /// single broader receiver — otherwise the bus would deliver the same
-    /// event to multiple receivers and trigger every matching action once
-    /// per delivery, double-firing real side effects.
-    ///
-    /// Existing receivers for patterns still in the covering set are kept
-    /// (their pending events are preserved across hot reload); receivers for
-    /// removed patterns are dropped (lazily GC'd by the bus on next publish);
-    /// new patterns get fresh `subscribe_unbounded` receivers (lossless for
-    /// matched kinds).
+    /// Reduces requested patterns via `covering_patterns` first so overlap
+    /// (`*` plus `panel.focused`) collapses to a single broader receiver —
+    /// otherwise duplicate delivery would double-fire side effects.
+    /// New patterns get fresh `subscribe_unbounded` receivers.
     pub fn reconcile(&mut self, bus: &Arc<CoreEventBus>, triggers: &[Trigger]) {
-        // The pump needs to drive THREE flavors of event into the engine:
-        //   1. `when.event_kind` — the originating event a trigger matches.
-        //   2. `await.event_kind` — the follow-up the engine waits for after
-        //      a trigger with `await` has fired (Phase 14.2).
-        //   3. `<action>.completed` / `.failed` for any trigger with
-        //      `await` — the engine promotes preflight → pending on
-        //      `<X>.completed` and drops on `<X>.failed`. Without these
-        //      subscriptions the await primitive degrades to "registers
-        //      preflight, never promotes" and the documented flow doesn't
-        //      work in the live app.
+        // The pump drives three flavors of event into the engine:
+        // (1) `when.event_kind`, (2) `await.event_kind`, and
+        // (3) `<action>.completed`/`.failed` for await-bearing triggers.
+        // Missing subscription #3 degrades await to "registers preflight,
+        // never promotes" — see docs/workflow-runtime.md "Async correlation".
         let mut raw: Vec<String> = Vec::with_capacity(triggers.len() * 3);
         for t in triggers {
             raw.push(t.when.event_kind.clone());
@@ -681,15 +633,11 @@ impl TriggerSubscriptions {
         }
     }
 
-    /// Drain every receiver fully, calling `f` for each event. Order
-    /// matters for Phase 14.2: `<X>.completed` and `<X>.failed`
-    /// events MUST be processed before any `await.event_kind` events
-    /// queued in the same tick, otherwise an awaited reply that
-    /// arrived alongside the completion would be discarded
-    /// (preflight not yet promoted to pending → match attempt fails
-    /// → reply dropped → workflow times out). HashMap iteration
-    /// order is unspecified, so we explicitly drain into a Vec and
-    /// sort: `.completed`/`.failed` first, then everything else.
+    /// Drain every receiver fully. Ordering invariant: registry-sourced
+    /// `<X>.completed`/`.failed` events must run BEFORE `await.event_kind`
+    /// in the same tick — otherwise a same-tick awaited reply hits a
+    /// preflight that hasn't promoted yet and the workflow times out.
+    /// HashMap iteration order is unspecified, so drain → Vec → stable-sort.
     pub fn drain_into<F: FnMut(BusEvent)>(&self, mut f: F) {
         let mut events: Vec<BusEvent> = Vec::new();
         for rx in self.receivers.values() {
@@ -697,14 +645,11 @@ impl TriggerSubscriptions {
                 events.push(event);
             }
         }
-        // Stable sort so events with identical priority keep insertion
-        // order. Priority 0 (run first) is reserved for `nestty.action`-
-        // sourced completion fan-out events ONLY — that's the same
-        // trust boundary `try_promote_or_drop_preflight` enforces. A
-        // user-published event with `kind = "todo.completed"` (Todo
-        // plugin's watcher emits this) is NOT a completion fan-out
-        // and gets normal priority, so it doesn't end up reordered
-        // ahead of other awaited follow-ups in unspecified ways.
+        // Trust-bound priority: only `nestty.action`-sourced
+        // `.completed`/`.failed` (the same gate `try_promote_or_drop_preflight`
+        // enforces) gets priority 0. A plugin-published event whose kind
+        // happens to end with `.completed` (Todo's watcher emits one) stays
+        // at normal priority so it can't reorder ahead of other follow-ups.
         events.sort_by_key(|e| {
             let is_completion_fan_out = e.source
                 == nestty_core::action_registry::COMPLETION_EVENT_SOURCE
