@@ -15,10 +15,11 @@
 //!
 //! Init validation. The runtime `initialize` reply is checked against the
 //! manifest with the same asymmetric rule applied to BOTH `provides` and
-//! `subscribes`: subset is OK (degraded mode — runtime can declare fewer
-//! than the manifest), superset is rejected with a warning (extras
-//! dropped, plugin keeps serving its manifest-approved set). The pre-spawn
-//! analysis must stay accurate or the conflict resolution above is invalid.
+//! `subscribes`: the served set is always the runtime∩manifest intersection.
+//! Runtime ⊂ manifest is degraded mode — manifest-only actions stay
+//! registered and return `service_degraded` on invoke. Runtime ⊃ manifest
+//! warns and drops the extras. The pre-spawn analysis must stay accurate
+//! or the conflict resolution above is invalid.
 //!
 //! Threading. Each running service owns three OS threads: a writer that
 //! drains the outgoing channel into child stdin, a reader that parses
@@ -44,22 +45,14 @@ use nestty_core::event_bus::{Event as BusEvent, EventBus, pattern_matches};
 use nestty_core::plugin::{Activation, LoadedPlugin, PluginServiceDef, RestartPolicy};
 use nestty_core::protocol::{Request, Response, ResponseError};
 
-/// Bumped on backwards-incompatible RPC changes. Plugins announce the
-/// version they understand in their `initialize` reply; mismatches are
-/// surfaced as a warning (we don't refuse-to-load yet — the protocol is
-/// still v1 so refusing-to-load wouldn't be useful).
+/// Announced to plugins in the `initialize` request. Plugins decide whether
+/// to accept; rejecting (e.g. with `protocol_mismatch`) makes init fail and
+/// the supervisor kills the child. Bump on backwards-incompatible RPC changes.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 const DEFAULT_INIT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Action-reply timeout. Bumped from the original 30s in Phase 12.1
-/// because LLM completions (`nestty-plugin-llm`'s `llm.complete`) can
-/// run 10-90s for long contexts, and the timeout is currently a
-/// single global on the supervisor — there's no per-action override
-/// yet. Fast-action plugins (KB grep, calendar list) finish in
-/// <100ms regardless, so the bump only changes how long a
-/// genuinely-stuck plugin call holds before surfacing
-/// `action_timeout`. Phase 12.2+ should add per-action overrides
-/// so the LLM path can extend further without affecting the rest.
+/// Single global action-reply timeout. Sized to accommodate long-running
+/// LLM completions (10-90s); per-action overrides are a future addition.
 const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PENDING_BUFFER: usize = 64;
 const BACKOFF_BASE: Duration = Duration::from_secs(1);
@@ -81,9 +74,6 @@ enum ServiceState {
     Failed,
 }
 
-/// Frames the writer thread serializes. Keeping `Request`/`Response` as
-/// distinct variants from `Notification` lets us send LSP-style
-/// notifications (no id) without abusing empty-id requests.
 enum OutgoingFrame {
     Request(Request),
     Notification { method: String, params: Value },
@@ -125,13 +115,9 @@ struct ServiceHandle {
     service_name: String,
     plugin_dir: PathBuf,
     spec: PluginServiceDef,
-    /// Manifest's `provides`, filtered down to entries this plugin won
-    /// during pre-spawn conflict resolution. The runtime reply is checked
-    /// against this (subset OK, superset rejected).
+    /// Post-conflict-resolution manifest set. Runtime init reply checked
+    /// against this (subset OK, superset rejected); see module preamble.
     approved_provides: Vec<String>,
-    /// Manifest's `subscribes`. Same asymmetric validation applies; this
-    /// is what the supervisor will subscribe on the bus AFTER init narrows
-    /// the runtime set.
     approved_subscribes: Vec<String>,
     state: Mutex<ServiceState>,
     /// Set when a process is alive. Sender goes to writer thread.
@@ -142,29 +128,19 @@ struct ServiceHandle {
     /// Action invocations buffered while state is `Starting`. Drained in
     /// FIFO order on the transition to `Running`.
     pending_invocations: Mutex<VecDeque<PendingInvocation>>,
-    /// Negotiated runtime action set. `None` until the first successful
-    /// init; populated to whatever the runtime declared (already
-    /// intersected with the manifest by the asymmetric validation).
-    /// Cleared on exit so a restart re-establishes through a fresh
-    /// handshake. Used by `invoke_remote` to gate dispatch — manifest-
-    /// approved actions that the runtime omitted at init return
-    /// `service_degraded` instead of being silently sent into the void.
+    /// Negotiated runtime action set (`None` until first successful init).
+    /// `invoke_remote` gates dispatch on this so manifest-approved actions
+    /// the runtime omitted return `service_degraded` instead of vanishing.
+    /// Cleared on exit so restart re-establishes via a fresh handshake.
     runtime_provides: Mutex<Option<HashSet<String>>>,
-    /// Live child PID, set when the process is alive. Used by the init
-    /// timeout path to SIGKILL the child when EOF cooperation can't be
-    /// assumed (a misbehaving plugin that ignores its stdin would
-    /// otherwise stay around forever).
+    /// Set while the child is alive. The init-timeout path SIGKILLs via
+    /// this since stdin-EOF cooperation can't be assumed.
     child_pid: Mutex<Option<u32>>,
     next_id: AtomicU64,
     backoff: Mutex<BackoffState>,
-    /// Per-instance subscribe-forwarder bookkeeping. The forwarder
-    /// threads bridge bus events into the plugin's `event.dispatch`
-    /// frames. Without explicit teardown they accumulate one
-    /// thread + one bus subscription per `subscribes` pattern per
-    /// successful init — i.e. a service that crashes and restarts
-    /// 100 times leaks 100 sleeping forwarders. We now track
-    /// JoinHandles and signal shutdown cooperatively from
-    /// `handle_exit` so a fresh start begins with a clean slate.
+    /// Per-init subscribe-forwarder bookkeeping. Without cooperative
+    /// teardown via `handle_exit`, restarts would leak one forwarder
+    /// thread + bus subscription per `subscribes` pattern.
     forwarder_stop: Arc<AtomicBool>,
     forwarder_handles: Mutex<Vec<thread::JoinHandle<()>>>,
 }
@@ -205,16 +181,12 @@ pub struct ProvideConflict {
     pub losers: Vec<String>,
 }
 
-/// `(plugin_name, service_name) → action names this service may register`.
-/// Built up front by walking every enabled plugin's manifest in lexical
-/// order so collisions resolve deterministically.
+/// `(plugin_name, service_name) → approved action names`.
 pub type ApprovedProvides = HashMap<(String, String), Vec<String>>;
 
-/// Walks plugins in lexical order of `[plugin].name`, builds the
-/// global ownership table for action names, and emits a conflict report
-/// the supervisor can log. The ownership decision is made BEFORE any
-/// process is spawned so init order, mtimes, and filesystem layout
-/// don't influence which plugin wins a contested action.
+/// Resolve action-name conflicts deterministically: walks plugins in lexical
+/// order of `[plugin].name` BEFORE any process is spawned, so spawn order,
+/// mtimes, and filesystem layout don't influence which plugin wins.
 pub fn resolve_provides(plugins: &[LoadedPlugin]) -> (ApprovedProvides, Vec<ProvideConflict>) {
     // Sort by `[plugin].name` first, then by `dir` path as a stable
     // tiebreaker. Without the secondary key, two plugins with the
@@ -297,17 +269,12 @@ pub struct ServiceSupervisor {
     nestty_version: String,
     init_timeout: Duration,
     action_timeout: Duration,
-    /// `onEvent:` activations need a forwarder that listens on the bus
-    /// and spawns the service the first time a matching event fires.
-    /// `onAction:` activations don't need a registry-side rule because
-    /// the registered handler itself triggers spawn through
-    /// `invoke_remote`. Stored once at boot, immutable thereafter.
+    /// `onEvent:` activations need a bus-listener that spawns the service
+    /// on first matching event. `onAction:` doesn't — the registered handler
+    /// triggers spawn via `invoke_remote`. Boot-immutable.
     on_event_rules: Vec<(String, Arc<ServiceHandle>)>,
-    /// Set by `shutdown_all` to suppress restarts and new activations.
-    /// Once true, `handle_exit` won't schedule a restart even if
-    /// `restart=always`, and `spawn_service_async` is a no-op. This
-    /// prevents a service that crashes (or exits in response to the
-    /// `shutdown` notification) from respawning after window destroy.
+    /// Set by `shutdown_all` to suppress restarts and new activations,
+    /// preventing respawn during window-destroy teardown.
     shutting_down: AtomicBool,
 }
 
@@ -976,9 +943,8 @@ impl ServiceSupervisor {
         });
     }
 
-    /// Action handler entry point. Called synchronously by the registry
-    /// from whichever thread invoked the action. Blocks the caller until
-    /// the service replies or the action timeout elapses.
+    /// Action-registry entry point: blocks the caller until the service
+    /// replies or `self.action_timeout` elapses.
     fn invoke_remote(
         self: &Arc<Self>,
         handle: &Arc<ServiceHandle>,
@@ -1289,22 +1255,14 @@ impl ServiceSupervisor {
         self.services.lock().unwrap().len()
     }
 
-    /// Cleanly stop every running service. Three-stage:
+    /// Idempotent three-stage shutdown:
+    /// 1. Set `shutting_down` (must precede exits, else `restart=always`
+    ///    plugins exiting on the `shutdown` notification could respawn).
+    /// 2. Notify every running service via `shutdown`.
+    /// 3. After 200ms grace, SIGKILL anything still alive.
     ///
-    /// 1. Set the global `shutting_down` flag so `spawn_service_async`
-    ///    refuses new activations and `handle_exit` won't schedule
-    ///    restarts. This must happen BEFORE we trigger any exits —
-    ///    otherwise a `restart=always` service that exits in response
-    ///    to `shutdown` could respawn under us.
-    /// 2. Send the documented `shutdown` notification to every running
-    ///    service. Cooperating plugins exit on this signal alone.
-    /// 3. After a 200ms grace window, SIGKILL anything still alive
-    ///    (recorded child PIDs) as the safety net.
-    ///
-    /// Idempotent. Note that `subscribes` forwarder threads still hold
-    /// clones of `outgoing` — we don't try to drop those here; the
-    /// SIGKILL on the child causes the writer thread to error on its
-    /// next send and the forwarder to die naturally.
+    /// Subscribe-forwarder threads hold cloned `outgoing` senders; the
+    /// SIGKILL chain (writer → forwarder) terminates them naturally.
     pub fn shutdown_all(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
 
@@ -1425,17 +1383,17 @@ fn spawn_stderr_tail(label: String, stderr: std::process::ChildStderr) {
     });
 }
 
-/// Best-effort SIGKILL on a child PID. We don't hold the `Child` after
-/// spawn (it's been moved into the wait thread for `child.wait()`), so
-/// the cleanest way to forcibly tear down a misbehaving plugin during
-/// init failure is a raw signal. Errors are swallowed because the only
-/// expected failure mode is "process already exited," which is exactly
-/// what we want.
+/// Best-effort SIGKILL by raw PID — `Child` has been moved into the wait
+/// thread, so we can't `kill()` it directly. Return value is ignored;
+/// "process already exited" is the most common failure and is the goal anyway,
+/// but PID reuse means a successful syscall is also not a strict guarantee
+/// the right process was hit.
 fn kill_child(pid: u32) {
-    // Safety: `libc::kill` is a syscall that takes a PID and a signal
-    // number. The PID we pass came from `Child::id()` so it's a valid
-    // process owned by us. SIGKILL (9) cannot be caught or ignored, so
-    // even a buggy plugin can't hang.
+    // Safety: `libc::kill` accepts a PID + signal. The PID came from
+    // `Child::id()` and was ours when first recorded; PID reuse after
+    // wait+respawn could in theory aim at an unrelated process, but
+    // SIGKILL on PID 0 / negative is the only foot-gun the syscall has,
+    // and we never pass those values. Return ignored (see outer doc).
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGKILL);
     }
