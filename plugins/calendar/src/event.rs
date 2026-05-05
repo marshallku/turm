@@ -16,18 +16,16 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalendarEvent {
     pub id: String,
-    /// `recurringEventId` from Google. Same value across all instances
-    /// of a recurring event, which is exactly what triggers want for
-    /// "fire only on this weekly meeting" patterns.
+    /// `recurringEventId` — same across all instances of a recurring
+    /// event, what triggers match on for "this weekly meeting" patterns.
     pub recurring_id: Option<String>,
     pub title: String,
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
     /// Whether this is an all-day event (no clock time).
     pub all_day: bool,
-    /// `accepted` / `declined` / `tentative` / `needsAction` / `null`
-    /// (null when the calendar owner is the organizer and there's no
-    /// explicit response for themselves).
+    /// `accepted` / `declined` / `tentative` / `needsAction`. `None`
+    /// when the owner is the organizer with no self-response recorded.
     pub my_response_status: Option<String>,
     pub attendees: Vec<Attendee>,
     pub organizer: Option<Person>,
@@ -55,9 +53,8 @@ pub struct Person {
     pub name: Option<String>,
 }
 
-/// Map a Google Calendar API event JSON into our internal struct.
-/// Returns `None` if the event is missing required fields (cancelled
-/// events without start, malformed responses).
+/// `None` on missing required fields (cancelled events without `start`,
+/// malformed responses).
 pub fn from_gcal_json(raw: &Value) -> Option<CalendarEvent> {
     let id = raw.get("id")?.as_str()?.to_string();
     let title = raw
@@ -122,21 +119,13 @@ pub fn from_gcal_json(raw: &Value) -> Option<CalendarEvent> {
     })
 }
 
-/// Parse `{ "dateTime": "...", "timeZone": "..." }` or `{ "date": "..." }`
-/// (all-day form). Returns `(start_or_end, is_all_day)`.
+/// `{dateTime, timeZone}` or `{date}` (all-day form) → `(time, is_all_day)`.
 ///
-/// **Known limitation, accepted per user decision (2026-04-26):**
-/// all-day events come from Google as a calendar-local date with no
-/// time and no IANA tz attached on the event node — the calendar's
-/// own timezone is the authoritative interpretation. We approximate
-/// it as midnight in the plugin process's local timezone, which is
-/// correct for the canonical single-user-on-own-laptop case (machine
-/// tz == calendar tz). For users whose laptop tz differs from their
-/// calendar tz (travelling, multi-region setups), all-day reminders
-/// shift by the offset. Closing the gap cleanly requires the
-/// `chrono-tz` crate plus an extra `calendars.get('primary')` call;
-/// not worth carrying for the rare-in-practice mismatch case.
-/// See docs/roadmap.md.
+/// **All-day events use process-local tz as the calendar's tz** — the
+/// event node carries no IANA zone, and the calendar's own zone is
+/// authoritative. Correct for the single-user-on-own-laptop case
+/// (machine tz == calendar tz); travelling / multi-region users see
+/// reminders shifted by the offset. See `docs/roadmap.md`.
 fn parse_event_time(node: &Value) -> Option<(DateTime<Utc>, bool)> {
     if let Some(dt) = node.get("dateTime").and_then(Value::as_str) {
         // RFC3339, includes timezone — parse and convert to UTC.
@@ -207,10 +196,9 @@ fn extract_conference_url(raw: &Value) -> Option<String> {
     pick.and_then(|e| e.get("uri").and_then(Value::as_str).map(str::to_string))
 }
 
-/// JSON serialization for the event-publish wire format. Matches the
-/// CalendarEvent struct field-for-field but uses `start_time_rfc3339` /
-/// `end_time_rfc3339` strings (callers want strings for trigger
-/// interpolation, not chrono structs).
+/// Wire format. Field-for-field with `CalendarEvent` except `start_time`
+/// and `end_time` serialize as RFC3339 strings so triggers can interpolate
+/// them directly (instead of chrono structs).
 pub fn to_json(e: &CalendarEvent) -> Value {
     json!({
         "id": e.id,
