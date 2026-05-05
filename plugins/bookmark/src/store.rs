@@ -98,10 +98,9 @@ impl Store {
         }
     }
 
-    /// Walk the tree and return all bookmark files (`.md` files under
-    /// `YYYY-MM/`). Files without valid frontmatter or without a `url`
-    /// field are silently skipped — we don't want a stray hand-written
-    /// note in `~/docs/bookmarks/` to crash list. Hidden dirs skipped.
+    /// Walks `YYYY-MM/*.md`. Files without valid frontmatter or without
+    /// a `url` field are silently skipped so a stray hand-written note
+    /// can't crash list. Hidden dirs skipped.
     pub fn list_all(&self) -> Vec<Match> {
         let mut out = Vec::new();
         let mut paths = Vec::new();
@@ -231,18 +230,16 @@ impl Store {
         }
     }
 
-    /// Find by exact urlhash8 (used after canonicalization to detect
-    /// re-add). Returns the first match — duplicate hashes shouldn't
-    /// happen but if they do, we surface only the most recent (the
-    /// list is sorted newest-first).
+    /// Used after canonicalization to detect re-add. Returns the most
+    /// recent match (`list_all` is newest-first) when duplicate hashes
+    /// somehow exist.
     pub fn find_by_urlhash(&self, urlhash8: &str) -> Option<Match> {
         let target = urlhash8.to_ascii_lowercase();
         self.list_all().into_iter().find(|m| m.id == target)
     }
 
-    /// Atomically create a new bookmark file. Returns the chosen path.
-    /// If a file with the same urlhash8 already exists ANYWHERE under
-    /// root, returns the existing match in `existed`.
+    /// Atomic create. If a file with the same `urlhash8` already exists
+    /// anywhere under root, returns `CreateOutcome::Existed` instead.
     pub fn create(&self, req: CreateRequest<'_>) -> Result<CreateOutcome, StoreError> {
         if let Some(existing) = self.find_by_urlhash(req.urlhash8) {
             return Ok(CreateOutcome::Existed(existing));
@@ -335,10 +332,9 @@ pub struct CreateRequest<'a> {
     pub now: DateTime<Local>,
 }
 
-/// Slug = lowercased Unicode-alphanumeric chars from input, separated
-/// by `-`, max 60 chars (chars not bytes), trimmed of leading/trailing
-/// `-`. Empty input → `"untitled"`. CJK and other scripts are kept
-/// (not transliterated) because Linux filesystems handle them fine.
+/// Lowercased Unicode-alphanumeric chars joined by `-`, max 60 chars
+/// (chars not bytes), trimmed; empty input → `"untitled"`. CJK passes
+/// through (not transliterated).
 pub fn slug(input: &str) -> String {
     let mut s = String::with_capacity(input.len());
     let mut last_was_dash = false;
@@ -375,18 +371,11 @@ fn id_from_filename(path: &Path) -> Option<String> {
     }
 }
 
-/// Atomically create a new file at `final_path`. **No-replace**: if a
-/// file already exists at the target — even one that appeared between
-/// the caller's dedup check and this write — the rename fails with
-/// `AlreadyExists` rather than silently overwriting it.
-///
-/// Implementation matches `nestty-plugin-todo` and `nestty-plugin-kb`:
-/// write to a same-directory temp via `O_CREAT|O_EXCL`, then route the
-/// final rename through `nestty_core::fs_atomic::rename_no_replace`
-/// (Linux `renameat2(RENAME_NOREPLACE)` / macOS
-/// `renamex_np(RENAME_EXCL)`). POSIX `rename(2)` alone replaces
-/// atomically — the kernel-level "fail if destination exists" guarantee
-/// is what keeps the no-replace contract honest under concurrent writers.
+/// Same-directory temp + `nestty_core::fs_atomic::rename_no_replace`
+/// (matching todo/kb). POSIX `rename(2)` alone replaces atomically —
+/// the kernel's "fail if destination exists" flag is what keeps the
+/// no-replace contract honest against the race between the caller's
+/// dedup check and this write.
 fn atomic_write_new(final_path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = final_path
         .parent()
