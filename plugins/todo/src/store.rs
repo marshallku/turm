@@ -60,10 +60,8 @@ pub struct Store {
 }
 
 impl Store {
-    /// Construct the store. Creates the root if it doesn't exist
-    /// (so first-run after install Just Works) and canonicalizes
-    /// it so every later path can be re-validated against the
-    /// canonical prefix to defeat symlink mischief.
+    /// Creates the root if missing (first-run) and stores the canonicalized
+    /// form so later paths can be re-checked against `root_canonical`.
     pub fn new(root: PathBuf) -> Result<Self, Err> {
         if let Err(e) = fs::create_dir_all(&root) {
             return Err(Err::Io(format!("mkdir {}: {e}", root.display())));
@@ -80,16 +78,11 @@ impl Store {
         &self.root
     }
 
-    /// Build (and create-on-demand) the per-workspace directory.
-    ///
-    /// Refuses if the workspace path already exists as a symlink, even
-    /// when its target stays inside the root. Without this check,
-    /// `default → work` would let `todo.create("default", …)` write
-    /// through to `work/` while `todo.list` and the watcher (which
-    /// scan real subdirs) attribute the same file to workspace
-    /// `work`. The result: a logical workspace handle that isn't
-    /// stable across the create / read paths. Same trust boundary
-    /// as `nestty-plugin-kb`'s `check_no_symlink_ancestors`.
+    /// Builds (creates on demand) the per-workspace dir. Refuses if the
+    /// workspace path is a symlink, even when its target stays inside
+    /// the root: `default → work` would let `create("default", ...)` write
+    /// to `work/` while `list`/watcher (real-subdir scans) attribute the
+    /// same file to workspace `work`, breaking workspace-handle stability.
     fn workspace_dir(&self, workspace: &str) -> Result<PathBuf, Err> {
         crate::config::validate_workspace(workspace)
             .map_err(|m| Err::InvalidParams(format!("workspace: {m}")))?;
@@ -139,9 +132,7 @@ impl Store {
         Ok(dir.join(format!("{id}.md")))
     }
 
-    /// Read a single todo from disk. `O_NOFOLLOW` so a symlink
-    /// dropped at the leaf can't redirect the read. Returns
-    /// `NotFound` on missing file.
+    /// `O_NOFOLLOW` so a leaf-swap symlink can't redirect the read.
     pub fn read(&self, workspace: &str, id: &str) -> Result<Todo, Err> {
         let path = self.todo_path(workspace, id)?;
         let mut f = OpenOptions::new()
@@ -158,10 +149,8 @@ impl Store {
         Ok(todo::parse(&s, id, workspace))
     }
 
-    /// Create a new todo file atomically. Returns the persisted
-    /// `Todo` (which echoes back the caller-supplied or
-    /// store-generated id). `id_exists` if the file already
-    /// exists.
+    /// Atomic create; returns the persisted `Todo` (echoing the supplied
+    /// or generated id). `id_exists` on collision.
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
@@ -209,13 +198,10 @@ impl Store {
         Ok(todo)
     }
 
-    /// Read-modify-rewrite of the `status:` frontmatter line.
-    /// Returns the previous status so callers (file-watcher) can
-    /// detect transitions to `done` for `todo.completed` events.
-    /// If the file's frontmatter is malformed (no closing fence,
-    /// no status line), we rebuild the entire file via
-    /// `render_new` — vim users can still recover by restoring
-    /// from git.
+    /// In-place rewrite of the `status:` frontmatter line. Returns
+    /// `(previous, new)` so the watcher can detect `→ done` transitions.
+    /// Falls back to a full `render_new` if frontmatter is malformed
+    /// (no closing fence, no status line).
     pub fn set_status(
         &self,
         workspace: &str,
@@ -251,19 +237,12 @@ impl Store {
         Ok((prev, new_status))
     }
 
-    /// Read-modify-rewrite for arbitrary fields. Status updates go
-    /// through `set_status` instead because they preserve the
-    /// user's frontmatter ordering / comments via in-place line
-    /// rewrite — `update` regenerates the file via `render_new`,
-    /// which canonicalizes ordering and drops comments. That's the
-    /// right tradeoff when the user is editing through the UI
-    /// (regenerated frontmatter is what they expect from a form),
-    /// but wrong for the high-frequency status-toggle path.
-    ///
-    /// Each `Option` field follows the "None means don't touch"
-    /// rule; pass `Some(value)` to set, `Some("")` to clear (caller
-    /// translates empty form fields to `Some("")`). Body and prompt
-    /// follow the same convention via `Option<String>`.
+    /// Full regenerate via `render_new` (canonicalizes ordering, drops
+    /// comments) — appropriate for UI form-submit, wrong for the
+    /// high-frequency status-toggle path (use `set_status` instead).
+    /// Outer `Option` is "None = don't touch"; for `Option<Option<String>>`
+    /// fields (`due`, `linked_jira`, `prompt`) an inner empty string clears.
+    /// `title: Some("")` is rejected.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &self,
@@ -335,10 +314,8 @@ impl Store {
         }
     }
 
-    /// Enumerate every todo file under the root. `workspace=None`
-    /// scans every workspace dir; `Some(label)` restricts to one.
-    /// Symlinked dirs/files are skipped — same posture as the KB
-    /// search walk.
+    /// `None` walks every workspace dir; `Some(label)` restricts to one.
+    /// Symlinked entries are skipped (same posture as KB search walk).
     pub fn list_all(&self, workspace_filter: Option<&str>) -> Result<Vec<Todo>, Err> {
         let mut todos = Vec::new();
         let workspaces = match workspace_filter {
@@ -443,9 +420,8 @@ pub fn validate_id(id: &str) -> Result<(), Err> {
     Ok(())
 }
 
-/// Generate a sortable id from the current time. Format
-/// `T-YYYYMMDDHHMMSS-<seq>` so concurrent creates on the same
-/// second still get distinct ids without RNG dependency.
+/// `T-YYYYMMDDHHMMSS-<seq>` — sortable, no RNG dep, distinct under
+/// same-second concurrent creates.
 pub fn generate_id() -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
