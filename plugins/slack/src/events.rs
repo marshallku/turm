@@ -23,21 +23,11 @@ use serde_json::{Value, json};
 pub enum SlackEvent {
     Mention(MessageFields),
     Dm(MessageFields),
-    /// Reaction added to a message (`reaction_added` event with
-    /// `item.type == "message"`). Mirrors Discord 2.5's
-    /// `discord.reaction` for symmetric "react with 📝 → capture
-    /// to Todo" workflows. File reactions (`item.type == "file"`)
-    /// are dropped at classify time — message reactions are the
-    /// load-bearing case.
+    /// `reaction_added` with `item.type == "message"`. File reactions are
+    /// dropped at classify time. Mirrors `discord.reaction`.
     Reaction(ReactionFields),
-    /// Full-fidelity firehose: emitted for EVERY events_api frame
-    /// regardless of filtering. Carries the raw inner `event` object
-    /// (blocks, files, attachments, edits, joins — everything Slack
-    /// sends) so a `kb.append` trigger can archive the firehose
-    /// without further plugin work. Users who only want
-    /// mention/DM triggers ignore this kind. Wire shape includes
-    /// the outer envelope's `team_id` / `event_id` for routing
-    /// the archive into per-workspace folders.
+    /// Full-fidelity firehose for EVERY events_api frame — raw inner
+    /// `event` plus envelope `team_id`/`event_id` for archive routing.
     Raw(RawEvent),
 }
 
@@ -55,24 +45,20 @@ pub struct MessageFields {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionFields {
     pub channel: String,
-    /// Timestamp of the reacted-on message — Slack uses (channel, ts)
-    /// as the message identity. Pair this with `slack.get_message`
-    /// to fetch the body for a Todo capture flow.
+    /// `(channel, ts)` is Slack's message identity; pair with
+    /// `slack.get_message` to fetch the body.
     pub ts: String,
     /// User who added the reaction.
     pub user: String,
     /// Emoji name without colons (e.g. `"memo"` for :memo:). Custom
     /// emoji come through under their installed name.
     pub reaction: String,
-    /// Author of the reacted-on message, if Slack supplies it
-    /// (`item_user` field on the event). Useful as a guard so
-    /// triggers don't capture the bot's own posts.
+    /// `item_user` from the event (when Slack supplies it). Used as a
+    /// guard so triggers don't capture the bot's own posts.
     pub item_user: Option<String>,
-    /// Best-effort permalink to the message, fetched at event time
-    /// via `chat.getPermalink` — None if the call fails or the
-    /// channel is otherwise inaccessible. Carries the workspace
-    /// subdomain (which we don't know locally), which is why we
-    /// don't construct it ourselves like Discord does.
+    /// `chat.getPermalink` result (carries the workspace subdomain we
+    /// don't know locally; that's why we fetch instead of synthesizing
+    /// like Discord does). `None` on call failure.
     pub permalink: Option<String>,
     pub team_id: Option<String>,
     pub event_id: Option<String>,
@@ -80,9 +66,7 @@ pub struct ReactionFields {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawEvent {
-    /// Slack event type (`message`, `app_mention`, `channel_rename`,
-    /// etc.) — surfaced separately so triggers can match on it
-    /// without parsing `event_json`.
+    /// Surfaced top-level so triggers match without parsing `event_json`.
     pub event_type: String,
     /// Channel id IF the underlying event has one (most do).
     /// `null` for events like `team_join` that aren't channel-scoped.
@@ -92,17 +76,10 @@ pub struct RawEvent {
     pub ts: Option<String>,
     pub team_id: Option<String>,
     pub event_id: Option<String>,
-    /// The raw nested `event` object verbatim — no field is
-    /// stripped so the archive captures full Slack fidelity.
-    /// Trigger access notes:
-    /// - `[triggers.condition]` supports nested ref paths
-    ///   (`event.event_json.subtype`, `event.event_json.bot_id`)
-    ///   so users can filter on inner fields.
-    /// - `params` interpolation (`{event.X}`) only resolves
-    ///   top-level keys; `{event.event_json}` interpolates the
-    ///   whole inner object as JSON, which is exactly what the
-    ///   archive trigger wants. Nested-key interpolation in
-    ///   params is a future trigger-DSL extension.
+    /// Verbatim Slack `event` object. `[triggers.condition]` reaches
+    /// nested fields via `event.event_json.X`; `params` interpolation
+    /// only resolves top-level keys, so `{event.event_json}` writes the
+    /// whole inner object as JSON (the archive-trigger use case).
     pub event_json: Value,
 }
 
@@ -149,25 +126,11 @@ impl SlackEvent {
     }
 }
 
-/// Top-level entrypoint: examine an `events_api` envelope payload
-/// and produce zero or more nestty-shaped events.
-///
-/// Returns BOTH:
-/// - The `slack.raw` event (always emitted — full firehose for
-///   archive triggers).
-/// - Optionally one of `slack.mention` / `slack.dm` / `slack.reaction`
-///   if the payload passes the filter.
-///
-/// `payload` is the value of the outer frame's `payload` key, which
-/// itself contains `event_id`, `team_id`, `event`, etc. (Slack's
-/// "Events API outer wrapper.")
-///
-/// `bot_user_id` is the Slack user id of the bot — used to filter
-/// the bot's own reactions out of `slack.reaction` (the canonical
-/// "react with 📝 → capture" workflow would otherwise self-loop
-/// when the bot adds a starter emoji). Pass `None` if unknown
-/// (env-only credentials skip the runtime `auth.test` step); the
-/// non-reaction filters don't depend on this.
+/// Always emits `slack.raw`; optionally one of mention/dm/reaction when
+/// the payload passes the filter. `payload` is the events_api outer
+/// envelope (`event_id`, `team_id`, `event`, …). `bot_user_id` filters
+/// the bot's own reactions; `None` is fine for env-only setups (only the
+/// reaction path uses it).
 pub fn from_events_api_payload(payload: &Value, bot_user_id: Option<&str>) -> Vec<SlackEvent> {
     let Some(event) = payload.get("event") else {
         return Vec::new();
@@ -354,9 +317,6 @@ mod tests {
         })
     }
 
-    /// Test helper: pick the filtered event (mention/dm) out of the
-    /// returned vec, asserting that exactly one filtered + one raw
-    /// were emitted. Returns the filtered event.
     fn expect_filtered(out: Vec<SlackEvent>) -> SlackEvent {
         assert_eq!(out.len(), 2, "expected raw + filtered, got {out:?}");
         assert!(
