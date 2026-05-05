@@ -9,46 +9,50 @@ nestty is a cross-platform custom terminal emulator built with a shared Rust cor
 ```
 nestty/
 ├── Cargo.toml              # Workspace root (resolver = "2", edition = "2024")
-├── nestty-plugin-echo/        # Mock service plugin (verifies protocol shape)
-│   └── src/main.rs            # newline-JSON over stdio: echo.ping + system.heartbeat
-├── nestty-plugin-kb/          # First-party KB plugin (grep + filename over ~/docs)
-│   └── src/                    # main.rs (RPC loop), kb.rs (4 actions + atomic IO)
-├── nestty-plugin-calendar/   # First-party Google Calendar plugin (Unix only — Linux + macOS)
-│   └── src/                    # main.rs (RPC + auth subcommand), config.rs (env),
-│                                # store.rs (keyring + plaintext fallback), oauth.rs
-│                                # (device-code flow + refresh), gcal.rs (events.list),
-│                                # poller.rs (lead-time dedupe), event.rs (payload mapping)
-├── nestty-plugin-slack/      # First-party Slack Socket Mode plugin (Unix only)
-│   └── src/                    # main.rs (RPC + auth subcommand), config.rs (env),
-│                                # store.rs (two-token keyring + plaintext fallback),
-│                                # socket_mode.rs (apps.connections.open + tungstenite
-│                                # WebSocket loop + reconnect + chat.postMessage),
-│                                # events.rs (Slack → slack.mention / slack.dm /
-│                                # slack.raw mapping with filtering)
-├── nestty-plugin-llm/        # First-party LLM plugin (Anthropic provider, Unix only)
-│   └── src/                    # main.rs (RPC + auth subcommand), config.rs (env),
-│                                # store.rs (single-token keyring + plaintext fallback),
-│                                # anthropic.rs (Messages API client), usage.rs
-│                                # (JSONL append-only usage log + aggregation)
-├── nestty-plugin-todo/       # First-party Todo plugin (markdown-checkbox files at
-│   │                            # ~/docs/todos/<workspace>/<id>.md, vim/git compatible)
-│   └── src/                    # main.rs (RPC loop + actions), config.rs (env),
-│                                # todo.rs (Todo struct + frontmatter parse/render +
-│                                # surgical update_status_in_text), store.rs (atomic
-│                                # create via nestty_core::fs_atomic::rename_no_replace —
-│                                # Linux renameat2(RENAME_NOREPLACE) / macOS
-│                                # renamex_np(RENAME_EXCL); list_all, set_status,
-│                                # delete; mirrors KB security posture), watcher.rs
-│                                # (poll-based diff emitting todo.created/changed/
-│                                # completed/deleted)
-├── nestty-plugin-git/        # First-party git workspace + worktree plugin
-│   │                            # (lightweight: argv-vector shell-outs to `git`, no
-│   │                            # external API, no keyring; cross-platform Linux+macOS)
-│   └── src/                    # main.rs (RPC + actions + worktree_add.completed event),
-│                                # config.rs (~/.config/nestty/workspaces.toml loader with
-│                                # canonicalization), git.rs (current_branch, list_worktrees
-│                                # porcelain v2 parser, worktree_add/remove, status v2 parser,
-│                                # validate_branch_name)
+├── plugins/                  # First-party plugins. Each subdir holds the Rust crate
+│   │                            # (`Cargo.toml` + `src/`) AND its runtime manifest /
+│   │                            # assets (`plugin.toml`, `panel.html`, `triggers.example.toml`)
+│   │                            # side-by-side. Crate names remain `nestty-plugin-<name>`.
+│   ├── echo/                 # Mock service plugin (verifies protocol shape)
+│   │   └── src/main.rs            # newline-JSON over stdio: echo.ping + system.heartbeat
+│   ├── kb/                   # First-party KB plugin (grep + filename over ~/docs)
+│   │   └── src/                    # main.rs (RPC loop), kb.rs (4 actions + atomic IO)
+│   ├── calendar/             # First-party Google Calendar plugin (Unix only — Linux + macOS)
+│   │   └── src/                    # main.rs (RPC + auth subcommand), config.rs (env),
+│   │                                # store.rs (keyring + plaintext fallback), oauth.rs
+│   │                                # (device-code flow + refresh), gcal.rs (events.list),
+│   │                                # poller.rs (lead-time dedupe), event.rs (payload mapping)
+│   ├── slack/                # First-party Slack Socket Mode plugin (Unix only)
+│   │   └── src/                    # main.rs (RPC + auth subcommand), config.rs (env),
+│   │                                # store.rs (two-token keyring + plaintext fallback),
+│   │                                # socket_mode.rs (apps.connections.open + tungstenite
+│   │                                # WebSocket loop + reconnect + chat.postMessage),
+│   │                                # events.rs (Slack → slack.mention / slack.dm /
+│   │                                # slack.raw mapping with filtering)
+│   ├── llm/                  # First-party LLM plugin (Anthropic provider, Unix only)
+│   │   └── src/                    # main.rs (RPC + auth subcommand), config.rs (env),
+│   │                                # store.rs (single-token keyring + plaintext fallback),
+│   │                                # anthropic.rs (Messages API client), usage.rs
+│   │                                # (JSONL append-only usage log + aggregation)
+│   ├── todo/                 # First-party Todo plugin (markdown-checkbox files at
+│   │   │                            # ~/docs/todos/<workspace>/<id>.md, vim/git compatible)
+│   │   └── src/                    # main.rs (RPC loop + actions), config.rs (env),
+│   │                                # todo.rs (Todo struct + frontmatter parse/render +
+│   │                                # surgical update_status_in_text), store.rs (atomic
+│   │                                # create via nestty_core::fs_atomic::rename_no_replace —
+│   │                                # Linux renameat2(RENAME_NOREPLACE) / macOS
+│   │                                # renamex_np(RENAME_EXCL); list_all, set_status,
+│   │                                # delete; mirrors KB security posture), watcher.rs
+│   │                                # (poll-based diff emitting todo.created/changed/
+│   │                                # completed/deleted)
+│   └── git/                  # First-party git workspace + worktree plugin
+│       │                            # (lightweight: argv-vector shell-outs to `git`, no
+│       │                            # external API, no keyring; cross-platform Linux+macOS)
+│       └── src/                    # main.rs (RPC + actions + worktree_add.completed event),
+│                                    # config.rs (~/.config/nestty/workspaces.toml loader with
+│                                    # canonicalization), git.rs (current_branch, list_worktrees
+│                                    # porcelain v2 parser, worktree_add/remove, status v2 parser,
+│                                    # validate_branch_name)
 # claude.start: nestty-internal socket action (lives in nestty-linux/src/socket.rs).
 # Spawns a tab whose terminal cwd is the worktree, feeds
 # `tmux new-session -A -s <name> 'claude [--resume <id>]'` into it.
@@ -115,16 +119,16 @@ nestty/
 
 ## Tech Stack
 
-| Component       | Technology                                                  |
-| --------------- | ----------------------------------------------------------- |
-| Core library    | Rust (shared across platforms)                              |
-| Linux terminal  | GTK4 + VTE4 (VTE handles PTY internally, zero IPC overhead) |
-| macOS terminal  | Swift/AppKit + SwiftTerm (LocalProcessTerminalView)         |
-| CLI tool        | clap (Rust)                                                 |
-| Config          | TOML (`~/.config/nestty/config.toml`)                         |
-| IPC             | Unix domain socket, cmux V2 newline-delimited JSON          |
+| Component       | Technology                                                                                                                             |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Core library    | Rust (shared across platforms)                                                                                                         |
+| Linux terminal  | GTK4 + VTE4 (VTE handles PTY internally, zero IPC overhead)                                                                            |
+| macOS terminal  | Swift/AppKit + SwiftTerm (LocalProcessTerminalView)                                                                                    |
+| CLI tool        | clap (Rust)                                                                                                                            |
+| Config          | TOML (`~/.config/nestty/config.toml`)                                                                                                  |
+| IPC             | Unix domain socket, cmux V2 newline-delimited JSON                                                                                     |
 | Background mgmt | File cache at `~/.cache/terminal-wallpapers.txt` (Linux) or `~/Library/Caches/nestty/wallpapers.txt` (macOS, falls back to Linux path) |
-| Theme           | Catppuccin Mocha (hardcoded palette)                        |
+| Theme           | Catppuccin Mocha (hardcoded palette)                                                                                                   |
 
 ## Key Dependencies
 
@@ -303,6 +307,7 @@ Plugins extend nestty with custom panels (HTML/JS UIs) and commands (shell scrip
 **Plugin directory**: `~/.config/nestty/plugins/<plugin-name>/`
 
 **Manifest** (`plugin.toml`):
+
 ```toml
 [plugin]
 name = "my-plugin"
@@ -325,6 +330,7 @@ description = "Does a thing"
 **Architecture**: Plugin panels are WebViews (`PluginPanel`) loading local HTML files with an injected `nestty` JS bridge. The bridge uses WebKitGTK's `register_script_message_handler_with_reply` so `nestty.call()` returns a Promise that resolves with the dispatch result. Events are forwarded to the webview via `evaluate_javascript`.
 
 **JS Bridge API** (injected into plugin webviews):
+
 ```javascript
 window.nestty = {
     panel: { id, name, plugin },
@@ -360,15 +366,15 @@ subscribes = []                    # bus event-kind globs forwarded as event.dis
 
 **Bidirectional RPC** over newline-JSON, both directions:
 
-| Direction | Method | Notes |
-|---|---|---|
-| nestty → service | `initialize` | first message, awaits reply |
-| nestty → service | `initialized` | notification (no id), ack of init |
-| nestty → service | `action.invoke` | service is the registered handler |
-| nestty → service | `event.dispatch` | matches a `subscribes` pattern |
-| service → nestty | `event.publish` | publishes to bus; nestty fills source/timestamp |
-| service → nestty | `action.invoke` | call ANOTHER service's action; runs on a worker thread to keep the reader free for nested calls |
-| service → nestty | `log` | stderr-style logging routed via nestty |
+| Direction        | Method           | Notes                                                                                           |
+| ---------------- | ---------------- | ----------------------------------------------------------------------------------------------- |
+| nestty → service | `initialize`     | first message, awaits reply                                                                     |
+| nestty → service | `initialized`    | notification (no id), ack of init                                                               |
+| nestty → service | `action.invoke`  | service is the registered handler                                                               |
+| nestty → service | `event.dispatch` | matches a `subscribes` pattern                                                                  |
+| service → nestty | `event.publish`  | publishes to bus; nestty fills source/timestamp                                                 |
+| service → nestty | `action.invoke`  | call ANOTHER service's action; runs on a worker thread to keep the reader free for nested calls |
+| service → nestty | `log`            | stderr-style logging routed via nestty                                                          |
 
 **Restart.** Exponential backoff on crash: 1s → 2s → 4s … capped at 60s. Reset to 1s on successful init. Policies: `on-crash` (default), `always`, `never`.
 
@@ -376,13 +382,14 @@ subscribes = []                    # bus event-kind globs forwarded as event.dis
 
 **E2E verification** uses `nestty-plugin-echo` (workspace member): registers `echo.ping`, publishes `system.heartbeat` every `NESTTY_ECHO_HEARTBEAT_SECS` seconds (default 30). `nestctl call echo.ping --params '{...}'` round-trips params through socket → registry → service. `nestctl event subscribe` shows the heartbeat. `pkill -KILL nestty-plugin-echo` triggers supervisor restart, after which the next `echo.ping` works again.
 
-| Command | Params | Behavior |
-|---------|--------|----------|
-| `plugin.list` | — | List installed plugins with panels/commands |
-| `plugin.open` | `plugin`, `panel?` (default: "main") | Open a plugin panel in a new tab |
-| `plugin.<name>.<cmd>` | arbitrary JSON | Run a plugin shell command |
+| Command               | Params                               | Behavior                                    |
+| --------------------- | ------------------------------------ | ------------------------------------------- |
+| `plugin.list`         | —                                    | List installed plugins with panels/commands |
+| `plugin.open`         | `plugin`, `panel?` (default: "main") | Open a plugin panel in a new tab            |
+| `plugin.<name>.<cmd>` | arbitrary JSON                       | Run a plugin shell command                  |
 
 **CLI usage**:
+
 ```bash
 nestctl plugin list
 nestctl plugin open my-plugin

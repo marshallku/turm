@@ -19,7 +19,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "serde",
     "std",
 ] }
-nestty-core = { path = "../nestty-core" }
+nestty-core = { path = "../../nestty-core" }
 
 [dev-dependencies]
 tempfile = "3"

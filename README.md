@@ -42,19 +42,19 @@ A cross-platform terminal emulator built around a shared Rust core and platform-
 
 ### First-party Plugins
 
-`examples/plugins/<name>/` — install with `./scripts/install-plugins.sh`. All plugins implement the service-plugin protocol (newline-JSON over stdio, supervised by nestty).
+`plugins/<name>/` — install with `./scripts/install-plugins.sh`. Each plugin directory holds the Rust crate (`Cargo.toml` + `src/`) and its runtime manifest/assets (`plugin.toml`, `panel.html`, `triggers.example.toml`) together. All plugins implement the service-plugin protocol (newline-JSON over stdio, supervised by nestty).
 
-| Plugin | Purpose |
-|---|---|
-| `kb` | Grep + filename search and atomic read/append/ensure over `~/docs` |
-| `calendar` | Google Calendar event polling with lead-time dedupe |
-| `slack` | Slack Socket Mode — mention/DM events + `chat.postMessage` |
-| `llm` | Anthropic Messages API client with JSONL usage log |
-| `todo` | Markdown-checkbox todos in `~/docs/todos/<workspace>/` (vim/git compatible) |
-| `git` | Worktree create/remove + branch / status queries |
-| `discord` | Discord integration |
-| `bookmark` | Bookmarks plugin |
-| `echo` | Reference / E2E plugin |
+| Plugin     | Purpose                                                                     |
+| ---------- | --------------------------------------------------------------------------- |
+| `kb`       | Grep + filename search and atomic read/append/ensure over `~/docs`          |
+| `calendar` | Google Calendar event polling with lead-time dedupe                         |
+| `slack`    | Slack Socket Mode — mention/DM events + `chat.postMessage`                  |
+| `llm`      | Anthropic Messages API client with JSONL usage log                          |
+| `todo`     | Markdown-checkbox todos in `~/docs/todos/<workspace>/` (vim/git compatible) |
+| `git`      | Worktree create/remove + branch / status queries                            |
+| `discord`  | Discord integration                                                         |
+| `bookmark` | Bookmarks plugin                                                            |
+| `echo`     | Reference / E2E plugin                                                      |
 
 ### Platforms
 
@@ -195,9 +195,11 @@ nestty/
 ├── nestty-linux/               # GTK4 + VTE4 native terminal app (binary: nestty)
 ├── nestty-macos/               # Swift/AppKit + SwiftTerm app (Nestty.app)
 ├── nestty-cli/                 # CLI control tool (binary: nestctl)
-├── nestty-plugin-{echo,kb,calendar,slack,llm,todo,git,discord,bookmark}/
-│                                 # First-party service plugins
-├── examples/plugins/           # Plugin manifests + assets (installed into ~/.config/nestty/plugins/)
+├── plugins/<name>/             # First-party service plugins. Each subdir holds the
+│                                 # Rust crate (Cargo.toml + src/) and its manifest/assets
+│                                 # (plugin.toml, panel.html, triggers.example.toml) together.
+│                                 # Crate names remain `nestty-plugin-<name>`.
+├── examples/plugins/hello/     # Tutorial plugin: panel + bash command (no Rust crate)
 ├── scripts/                    # install-dev.sh, install-macos.sh, install-plugins.sh
 └── docs/                       # Project documentation — start at docs/INDEX.md
 ```

@@ -202,7 +202,7 @@ if $DO_PLUGINS; then
     mkdir -p "$PLUGIN_DEST"
     for name in "${MACOS_PLUGINS[@]}"; do
         crate="nestty-plugin-$name"
-        src_manifest="$REPO_ROOT/examples/plugins/$name/plugin.toml"
+        src_manifest="$REPO_ROOT/plugins/$name/plugin.toml"
         if [[ ! -f "$src_manifest" ]]; then
             echo "skip plugin $name: $src_manifest missing"
             continue
@@ -219,8 +219,9 @@ if $DO_PLUGINS; then
         plugin_dir="$PLUGIN_DEST/$name"
         mkdir -p "$plugin_dir"
         # Copy every loose file next to plugin.toml (manifest + panel.html
-        # if any) so panel-bearing plugins land complete.
-        find "$REPO_ROOT/examples/plugins/$name" -maxdepth 1 -type f \
+        # if any) so panel-bearing plugins land complete. Cargo.toml lives
+        # in the same dir but is build-time only — exclude it.
+        find "$REPO_ROOT/plugins/$name" -maxdepth 1 -type f ! -name 'Cargo.toml' \
             -exec cp -f {} "$plugin_dir/" \;
         # Copy (don't symlink) the binary so a `git clean` of target/ doesn't
         # silently break the install. Cheap — these binaries are small.

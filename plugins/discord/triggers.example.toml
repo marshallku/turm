@@ -151,7 +151,7 @@ event_kind = "discord.mention"
 # │ Discord uses raw unicode emoji in `emoji_name`. To switch  │
 # │ to ⭐ for example, change `"📝"` on the `condition` line   │
 # │ below to `"⭐"`. The Slack equivalent is in                │
-# │ `examples/plugins/slack/triggers.example.toml` — change    │
+# │ `plugins/slack/triggers.example.toml` — change    │
 # │ those separately because Slack uses NAMES (e.g. "memo")    │
 # │ instead of unicode literals.                               │
 # │                                                            │

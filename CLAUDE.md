@@ -19,6 +19,8 @@ Cross-platform custom terminal emulator with shared Rust core and platform-nativ
 - `nestty-linux/` — GTK4 + VTE4 native terminal app (binary: `nestty`)
 - `nestty-cli/` — CLI control tool (binary: `nestctl`)
 - `nestty-macos/` — Swift/AppKit app (stub)
+- `plugins/<name>/` — First-party plugins. Each dir holds the Rust crate (`Cargo.toml` + `src/`) and its runtime manifest/assets (`plugin.toml`, `panel.html`, `triggers.example.toml`) together. Crate name remains `nestty-plugin-<name>` (binary name unchanged).
+- `examples/plugins/hello/` — Tutorial plugin demonstrating a panel + a bash command (no Rust crate)
 - `docs/` — Project documentation (architecture, decisions, troubleshooting, roadmap)
 
 ## Build & Run
@@ -51,6 +53,7 @@ cargo run -p nestty-cli -- <command>
 ```
 
 Why these exist:
+
 - **Linux**: `install-dev.sh` defaults to user install at `~/.local/bin/nestty` (no sudo) — matches `install.sh`'s end-user default and avoids sudo prompts during dev iteration. Use `--system` explicitly when you want the system-wide copy at `/usr/local/bin`. If both `~/.local/bin/nestty` and `/usr/local/bin/nestty` exist and differ, PATH lookup typically picks `/usr/local/bin` first, so a stale system copy can silently shadow your fresh user-local build (and a desktop-entry-launched nestty will use the system copy too). The script warns loudly in that case and lists the four resolutions.
 - **macOS**: `cargo install nestty-cli` fails (not on crates.io) and `cargo install --path .` fails from the repo root (workspace virtual manifest). The `nestty` GUI app is SwiftPM, not cargo. Before this script, `nestty-macos/run.sh` was the only path and it only built an ephemeral debug bundle under `.build/debug/`. The script wraps `swift build -c release` + bundle layout + `cargo install --path nestty-cli` so the user gets a real `/Applications`-style install.
 
@@ -63,7 +66,9 @@ Why these exist:
 ./scripts/install-plugins.sh todo git  # just these two
 ```
 
-Plugins live in `examples/plugins/<name>/`; nestty's runtime discovers them from `~/.config/nestty/plugins/<name>/` at startup. The script copies the manifest + assets and symlinks the built binary into the plugin dir. `<plugin_dir>/<exec>` takes precedence over `PATH`, which matters because nestty is often launched from a desktop entry whose env doesn't include `~/.local/bin`. After installing, **restart nestty** — `discover_plugins()` only runs at startup. Symptom of an outdated install: `service X is not running and X.action cannot trigger its activation (OnStartup)` from the supervisor.
+Plugins live in `plugins/<name>/` — each directory holds the Rust crate (`Cargo.toml` + `src/`) **and** its runtime manifest/assets (`plugin.toml`, `panel.html`, `triggers.example.toml`, …) side-by-side. nestty's runtime discovers them from `~/.config/nestty/plugins/<name>/` at startup. The install script copies the manifest + assets (everything except `Cargo.toml`) and symlinks the built binary into the plugin dir. `<plugin_dir>/<exec>` takes precedence over `PATH`, which matters because nestty is often launched from a desktop entry whose env doesn't include `~/.local/bin`. After installing, **restart nestty** — `discover_plugins()` only runs at startup. Symptom of an outdated install: `service X is not running and X.action cannot trigger its activation (OnStartup)` from the supervisor.
+
+`examples/plugins/hello/` is a tutorial example (a panel + a bash command, no Rust crate); it stays under `examples/` to mark it as illustrative rather than first-party.
 
 ## Git Hooks
 

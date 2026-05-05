@@ -8,17 +8,17 @@
 # Run after `cargo build --release --workspace`.
 #
 # Usage:
-#   ./scripts/install-plugins.sh           # install every example plugin
+#   ./scripts/install-plugins.sh           # install every first-party plugin
 #   ./scripts/install-plugins.sh todo git  # install just these two
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXAMPLES_DIR="$REPO_ROOT/examples/plugins"
+PLUGINS_SRC_DIR="$REPO_ROOT/plugins"
 TARGET_DIR="$REPO_ROOT/target/release"
 PLUGIN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nestty/plugins"
 
-if [ ! -d "$EXAMPLES_DIR" ]; then
-    echo "error: $EXAMPLES_DIR not found — run from a nestty checkout" >&2
+if [ ! -d "$PLUGINS_SRC_DIR" ]; then
+    echo "error: $PLUGINS_SRC_DIR not found — run from a nestty checkout" >&2
     exit 1
 fi
 
@@ -52,25 +52,28 @@ changes apply on the next click without restarting nestty.
 (stub created by scripts/install-plugins.sh — replace with your
 own coding rules, language conventions, project-wide reminders.)"
 
-# Default to every example plugin that has a plugin.toml.
+# Default to every plugin that has a plugin.toml.
 if [ "$#" -eq 0 ]; then
-    set -- $(cd "$EXAMPLES_DIR" && find . -mindepth 2 -maxdepth 2 -name plugin.toml -printf '%h\n' | sed 's|^./||' | sort)
+    set -- $(cd "$PLUGINS_SRC_DIR" && find . -mindepth 2 -maxdepth 2 -name plugin.toml -printf '%h\n' | sed 's|^./||' | sort)
 fi
 
 mkdir -p "$PLUGIN_DIR"
 
 for name in "$@"; do
-    src="$EXAMPLES_DIR/$name"
+    src="$PLUGINS_SRC_DIR/$name"
     dst="$PLUGIN_DIR/$name"
     if [ ! -f "$src/plugin.toml" ]; then
         echo "skip $name: $src/plugin.toml not found"
         continue
     fi
     mkdir -p "$dst"
-    # Copy every non-binary file (manifest + panel.html etc).
+    # Copy every non-binary, non-build file (manifest + panel.html etc).
     # Plugin authors put HTML/CSS/JS alongside plugin.toml; copy
     # them all so the plugin's WebView panel can find its assets.
-    find "$src" -maxdepth 1 -type f -exec cp -f {} "$dst/" \;
+    # Exclude Cargo.toml — it lives alongside plugin.toml in the
+    # source tree (one dir per plugin) but is build-time only and
+    # has no runtime use in ~/.config/nestty/plugins/<name>/.
+    find "$src" -maxdepth 1 -type f ! -name 'Cargo.toml' -exec cp -f {} "$dst/" \;
 
     # Symlink the binary if it's a [[services]] plugin. Bare-
     # panel plugins (no services entry) don't need a binary.

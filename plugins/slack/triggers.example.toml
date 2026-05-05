@@ -141,7 +141,7 @@ event_kind = "slack.mention"
 # │ colons. Custom workspace emojis use their custom name.     │
 # │                                                            │
 # │ The Discord equivalent is in                               │
-# │ `examples/plugins/discord/triggers.example.toml` — change  │
+# │ `plugins/discord/triggers.example.toml` — change  │
 # │ that separately because Discord uses unicode literals      │
 # │ (e.g. "📝") instead of names.                              │
 # │                                                            │
