@@ -1649,6 +1649,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nestty-plugin-jira"
+version = "0.1.0"
+dependencies = [
+ "keyring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "nestty-plugin-kb"
 version = "0.1.0"
 dependencies = [

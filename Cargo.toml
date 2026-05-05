@@ -14,6 +14,7 @@ members = [
     "nestty-plugin-git",
     "nestty-plugin-discord",
     "nestty-plugin-bookmark",
+    "nestty-plugin-jira",
 ]
 
 [workspace.package]

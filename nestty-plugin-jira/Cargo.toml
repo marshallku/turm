@@ -1,0 +1,24 @@
+[package]
+name = "nestty-plugin-jira"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "First-party Jira (Atlassian Cloud) service plugin for nestty (slice 16.1: auth subcommand + jira.auth_status). Slice 16.2 will add the polling loop and 5 jira.* read/write actions."
+repository.workspace = true
+
+[[bin]]
+name = "nestty-plugin-jira"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+keyring = { version = "3", default-features = false, features = [
+    "apple-native",
+    "sync-secret-service",
+    "crypto-rust",
+] }
+
+[dev-dependencies]
+tempfile = "3"

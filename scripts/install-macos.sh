@@ -67,7 +67,7 @@ DO_LAUNCH=false
 #   Slack `xoxb-` tokens / Discord bot tokens in Keychain (see plugin
 #   READMEs). Without creds the plugins return RPC errors gracefully
 #   rather than crashing the supervisor.
-MACOS_PLUGINS=(echo git llm calendar kb todo bookmark slack discord)
+MACOS_PLUGINS=(echo git llm calendar kb todo bookmark slack discord jira)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
