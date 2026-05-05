@@ -1,3 +1,15 @@
+//! Action registry: name → handler map shared by socket dispatch, plugin
+//! RPC, and triggers.
+//!
+//! Panic semantics for this whole module: every dispatch path
+//! (`invoke` / `try_invoke` / `try_dispatch`) calls the handler before
+//! completion-event fan-out and before any continuation. A panic in the
+//! handler unwinds past both — no `<action>.completed`/`.failed` is
+//! published, and any `Responder` is dropped uncalled. `try_dispatch`'s
+//! `bool` return assumes worker-thread spawn succeeds (panics on OS
+//! failure, which is rare). Handlers that need the bus to see a failure
+//! must catch and convert to `Err` themselves.
+
 use crate::event_bus::{Event as BusEvent, EventBus};
 use crate::protocol::ResponseError;
 use serde_json::{Value, json};
@@ -6,40 +18,31 @@ use std::sync::{Arc, RwLock};
 
 pub type ActionResult = Result<Value, ResponseError>;
 pub type ActionFn = Arc<dyn Fn(Value) -> ActionResult + Send + Sync + 'static>;
-/// Continuation passed to `try_dispatch`. Called exactly once per
-/// successful dispatch. For sync handlers it fires *inline* on the
-/// caller's thread before `try_dispatch` returns; for blocking
-/// handlers it fires on a worker thread spawned by the registry.
+/// `try_dispatch` continuation. Fires inline for sync handlers, on a worker
+/// thread for `register_blocking`. Panic semantics: see module preamble.
 pub type Responder = Box<dyn FnOnce(ActionResult) + Send + 'static>;
 
-/// Source field stamped on synthetic completion events. Lets bus
-/// subscribers distinguish "auto-published by the registry on
-/// dispatch" from a plugin's own emitted events that happen to
-/// share the same kind.
+/// Trust-boundary stamp on auto-published completion events. Subscribers
+/// (notably `TriggerEngine::try_promote_or_drop_preflight`) gate on this
+/// to distinguish registry-synthesized events from plugin-emitted ones
+/// that happen to share a `<x>.completed` kind.
 pub const COMPLETION_EVENT_SOURCE: &str = "nestty.action";
 
 struct Entry {
     handler: ActionFn,
-    /// True if the handler may block for a non-trivial duration
-    /// (network I/O, subprocess RPC, etc.). `try_dispatch` runs
-    /// blocking handlers on a worker thread so the caller's thread —
-    /// typically the GTK timer in `nestty-linux` — never stalls.
+    /// `try_dispatch` runs `true` handlers on a worker thread so callers
+    /// on time-sensitive threads (GTK pump, socket dispatcher) don't stall.
     blocking: bool,
-    /// True if this action should NOT auto-publish a completion
-    /// event. Defaults to false (publish). Used for high-frequency
-    /// internal actions (system.ping, context.snapshot) where the
-    /// resulting bus traffic would dwarf the actual workflow events.
+    /// Suppresses completion-event fan-out. Set for high-frequency internal
+    /// actions whose `.completed` would dwarf real workflow events.
     silent: bool,
 }
 
 pub struct ActionRegistry {
     entries: RwLock<HashMap<String, Entry>>,
-    /// When set, every successful `try_dispatch` publishes
-    /// `<action>.completed` (Ok) or `<action>.failed` (Err) on this
-    /// bus BEFORE the caller's `Responder` fires, so chained
-    /// triggers can compose. None preserves pre-Phase-14.1 behavior
-    /// (no fan-out — useful for unit tests that don't care about
-    /// the bus). See `with_completion_bus` to opt in.
+    /// When set, non-silent dispatches publish `<action>.completed` (Ok) or
+    /// `<action>.failed` (Err) BEFORE the caller's `Responder` fires.
+    /// `None` disables fan-out (default for unit tests).
     completion_bus: Option<Arc<EventBus>>,
 }
 
@@ -51,22 +54,14 @@ impl ActionRegistry {
         }
     }
 
-    /// Construct a registry that will auto-publish synthetic
-    /// `<action>.completed` / `<action>.failed` events on `bus`
-    /// after every dispatch (Phase 14.1 — chained triggers).
-    /// Applies uniformly to `invoke`, `try_invoke`, and
-    /// `try_dispatch` so every dispatch primitive emits.
+    /// Auto-publish `<action>.completed` / `<action>.failed` after every
+    /// non-silent dispatch (uniform across `invoke`/`try_invoke`/`try_dispatch`).
+    /// Silent actions registered via `register_silent` opt out of fan-out.
     ///
-    /// Scope: only actions REGISTERED through this registry get
-    /// fan-out. Legacy commands that nestty-linux's
-    /// `socket::dispatch` handles via its match-arm fallthrough
-    /// (e.g. `tab.new`, `terminal.exec`, `webview.*`) bypass the
-    /// registry entirely and therefore do NOT emit completion
-    /// events today. Migrating those into the registry brings
-    /// them into the chained-trigger surface; until then,
-    /// completion events are limited to plugin-provided actions
-    /// and nestty-internal actions that landed in the registry
-    /// (`system.*`, `context.*`).
+    /// Scope: only registry-routed actions emit. Legacy match-arm commands
+    /// served directly by `nestty-linux::socket::dispatch` (the bulk of the
+    /// platform surface — tabs, splits, terminal/webview/panel control,
+    /// agent, etc.) bypass the registry entirely and don't emit.
     pub fn with_completion_bus(bus: Arc<EventBus>) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
@@ -74,10 +69,8 @@ impl ActionRegistry {
         }
     }
 
-    /// Register a synchronous handler. `try_dispatch` will run it
-    /// inline on the caller's thread; use this only for handlers
-    /// that return in microseconds (in-memory lookups, registry
-    /// queries, etc.).
+    /// Sync handler; `try_dispatch` runs it inline. Use only for
+    /// microsecond-scale work (lookups, registry queries).
     pub fn register<F>(&self, name: impl Into<String>, handler: F)
     where
         F: Fn(Value) -> ActionResult + Send + Sync + 'static,
@@ -92,11 +85,9 @@ impl ActionRegistry {
         );
     }
 
-    /// Like `register`, but suppresses the Phase 14.1 completion-event
-    /// fan-out. Use for high-frequency internal actions
-    /// (`system.ping`, `context.snapshot`, etc.) whose completion
-    /// would dwarf real workflow events on the bus. Behaves
-    /// identically otherwise.
+    /// Like `register` but suppresses completion-event fan-out. Use for
+    /// high-frequency internal actions (`system.ping`, `context.snapshot`)
+    /// whose `.completed` would dwarf real workflow events.
     pub fn register_silent<F>(&self, name: impl Into<String>, handler: F)
     where
         F: Fn(Value) -> ActionResult + Send + Sync + 'static,
@@ -111,12 +102,9 @@ impl ActionRegistry {
         );
     }
 
-    /// Register a handler that may block (network I/O, plugin RPC,
-    /// LLM completion, etc.). `try_dispatch` will spawn a worker
-    /// thread to run it so callers on time-sensitive threads (the
-    /// GTK main loop, the trigger pump, the socket dispatcher) keep
-    /// flowing. Same handler shape as `register` — the only
-    /// difference is the dispatch-time treatment.
+    /// Handler may block (network I/O, plugin RPC, LLM). `try_dispatch`
+    /// spawns a worker so time-sensitive threads (GTK pump, socket
+    /// dispatcher) keep flowing. Same shape as `register`.
     pub fn register_blocking<F>(&self, name: impl Into<String>, handler: F)
     where
         F: Fn(Value) -> ActionResult + Send + Sync + 'static,
@@ -155,14 +143,10 @@ impl ActionRegistry {
         result
     }
 
-    /// Like `invoke`, but returns `None` if the action is not registered
-    /// (rather than synthesizing an `action_not_found` error). Useful for
-    /// dispatchers that want to fall through to a different handler when
-    /// the registry has no entry for the method.
-    ///
-    /// Runs the handler INLINE regardless of `blocking` flag. Callers on
-    /// time-sensitive threads (GTK, socket dispatch) should use
-    /// `try_dispatch` instead so blocking handlers spawn a worker.
+    /// Like `invoke` but returns `None` for unregistered actions (no
+    /// `action_not_found` synth) so dispatchers can fall through.
+    /// Runs the handler INLINE regardless of `blocking`; time-sensitive
+    /// callers should use `try_dispatch` instead.
     pub fn try_invoke(&self, name: &str, params: Value) -> Option<ActionResult> {
         let (handler, silent) = {
             let entries = self.entries.read().unwrap();
@@ -175,25 +159,10 @@ impl ActionRegistry {
         Some(result)
     }
 
-    /// Dispatch an action with a continuation. Returns `true` if the
-    /// action was found (and `on_done` will be — or already has been
-    /// — called exactly once); `false` if not registered (caller
-    /// should fall through; `on_done` is dropped uncalled).
-    ///
-    /// Behavior split:
-    /// - **Sync handler** (registered via `register`): handler runs
-    ///   inline on the caller's thread; `on_done` fires synchronously
-    ///   before this method returns.
-    /// - **Blocking handler** (registered via `register_blocking`): a
-    ///   worker thread is spawned; `on_done` fires from the worker
-    ///   after the handler completes.
-    ///
-    /// The unified callback API means callers don't need to branch
-    /// on sync vs blocking — register a single completion closure,
-    /// trust it'll fire once. For sync handlers this carries no
-    /// extra cost (no thread spawn). For blocking handlers it
-    /// keeps the caller's thread alive while the work proceeds in
-    /// the background.
+    /// Returns `true` if registered (caller need not handle `on_done`); `false`
+    /// if not registered, in which case `on_done` is dropped uncalled and the
+    /// caller falls through. Sync handlers run inline; blocking handlers run
+    /// on a worker. Panic semantics: see module preamble.
     pub fn try_dispatch(self: &Arc<Self>, name: &str, params: Value, on_done: Responder) -> bool {
         let (handler, blocking, silent) = {
             let entries = self.entries.read().unwrap();
@@ -233,9 +202,6 @@ impl ActionRegistry {
         self.entries.read().unwrap().contains_key(name)
     }
 
-    /// True if the named action is registered AND marked blocking.
-    /// Useful for diagnostics; not load-bearing for dispatch
-    /// (`try_dispatch` already routes correctly).
     pub fn is_blocking(&self, name: &str) -> bool {
         self.entries
             .read()
@@ -266,18 +232,12 @@ impl Default for ActionRegistry {
     }
 }
 
-/// Publish a synthetic `<action>.completed` (Ok) or
-/// `<action>.failed` (Err) on the bus. No-op when `bus` is None.
-/// Called from invoke / try_invoke / try_dispatch AFTER the
-/// handler returns and BEFORE the caller's `Responder` fires (or
-/// before invoke/try_invoke return). The guarantee is bus-level
-/// only: the event lands on the bus first, the upstream
-/// continuation runs second. WHEN the downstream chained
-/// trigger actually fires depends on the platform pump cadence
-/// — nestty-linux drains trigger subscriptions once per GTK tick,
-/// so a completion event published while processing a tick is
-/// typically picked up on the NEXT tick. Same-tick chaining is
-/// not guaranteed; semantically-correct chaining is.
+/// Publish a synthetic `<action>.completed` (Ok) or `<action>.failed` (Err);
+/// no-op when `bus` is `None`. Called AFTER the handler returns, BEFORE the
+/// caller's `Responder` (or `invoke`/`try_invoke` return). Bus-level ordering
+/// only — when the downstream chained trigger actually fires depends on the
+/// platform pump cadence (nestty-linux: next GTK tick). Semantically-correct
+/// chaining is guaranteed; same-tick chaining is not.
 fn publish_completion(bus: Option<&EventBus>, action: &str, result: &ActionResult) {
     let Some(bus) = bus else { return };
     let (kind, payload) = match result {
