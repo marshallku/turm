@@ -43,15 +43,11 @@ struct WorkspacesFile {
 struct WorkspaceEntry {
     name: String,
     path: String,
-    /// Required at the SEMANTIC level (we refuse the entry if it's
-    /// missing or empty), but `Option<String>` at the
-    /// deserialization level so a single malformed block doesn't
-    /// abort `toml::from_str` for the whole file. Per-entry
-    /// validation: bad entry → push error + skip, keep loading
-    /// the rest. Different repos pick different default branches
-    /// (`master`, `trunk`, `develop`); a silent default would
-    /// branch worktree_add from the wrong base on workspaces
-    /// whose author just omitted the field.
+    /// Semantically required (entry refused if missing/empty) but
+    /// deserialized as `Option<String>` so a single malformed block
+    /// can't abort `toml::from_str` for the whole file. No silent
+    /// default — repos differ (`master`/`trunk`/`develop`), and a
+    /// default would branch worktree_add from the wrong base.
     #[serde(default)]
     default_base: Option<String>,
     #[serde(default)]
@@ -64,10 +60,9 @@ pub struct Workspace {
     /// Canonicalized at load time.
     pub path: PathBuf,
     pub default_base: String,
-    /// Canonicalized at load time. Default `<path>-worktrees`. The
-    /// directory may not yet exist at load time; `git worktree add`
-    /// will create it. We only canonicalize the existing prefix —
-    /// see `canonicalize_or_normalize`.
+    /// Default `<path>-worktrees`. May not yet exist at load (created
+    /// on first `git worktree add`); only the existing prefix is
+    /// canonicalized — see `canonicalize_or_normalize`.
     pub worktree_root: PathBuf,
 }
 
@@ -75,11 +70,9 @@ pub struct Workspace {
 pub struct Config {
     pub workspaces: Vec<Workspace>,
     pub config_path: PathBuf,
-    /// Set when load encountered a malformed entry (bad name, missing
-    /// path, path doesn't exist, name collisions). The plugin still
-    /// returns empty `git.list_workspaces` and every workspace-bound
-    /// action surfaces `config_error` — same posture as the calendar /
-    /// llm plugins. Distinct from "config file missing", which is OK.
+    /// Set on malformed entries (bad name, missing/nonexistent path,
+    /// name collisions). Workspace-bound actions then surface
+    /// `config_error`. "Config file missing" is NOT fatal.
     pub fatal_error: Option<String>,
 }
 
@@ -88,9 +81,8 @@ impl Config {
         Self::from_path(config_path())
     }
 
-    /// Load from an explicit `workspaces.toml` path. Used by tests
-    /// to avoid env-var races (NESTTY_GIT_WORKSPACES_FILE is
-    /// process-wide and parallel tests would stomp each other).
+    /// Test seam — `NESTTY_GIT_WORKSPACES_FILE` is process-wide and
+    /// would race under parallel tests.
     pub fn from_path(path: PathBuf) -> Self {
         let mut errors: Vec<String> = Vec::new();
         let mut workspaces: Vec<Workspace> = Vec::new();
@@ -286,17 +278,11 @@ impl Config {
     }
 }
 
-/// Canonicalize the existing prefix of `p`, then re-append the
-/// non-existent tail with `..` / `.` semantics applied. Lets us
-/// hold a stable absolute path for a worktree_root that hasn't
-/// been created yet without rejecting it (the directory comes
-/// into existence on first `git worktree add`).
-///
-/// Stripping `..` from the tail matters for downstream allow-list
-/// checks: a configured `worktree_root = /foo/bar/../baz` (which
-/// can land here when `bar` doesn't yet exist) would otherwise
-/// keep the verbatim `..` and `Path::starts_with` against it would
-/// behave nonsensically.
+/// Canonicalizes the existing prefix and re-appends the missing tail
+/// with `..`/`.` collapsed. Lets a not-yet-created worktree_root hold a
+/// stable absolute path. Without `..`-collapsing, downstream
+/// `Path::starts_with` allow-list checks misbehave on a verbatim
+/// `/foo/bar/../baz` that survives because `bar` doesn't yet exist.
 fn canonicalize_or_normalize(p: &Path) -> PathBuf {
     use std::path::Component;
     if let Ok(c) = std::fs::canonicalize(p) {
@@ -382,10 +368,9 @@ fn config_home() -> Option<PathBuf> {
     None
 }
 
-/// Same charset as KB / todo plugins: ASCII alphanumeric + `_-.@`.
-/// Rejects path separators / `..` / control chars so the name can
-/// safely appear in event payloads, log lines, or future-derived
-/// filesystem paths.
+/// `[A-Za-z0-9_\-.@]+` minus the reserved `.` / `..` (same charset as
+/// KB/todo). Trust-boundary so the name can appear in event payloads,
+/// log lines, or derived paths.
 pub fn validate_name(s: &str) -> Result<(), String> {
     if s.is_empty() {
         return Err("workspace name cannot be empty".to_string());
