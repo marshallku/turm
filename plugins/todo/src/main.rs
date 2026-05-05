@@ -155,22 +155,14 @@ fn main() {
     }
 }
 
-/// Thread-safe writer. Production uses `std::io::Stdout`; tests inject
-/// `Vec<u8>` to capture emitted frames for assertion. Plain `Stdout`
-/// already serializes `write_all` per-call (it owns an internal
-/// Mutex), but an explicit outer Mutex around a boxed `dyn Write`
-/// lets us hold the lock across `writeln!` + `flush` so a frame is
-/// committed atomically — without that, a producer preempted
-/// between writeln and flush could interleave with another thread's
-/// writeln and corrupt the line-delimited protocol.
+/// Outer Mutex (over Stdout's own internal one) so we can hold the lock
+/// across `writeln!` + `flush` — otherwise a producer preempted between
+/// the two could interleave with another thread's writeln and corrupt
+/// the line-delimited protocol. Tests inject a `Vec<u8>` via the same shape.
 pub type Writer = Arc<Mutex<Box<dyn std::io::Write + Send>>>;
 
-/// Write one protocol frame as a single line + flush. Errors are
-/// logged but never propagated — there's nothing the caller can do
-/// if stdout has died, and the supervisor will detect via EOF on
-/// the read side. Holding the lock across writeln+flush guarantees
-/// atomic line emission against concurrent producers (action
-/// responses + watcher events).
+/// Atomic line emission. Stdout-write errors are logged but not
+/// propagated — supervisor detects via EOF on the read side.
 pub fn emit(writer: &Writer, line: &str) {
     let mut out = match writer.lock() {
         Ok(g) => g,
@@ -406,16 +398,11 @@ fn action_list(params: &Value, store: &Arc<Store>) -> Result<Value, (String, Str
     }))
 }
 
-/// Edit arbitrary fields on an existing Todo. Each optional input
-/// follows the "absent ⇒ leave alone" rule — pass only the fields
-/// you intend to change. Empty-string due/linked_jira/prompt clear
-/// the field; null for those values is also accepted as "clear".
-/// Status is intentionally NOT here — keep `todo.set_status` as
-/// the single high-frequency status path so the panel's drag/drop
-/// keeps preserving user-edited frontmatter ordering. `update`
-/// regenerates frontmatter via `render_new`, which reorders /
-/// drops comments, which is the right tradeoff for form edits but
-/// wrong for the status toggle.
+/// "Field absent ⇒ leave alone"; for `due`/`linked_jira`/`prompt`,
+/// empty-string or null clears. `status` is deliberately routed
+/// through `todo.set_status` instead — `update` regenerates via
+/// `render_new` (drops user frontmatter ordering/comments), which
+/// is right for form edits but wrong for the status-toggle path.
 fn action_update(
     params: &Value,
     config: &Config,
@@ -538,13 +525,10 @@ fn action_set_status(
     }))
 }
 
-/// Emit a `todo.start_requested` event with the full Todo payload.
-/// Phase 15.2 will hook this up to `git.worktree_add` → `claude.start`
-/// via chained `<action>.completed` triggers (Phase 14.1). For now,
-/// the event is fire-and-forget — users can already wire single-step
-/// triggers like `todo.start_requested → kb.ensure` (write a session
-/// note) or `todo.start_requested → slack.post_message` (DM
-/// "starting on X") today.
+/// Emits `todo.start_requested` with the full Todo payload. Users
+/// can chain it (e.g. `→ git.worktree_add → claude.start` via
+/// completion-event triggers, or single-step `→ kb.ensure` /
+/// `→ slack.post_message`); the action itself is fire-and-forget.
 fn action_start(
     params: &Value,
     config: &Config,
@@ -640,11 +624,9 @@ fn optional_string(params: &Value, key: &str) -> Result<Option<String>, (String,
     }
 }
 
-/// Like `optional_string` but distinguishes "field absent" (None)
-/// from "field present and empty" (Some("")). Used by `todo.update`
-/// to tell "don't touch title" apart from "you said empty title,
-/// reject" (handled at the store layer for title; for due / jira /
-/// prompt the empty value means "clear", see `optional_clearable_string`).
+/// Like `optional_string` but `None` = "absent, don't touch" and
+/// `Some("")` = "user supplied empty" (rejected at the store layer
+/// for `title`). Clearable fields use `optional_clearable_string` instead.
 fn optional_present_string(params: &Value, key: &str) -> Result<Option<String>, (String, String)> {
     match params.get(key) {
         None => Ok(None),
@@ -657,11 +639,8 @@ fn optional_present_string(params: &Value, key: &str) -> Result<Option<String>, 
     }
 }
 
-/// `Option<Option<String>>` for clearable optional fields. Outer
-/// None = "field absent, don't touch". Outer Some(None) or
-/// Some(Some("")) = "clear it". Outer Some(Some(value)) = "set
-/// to value". Maps from JSON: missing key → None, null or empty
-/// string → Some(None), non-empty string → Some(Some(s)).
+/// JSON → clearable-string mapping: missing key → `None`; `null` or
+/// `""` → `Some(None)` (clear); non-empty → `Some(Some(s))` (set).
 fn optional_clearable_string(
     params: &Value,
     key: &str,
@@ -735,10 +714,8 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    /// `Writer` impl that captures everything written into a shared
-    /// `Vec<u8>` so tests can read back the line-delimited frames for
-    /// assertion. Production `Stdout` doesn't allow read-back; this is
-    /// the test-only seam since `Writer = Arc<Mutex<Box<dyn Write + Send>>>`.
+    /// Test-only `Writer` backend that captures into a shared `Vec<u8>`
+    /// so tests can read back the line-delimited frames.
     struct TestSink(Arc<Mutex<Vec<u8>>>);
     impl std::io::Write for TestSink {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
