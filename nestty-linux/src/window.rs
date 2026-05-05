@@ -370,11 +370,10 @@ impl NesttyWindow {
         // transition; user wires a trigger on this event to run
         // two separate `hyprctl dispatch resizewindowpixel
         // '<delta>,class:com.marshall.nestty'` calls (the empirically
-        // verified cure form — see `examples/triggers/
-        // hyprland-webkit-fix.toml` for why `resizeactive` and
-        // `--batch` were both ruled out). Generic hook — nestty core
-        // has no Hyprland knowledge, user supplies the cure command
-        // via `[[triggers]]`.
+        // verified cure form for the multi-window-on-workspace case;
+        // see `examples/triggers/hyprland-webkit-fix.toml`). Generic
+        // hook — nestty core has no Hyprland knowledge, user supplies
+        // the cure command via `[[triggers]]`.
         //
         // Detection only — the `system.spawn` action that runs the
         // cure lives in WR-2 (`trigger_sink::handle_system_spawn`).

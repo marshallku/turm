@@ -115,8 +115,8 @@ Options: `--version vX.Y.Z` to pin a release, `--system` to install to `/usr/loc
 ### Linux — From source
 
 ```bash
-./scripts/install-dev.sh           # build + install everything (sudo, /usr/local/bin)
-./scripts/install-dev.sh --user    # ~/.local/bin (no sudo)
+./scripts/install-dev.sh           # build + install everything to ~/.local/bin (no sudo)
+./scripts/install-dev.sh --system  # /usr/local/bin instead of ~/.local/bin (requires sudo)
 ./scripts/install-dev.sh --restart # also pkill -x nestty afterwards
 ```
 

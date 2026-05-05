@@ -40,8 +40,8 @@ cargo run -p nestty-cli -- <command>
 
 ```bash
 # Linux
-./scripts/install-dev.sh           # cargo build --release + sudo install /usr/local/bin/{nestty,nestctl} + plugins
-./scripts/install-dev.sh --user    # ~/.local/bin instead of /usr/local/bin (no sudo)
+./scripts/install-dev.sh           # cargo build --release + install ~/.local/bin/{nestty,nestctl} + plugins (no sudo)
+./scripts/install-dev.sh --system  # /usr/local/bin instead of ~/.local/bin (requires sudo)
 ./scripts/install-dev.sh --restart # also pkill -x nestty afterwards
 
 # macOS
@@ -51,7 +51,7 @@ cargo run -p nestty-cli -- <command>
 ```
 
 Why these exist:
-- **Linux**: `install.sh --system` puts nestty at `/usr/local/bin/nestty`. After that, `cargo build --release` only refreshes `target/release/nestty` — the system binary stays at whatever Release version was last installed, so a fix in the working tree is silently shadowed when nestty is launched via a desktop entry. The script also warns when `~/.local/bin/nestty` and `/usr/local/bin/nestty` are both present and differ.
+- **Linux**: `install-dev.sh` defaults to user install at `~/.local/bin/nestty` (no sudo) — matches `install.sh`'s end-user default and avoids sudo prompts during dev iteration. Use `--system` explicitly when you want the system-wide copy at `/usr/local/bin`. If both `~/.local/bin/nestty` and `/usr/local/bin/nestty` exist and differ, PATH lookup typically picks `/usr/local/bin` first, so a stale system copy can silently shadow your fresh user-local build (and a desktop-entry-launched nestty will use the system copy too). The script warns loudly in that case and lists the four resolutions.
 - **macOS**: `cargo install nestty-cli` fails (not on crates.io) and `cargo install --path .` fails from the repo root (workspace virtual manifest). The `nestty` GUI app is SwiftPM, not cargo. Before this script, `nestty-macos/run.sh` was the only path and it only built an ephemeral debug bundle under `.build/debug/`. The script wraps `swift build -c release` + bundle layout + `cargo install --path nestty-cli` so the user gets a real `/Applications`-style install.
 
 ## Install first-party plugins

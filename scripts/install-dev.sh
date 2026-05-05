@@ -14,16 +14,22 @@
 # in sync with the working tree.
 #
 # Usage:
-#   ./scripts/install-dev.sh                # build + install everything
-#   ./scripts/install-dev.sh --user         # install to ~/.local/bin (no sudo)
+#   ./scripts/install-dev.sh                # build + install everything to ~/.local/bin (no sudo)
+#   ./scripts/install-dev.sh --system       # install to /usr/local/bin (requires sudo)
 #   ./scripts/install-dev.sh --no-build     # skip cargo build (use existing target/release)
 #   ./scripts/install-dev.sh --no-plugins   # skip the plugin install step
 #   ./scripts/install-dev.sh --restart      # also `pkill -x nestty` afterwards
 #
-# By default this is a SYSTEM install (`/usr/local/bin`, sudo
-# required) because that matches how `install.sh --system` lays
-# things out — using `--user` instead is fine but won't override a
-# pre-existing `/usr/local/bin/nestty` which takes PATH precedence.
+# By default this is a USER install (`~/.local/bin`, no sudo). User
+# install matches `install.sh`'s end-user default and avoids password
+# prompts during dev iteration — important for headless / agent-driven
+# rebuild loops where a sudo prompt halts everything. Use `--system`
+# explicitly when you want the system-wide copy at `/usr/local/bin`
+# (e.g., to overwrite a pre-existing system install that's shadowing
+# your user-local one — see the drift warning below).
+#
+# `--user` is kept as a deprecated alias for the default (no-op) so
+# pre-flip muscle memory keeps working.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,11 +37,12 @@ TARGET="$REPO_ROOT/target/release"
 DO_BUILD=true
 DO_PLUGINS=true
 DO_RESTART=false
-USER_INSTALL=false
+USER_INSTALL=true
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --user)        USER_INSTALL=true ; shift ;;
+        --user)        USER_INSTALL=true ; shift ;;   # deprecated alias for default
+        --system)      USER_INSTALL=false ; shift ;;
         --no-build)    DO_BUILD=false ; shift ;;
         --no-plugins)  DO_PLUGINS=false ; shift ;;
         --restart)     DO_RESTART=true ; shift ;;
@@ -123,9 +130,10 @@ if [ -x "$HOME/.local/bin/nestty" ] && [ -x "/usr/local/bin/nestty" ]; then
         echo "warn: PATH lookup typically picks /usr/local/bin first;" >&2
         echo "warn: a desktop-entry-launched nestty will use the system copy." >&2
         echo "warn: to resolve, pick one of:" >&2
-        echo "warn:   - re-run WITHOUT --user (overwrites the system copy with the same build)" >&2
+        echo "warn:   - re-run with --system (overwrites the system copy with this build)" >&2
+        echo "warn:   - re-run without --system (overwrites the user copy with this build)" >&2
         echo "warn:   - sudo rm /usr/local/bin/nestty (let the user-local copy win)" >&2
-        echo "warn:   - sudo rm $HOME/.local/bin/nestty (drop the user-local copy entirely)" >&2
+        echo "warn:   - rm $HOME/.local/bin/nestty (drop the user-local copy entirely)" >&2
         echo
     fi
 fi
