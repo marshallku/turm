@@ -62,35 +62,23 @@ pub struct Poller {
 
 #[derive(Default)]
 struct PollerState {
-    /// `account_id` of the authenticated user, cached across ticks.
-    /// `my_identity_signature` is the (base_url, email) the cache
-    /// was built for — when it changes (user re-auths to a
-    /// different Atlassian account while nestty stays running) we
-    /// invalidate the cached id and re-resolve. Without this guard
-    /// hot re-auth would silently mis-attribute assigned-to-me /
-    /// mention detection to the prior user.
+    /// Cached across ticks. `my_identity_signature` records the
+    /// (base_url, email) the cache was built for — a hot re-auth to a
+    /// different Atlassian account invalidates the cache so
+    /// assigned-to-me / mention detection doesn't silently mis-attribute
+    /// to the prior user.
     my_account_id: Option<String>,
     my_identity_signature: Option<(String, String)>,
-    /// Per-ticket snapshot from the last tick. None entries → fresh
-    /// sight on next observation. Snapshot diff is the ONLY guard
-    /// against re-emission across ticks: each tick's
-    /// `process_ticket` updates the snapshot to current, so the next
-    /// tick sees no diff (and emits nothing) unless something
-    /// genuinely changed Jira-side. Intra-tick pagination duplicates
-    /// (rare race where ORDER BY updated DESC returns the same issue
-    /// across two pages because Jira bumped its updated mid-paginate)
-    /// are also handled by the same snapshot mutation: the second
-    /// processing sees the just-updated snapshot and emits nothing.
+    /// Sole guard against cross-tick re-emission: each `process_ticket`
+    /// mutates the snapshot to current, so the next tick (or a duplicate
+    /// observation later in the same paginated response) emits nothing
+    /// unless something genuinely changed Jira-side.
     snapshots: HashMap<String, TicketSnapshot>,
-    /// Per-comment dedupe ONLY. Comments are the one case where
-    /// snapshot mutation isn't sufficient: backfilling 100 comments
-    /// across multiple pages (`get_comments` paginates) could see the
-    /// same comment id twice if a fresh comment lands mid-paginate.
-    /// We dedupe by comment id so the same comment_added/mention
-    /// event isn't emitted twice. Cap 4096; flush past cap.
-    /// Status/assignee transitions deliberately do NOT dedupe — a
-    /// genuine bounce like `Open → In Progress → Open → In Progress`
-    /// must emit each transition.
+    /// Per-comment dedupe (cap 4096; flush past cap). Snapshot mutation
+    /// alone isn't enough: backfilling many comments across pages can
+    /// see the same comment id twice if a fresh one lands mid-paginate.
+    /// Status/assignee transitions are NOT deduped — a genuine
+    /// `Open → In Progress → Open → In Progress` bounce must emit each.
     fired_comments: HashSet<String>,
 }
 
@@ -191,12 +179,9 @@ impl Poller {
         Ok(())
     }
 
-    /// Walk paginated `/search` calls until either no more pages or
-    /// MAX_PAGES is hit. Returns `(tickets, truncated)` — the bool
-    /// is true when MAX_PAGES bounded us short of the full result
-    /// set. The caller uses it to skip snapshot pruning (which would
-    /// otherwise drop legitimate state for tickets that exist but
-    /// just weren't in the truncated subset).
+    /// Returns `(tickets, truncated)`. `truncated == true` means MAX_PAGES
+    /// stopped us short — the caller skips snapshot pruning to avoid
+    /// dropping state for tickets outside the truncated subset.
     fn fetch_all_tickets(
         &self,
         creds: jira::Creds,
@@ -227,21 +212,12 @@ impl Poller {
         Ok((all, true))
     }
 
-    /// Resolve and cache `my_account_id`. Takes the account_id hint
-    /// atomically captured by `current_credentials` (Some for stored
-    /// creds, None for env-source) so a mid-tick re-auth can't pair
-    /// new credentials with a stale stored account_id. When the hint
-    /// is None we call `/myself` once to discover identity for the
-    /// current tokens.
-    ///
-    /// **Cache invalidation on credential change**: tracks the
-    /// (base_url, email) the cache was built for. When the live
-    /// (base_url, email) differs (user re-authed to a different
-    /// Atlassian account while nestty stayed running), the cached
-    /// id is dropped and re-resolved against the new credentials.
-    /// Without this, hot re-auth would silently mis-attribute
-    /// assigned-to-me / mention detection to the prior account
-    /// indefinitely.
+    /// Cached resolution; uses `account_id_hint` (atomically captured by
+    /// `current_credentials`) for stored creds, falls back to a `/myself`
+    /// call for env-source creds. Cache invalidates when the live
+    /// `(base_url, email)` differs from the one the cached id was built
+    /// for, so a hot re-auth doesn't mis-attribute mention detection
+    /// to the prior account.
     fn resolve_my_account_id(
         &self,
         creds: jira::Creds,
@@ -350,14 +326,9 @@ impl Poller {
         state.snapshots.insert(ticket.key.clone(), new_snap);
     }
 
-    /// Find the latest comment `created` instant among the inline
-    /// comments of a freshly-observed ticket and return it as a
-    /// canonical RFC 3339 UTC string. Used to seed the snapshot's
-    /// watermark on first sight so subsequent ticks have a baseline.
-    /// Parses to chrono `DateTime<Utc>` BEFORE comparing — raw
-    /// string max would mis-order Jira's mixed `+0000` / `+00:00`
-    /// offset forms. Returns None when the ticket has no comments
-    /// (or none with parseable timestamps).
+    /// Latest inline-comment `created` instant as canonical UTC RFC 3339.
+    /// Parses to chrono before comparing — raw-string max would mis-order
+    /// Jira's mixed `+0000`/`+00:00` offsets. None when no parseable comments.
     fn high_water_mark(&self, ticket: &Ticket) -> Option<String> {
         extract_inline_comments(&ticket.raw_json)
             .into_iter()
@@ -366,39 +337,19 @@ impl Poller {
             .map(|t| t.to_rfc3339())
     }
 
-    /// Walk the ticket's inline `fields.comment.comments[]` and emit
-    /// `jira.comment_added` (plus `jira.mention` when applicable)
-    /// for every comment whose parsed `created` instant is strictly
-    /// after `since_iso`. Returns the new high water mark as a
-    /// canonical RFC 3339 UTC string (so it round-trips through the
-    /// snapshot consistently regardless of which offset form Jira
-    /// emits this tick).
+    /// Emits `jira.comment_added` (and `jira.mention` when applicable)
+    /// for inline comments whose parsed `created` is strictly after
+    /// `since_iso`. Returns the new high-water mark as canonical UTC
+    /// RFC 3339. Timestamp-vs-index rationale: see `event::TicketSnapshot`.
+    /// Mixed `+0000`/`+00:00` offset handling: see `event::parse_jira_timestamp`.
     ///
-    /// **Why timestamp-based, not index-based**: Jira's comment
-    /// indices SHIFT when an old comment is deleted. A `startAt=N`
-    /// fetch after a deletion would skip the new comment that
-    /// shifted into the formerly-empty slot. Filtering by the
-    /// parsed `created` instant is robust against arbitrary
-    /// add/delete patterns.
-    ///
-    /// **Why parsed instant, not raw string**: Jira emits both
-    /// `+0000` and `+00:00` offset forms (the `event::parse_jira_timestamp`
-    /// helper accepts both). Raw string comparison would order
-    /// `2026-05-05T10:00:00.000+0000` and `2026-05-05T10:00:00+00:00`
-    /// non-monotonically even though they represent the same instant.
-    /// We parse to chrono `DateTime<Utc>` for comparison and store
-    /// the watermark as a canonical UTC RFC 3339 string.
-    ///
-    /// **Inline comment cap (Jira API quirk)**: search responses
-    /// include up to 50 inline comments per ticket. If the watermark
-    /// is older than the oldest inline comment AND there are >50
-    /// comments newer than the watermark, the events for the
-    /// missing-from-inline range would be silently lost. Closing
-    /// that gap cleanly requires falling back to the paginated
-    /// `/issue/{key}/comment?startAt=N&orderBy=-created` endpoint
-    /// when the oldest inline comment is newer than the watermark
-    /// (signal of pagination overflow). Tracked as a known
-    /// limitation; deferred until a real workflow hits it.
+    /// **Inline-comment cap (known limitation)**: `/search` returns at most
+    /// 50 inline comments per ticket. If the watermark is older than the
+    /// oldest inline comment AND there are >50 newer than the watermark,
+    /// the gap range is silently lost. Closing this requires falling back
+    /// to `/issue/{key}/comment` paged when the oldest inline comment is
+    /// newer than the watermark (signal of pagination overflow); deferred
+    /// until a real workflow hits it.
     fn process_new_comments(
         &self,
         ticket: &Ticket,
@@ -436,11 +387,10 @@ impl Poller {
         high_water_instant.map(|t| t.to_rfc3339())
     }
 
-    /// Emit `jira.comment_added` (and `jira.mention` when the body
-    /// mentions me and isn't a self-mention) for one parsed comment.
-    /// Dedupes by comment id — defense against the same comment
-    /// appearing in two consecutive ticks with no watermark
-    /// advance (e.g. clock skew making `created` look stale).
+    /// Emits `jira.comment_added` + (`jira.mention` when body mentions
+    /// me and isn't self-authored) for one comment. Dedupes by id —
+    /// guards against the same comment surviving two ticks if clock skew
+    /// kept the watermark from advancing past it.
     fn emit_comment_events(
         &self,
         ticket: &Ticket,
@@ -464,11 +414,9 @@ impl Poller {
         }
     }
 
-    /// GC the comment-id dedupe set when it exceeds the cap. Worst
-    /// case after flush: a comment that arrived mid-pagination on
-    /// the same tick re-fires on the next tick (snapshot has
-    /// advanced past it, but the dedup memory is gone). Acceptable
-    /// trade for not tracking per-entry timestamps.
+    /// Worst case after a flush: a comment from a mid-pagination race
+    /// on the same tick re-fires on the next tick (snapshot moved past
+    /// it but dedupe memory is gone). Acceptable vs per-entry timestamps.
     fn gc_dedupe_set(&self, state: &mut PollerState) {
         if state.fired_comments.len() > DEDUPE_CAP {
             eprintln!(
