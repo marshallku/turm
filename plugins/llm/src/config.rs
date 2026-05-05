@@ -7,67 +7,48 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Default Anthropic model when `llm.complete` doesn't specify one.
-/// Matches CLAUDE.md's recommendation for the latest available model
-/// at the time of writing; users override per call via the `model`
-/// param or globally via NESTTY_LLM_DEFAULT_MODEL.
+/// Override per call via the `model` param or globally via
+/// `NESTTY_LLM_DEFAULT_MODEL`.
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
-/// Maximum allowed `NESTTY_LLM_HTTP_TIMEOUT_SECS`. Must leave margin
-/// under the supervisor's `DEFAULT_ACTION_TIMEOUT` (120s in
-/// nestty-linux/src/service_supervisor.rs) so a successful plugin
-/// reply has time to traverse the spawn → init → response-transit
-/// path before the supervisor cancels with `action_timeout`. The
-/// 10s margin covers `onAction` lazy-spawn + handshake. Setting
-/// higher just won't be honored end-to-end, so we reject the
-/// value at config-load and surface in `fatal_error`.
+/// Capped under the supervisor's 120s `DEFAULT_ACTION_TIMEOUT`; the 10s
+/// margin covers onAction lazy-spawn + handshake + response transit.
+/// Higher values get rejected at config-load (would never be honored
+/// end-to-end). Bump `DEFAULT_ACTION_TIMEOUT` first if you need more.
 const MAX_HTTP_TIMEOUT_SECS: u64 = 110;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Anthropic API key. Empty when env not set; the plugin then
-    /// falls back to the keyring-stored value at action time
-    /// (slack/calendar pattern).
+    /// Empty when env not set; plugin then falls back to the keyring-stored
+    /// value at action time (slack/calendar pattern).
     pub api_key: String,
     /// Default model used when `llm.complete` doesn't pass one.
     pub default_model: String,
     /// Default max_tokens for completions that don't specify.
     /// Anthropic requires this on every request.
     pub default_max_tokens: u32,
-    /// HTTP timeout for `messages` calls. Aligns with the
-    /// supervisor's bumped 120s action timeout — Anthropic rarely
-    /// takes that long for non-streaming completions but we want
-    /// margin for thinking-mode / extended responses.
+    /// `messages` HTTP timeout. Margins under the supervisor's 120s
+    /// action timeout for thinking-mode / extended responses.
     pub http_timeout: Duration,
     pub account_label: String,
     pub require_secure_store: bool,
     pub plaintext_path: PathBuf,
     pub usage_log_path: PathBuf,
-    /// True iff `account_label` was a valid user-supplied value
-    /// (or default). When false, the paths fell back to the
-    /// `"default"` account and `llm.usage` MUST refuse so it
-    /// never reads a different account's log than the user
-    /// intended. Distinct from `fatal_error` which gates
-    /// network-touching `llm.complete`.
+    /// `false` when the user-supplied label was malformed and paths fell
+    /// back to `"default"`. `llm.usage` MUST refuse in that state so it
+    /// can't read a different account's log than the user intended.
+    /// Distinct from `fatal_error` (gates network-touching `llm.complete`).
     pub account_resolved: bool,
-    /// Set when env validation surfaces a malformed value (bad
-    /// account label, malformed boolean, etc.). Same treatment as
-    /// slack plugin: `llm.complete` refuses; `llm.auth_status`
-    /// surfaces the error.
+    /// Set on env-validation failure. `llm.complete` refuses;
+    /// `llm.auth_status` surfaces the error (same shape as Slack).
     pub fatal_error: Option<String>,
 }
 
 impl Config {
-    /// Read all settings from env. Never errors — env validation
-    /// failures accumulate into `fatal_error` while each setting
-    /// substitutes a safe default. Critically: account_label is
-    /// validated BEFORE deriving paths, so a bad
-    /// `NESTTY_LLM_ACCOUNT` doesn't silently redirect `llm.usage` to
-    /// some other account's log. `account_resolved` is `true` iff
-    /// the user-supplied label (or the default) was valid; when
-    /// `false` the paths fall back to the literal `"default"`
-    /// account and `llm.usage` should refuse so it never reads the
-    /// wrong file.
+    /// Never errors — env failures accumulate into `fatal_error` while
+    /// each setting substitutes a safe default. The account label is
+    /// validated BEFORE deriving paths so a bad `NESTTY_LLM_ACCOUNT`
+    /// can't silently redirect `llm.usage` to another account's log.
     pub fn from_env() -> Self {
         let mut errors: Vec<String> = Vec::new();
 
@@ -207,10 +188,8 @@ fn default_plaintext_path(account: &str) -> PathBuf {
         .join(format!("llm-token-{account}.json"))
 }
 
-/// Usage log lives under data home (XDG_DATA_HOME or
-/// $HOME/.local/share) — distinct from the token store under
-/// XDG_CONFIG_HOME — because it's append-only operational data,
-/// not configuration. Matches XDG conventions.
+/// Under `$XDG_DATA_HOME` (operational data), distinct from the token
+/// store under `$XDG_CONFIG_HOME` (configuration).
 fn default_usage_log_path(account: &str) -> PathBuf {
     data_home()
         .unwrap_or_else(|| PathBuf::from("."))
