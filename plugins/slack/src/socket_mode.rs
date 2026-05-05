@@ -35,36 +35,27 @@ use crate::store::TokenStore;
 
 const CONNECTIONS_OPEN_URL: &str = "https://slack.com/api/apps.connections.open";
 
-/// Wait period when no credentials are available — the loop polls
-/// the store this often so a `nestty-plugin-slack auth` invocation
-/// while the plugin is already running gets picked up without a
-/// supervisor restart. Wakes up every 250ms to check the stop flag
-/// so shutdown stays responsive.
+/// Recheck cadence when no credentials are available. Lets a fresh
+/// `nestty-plugin-slack auth` invocation be picked up without a
+/// supervisor restart.
 const NO_CREDS_RECHECK: Duration = Duration::from_secs(30);
 
-/// Source-tagged credential pair for the next connect attempt. The
-/// tag is exposed via `slack.auth_status.credentials_source` so
-/// callers see which set is live without ambiguity.
 pub struct ResolvedCredentials {
     pub bot_token: String,
     pub app_token: String,
-    /// Bot's Slack user_id, captured at `auth` time and persisted
-    /// in the store. None when credentials come from env (no
-    /// auth.test step at runtime). Used by the events layer to
-    /// filter the bot's own `reaction_added` events out of
-    /// `slack.reaction` so a starter-emoji bot doesn't trigger
-    /// the capture pipeline against the message it's marking.
+    /// Captured at `auth` time and persisted; `None` when creds come from
+    /// env. Used by the events layer to filter the bot's own
+    /// `reaction_added` events out of `slack.reaction` so a starter-emoji
+    /// bot doesn't trigger capture against its own messages.
     pub bot_user_id: Option<String>,
     pub source: &'static str, // "env" | "store"
 }
 
-/// Resolve a complete `(bot, app)` pair from a SINGLE source — env
-/// wins when both env tokens are present; otherwise both tokens
-/// must come from the store. Cross-source mixing (env_bot +
-/// store_app etc.) is intentionally not allowed because it would
-/// let the runtime connect with credentials the user never
-/// authenticated together — and `auth_status` couldn't report a
-/// single coherent source for the live pair.
+/// Resolve a complete `(bot, app)` pair from a SINGLE source. Env wins
+/// when both env tokens are set; otherwise both must come from the store.
+/// Cross-source mixing (env bot + store app, etc.) is rejected: the user
+/// never authenticated those tokens together, and `auth_status` couldn't
+/// report a coherent source for the live pair.
 pub fn current_credentials(config: &Config, store: &dyn TokenStore) -> Option<ResolvedCredentials> {
     if !config.bot_token.is_empty() && !config.app_token.is_empty() {
         // Best-effort: if the store ALSO has tokens AND its bot_token
@@ -96,15 +87,10 @@ pub fn current_credentials(config: &Config, store: &dyn TokenStore) -> Option<Re
     })
 }
 
-/// Run the Socket Mode client until the supplied stop flag flips
-/// true. Reconnects automatically across normal disconnects, network
-/// failures, and Slack-initiated rotations. Re-resolves credentials
-/// on every iteration so a credential update via
-/// `nestty-plugin-slack auth` (or a token rotation) is picked up on
-/// the next reconnect without needing a process restart. Each
-/// successfully parsed event is delivered to `on_event`. Errors are
-/// logged to stderr and the loop continues — only a hard stop
-/// signal exits.
+/// Reconnect-on-everything loop until `stop` flips. Re-resolves credentials
+/// per iteration so an `auth`-subcommand update or token rotation is picked
+/// up on the next reconnect without a process restart. Errors log to stderr
+/// and continue; only the stop signal exits.
 pub fn run_loop<F>(
     config: &Config,
     store: Arc<dyn TokenStore>,
@@ -182,10 +168,8 @@ fn interruptible_sleep(stop: &std::sync::atomic::AtomicBool, total: Duration) ->
     false
 }
 
-/// Returns `Ok(reason)` on a graceful disconnect (Slack rotated us /
-/// peer closed normally) so the caller can reconnect immediately
-/// without backoff penalty. Returns `Err(msg)` for any error worth
-/// backing off from.
+/// `Ok(reason)` on graceful disconnect (rotation / normal close) so the
+/// caller can reconnect immediately. `Err` triggers backoff.
 fn connect_and_serve<F>(
     creds: &ResolvedCredentials,
     stop: &std::sync::atomic::AtomicBool,
@@ -368,22 +352,17 @@ fn bootstrap_url(app_token: &str) -> Result<String, String> {
         .ok_or_else(|| "apps.connections.open response missing 'url'".to_string())
 }
 
-/// Validate the App-Level Token by exercising the same endpoint
-/// Socket Mode uses at runtime — `apps.connections.open`. Discards
-/// the returned single-use URL; if the token is bad or missing
-/// `connections:write` scope the API returns a non-ok body and we
-/// surface the error string. Used by the `auth` subcommand so a
-/// typo or scope misconfiguration fails fast at setup time.
+/// Validates the App-Level Token by calling `apps.connections.open` (the
+/// same endpoint Socket Mode uses at runtime) and discarding the URL.
+/// Surfaces token / `connections:write`-scope errors verbatim.
 pub fn validate_app_token(app_token: &str) -> Result<(), String> {
     bootstrap_url(app_token).map(|_url| ())
 }
 
-/// Post a message to a Slack channel or DM via `chat.postMessage`.
-/// Returns the posted message's `(ts, channel)` on success — `ts`
-/// is the canonical handle for follow-up edits/deletes/reactions.
-/// Surfaces Slack's `error` field as the Err string so callers see
-/// `missing_scope` / `not_in_channel` / `channel_not_found` etc.
-/// directly. `thread_ts` is optional; supply to thread the reply.
+/// `chat.postMessage`. Returns `(ts, channel)`; `ts` is the canonical
+/// handle for edits/deletes/reactions. Slack's `error` field is surfaced
+/// verbatim (e.g. `missing_scope`, `channel_not_found`) so triggers can
+/// pattern-match. `429` is mapped to `rate_limited` with `Retry-After`.
 pub fn post_message(
     bot_token: &str,
     channel: &str,
@@ -443,13 +422,9 @@ pub fn post_message(
     Ok((ts, posted_channel))
 }
 
-/// Best-effort `chat.getPermalink` — returns the canonical
-/// workspace URL for a (channel, ts) pair. Slack's reaction events
-/// don't carry a URL and constructing one locally would need the
-/// workspace subdomain (only obtainable via `team.info` /
-/// `auth.test` plus caching). The permalink endpoint resolves both
-/// in one cheap call so reaction-driven Todo capture can embed a
-/// click-to-open link in the body.
+/// `chat.getPermalink`. Slack's reaction/message events don't carry a URL
+/// and synthesizing one locally would need the workspace subdomain; this
+/// endpoint resolves both in one call.
 pub fn get_permalink(bot_token: &str, channel: &str, ts: &str) -> Result<String, String> {
     // ureq returns Err(Status(..)) for any non-2xx, so a `resp.status()
     // != 200` branch on the Ok arm is dead code. Handle the error
@@ -482,17 +457,12 @@ pub fn get_permalink(bot_token: &str, channel: &str, ts: &str) -> Result<String,
         .ok_or_else(|| "chat.getPermalink response missing permalink".to_string())
 }
 
-/// `conversations.history` with `latest=oldest=ts, inclusive=true,
-/// limit=1` — Slack's idiomatic single-message fetch (there's no
-/// dedicated "get message by id" endpoint). Returns the full
-/// message object on success so trigger interpolation reaches
-/// fields like `event.await.text` / `event.await.user`.
-///
-/// Channel must be one the bot is in (or a public channel where the
-/// bot has `channels:history`). Failure surfaces Slack's `error`
-/// code verbatim (`channel_not_found`, `not_in_channel`,
-/// `missing_scope`, `message_not_found`) so triggers can branch
-/// without re-parsing strings.
+/// Single-message fetch via `conversations.history` with
+/// `latest=oldest=ts, inclusive=true, limit=1` — Slack has no dedicated
+/// "get message by id" endpoint. Channel must be one the bot is in (or a
+/// public channel where it holds `channels:history`). Slack's `error`
+/// code (`channel_not_found`, `missing_scope`, `message_not_found`, …)
+/// surfaces verbatim so triggers can pattern-match.
 pub fn get_message(bot_token: &str, channel: &str, ts: &str) -> Result<Value, String> {
     let resp = match ureq::get(&format!(
         "https://slack.com/api/conversations.history?channel={channel}&latest={ts}&oldest={ts}&inclusive=true&limit=1"
@@ -547,9 +517,7 @@ pub fn get_message(bot_token: &str, channel: &str, ts: &str) -> Result<Value, St
     Ok(msg)
 }
 
-/// Validate a Bot User OAuth Token against `auth.test`. Returns the
-/// `(team_id, user_id)` tuple on success. Used by `auth` subcommand
-/// to confirm the token before persisting.
+/// `auth.test` probe; returns `(team_id, user_id)`.
 pub fn auth_test(bot_token: &str) -> Result<(String, String), String> {
     let resp = ureq::post("https://slack.com/api/auth.test")
         .set("Authorization", &format!("Bearer {bot_token}"))
