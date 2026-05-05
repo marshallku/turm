@@ -61,20 +61,9 @@ pub fn current_branch(repo: &Path) -> Result<String, GitError> {
     Ok(trimmed)
 }
 
-/// Parse `git worktree list --porcelain`. Each record is a block of
-/// lines terminated by a blank line:
-///
-/// ```text
-/// worktree /path/to/wt
-/// HEAD <sha>
-/// branch refs/heads/<name>
-/// locked [reason]   (optional)
-/// prunable [reason] (optional)
-/// detached          (when HEAD is detached)
-///
-/// worktree /path/to/wt2
-/// ...
-/// ```
+/// Parses `git worktree list --porcelain`: blank-line-delimited records
+/// of `worktree <path>` / `HEAD <sha>` / `branch refs/heads/<name>` plus
+/// optional `locked [reason]` / `prunable [reason]` / bare `detached`.
 pub fn list_worktrees(repo: &Path) -> Result<Vec<WorktreeInfo>, GitError> {
     let out = run_git(repo, &["worktree", "list", "--porcelain"])?;
     let s = String::from_utf8(out.stdout)
@@ -142,20 +131,11 @@ pub struct WorktreeAddResult {
     pub branch: String,
 }
 
-/// `git -C <repo> worktree add <target> -b <branch> <base>`.
-///
-/// Pure create primitive — fails if `branch` already exists, by
-/// design. Idempotency for the vision-flow-3 re-click flow lives at
-/// the action layer (`action_worktree_add`), where it can apply
-/// the same containment / symlink-ancestor / canonicalization gates
-/// that protect a fresh create. Putting idempotency here too would
-/// give the action a second unvalidated return path (action-layer
-/// scan misses → fall through → git-module scan hits → emits
-/// unverified path), which is the failure mode codex flagged.
-///
-/// Branch is created from `base` (or `default_base` per workspace).
-/// If a branch with the same name already exists, git refuses with
-/// a clear error which we surface as `branch_exists`.
+/// `git -C <repo> worktree add <target> -b <branch> <base>`. Pure
+/// create primitive — fails as `branch_exists` on collision. Re-click
+/// idempotency lives at the action layer where it shares the same
+/// containment / symlink-ancestor / canonicalization gates; doing it
+/// here too would give the action an unvalidated second return path.
 pub fn worktree_add(
     repo: &Path,
     target: &Path,
@@ -292,19 +272,12 @@ pub fn status(target: &Path) -> Result<StatusReport, GitError> {
     Ok(report)
 }
 
-/// Validate a branch name. Mirrors `git check-ref-format --branch`
-/// behavior at a coarse level so we can refuse bad names BEFORE
-/// shelling out — gives a tighter diagnostic and avoids a partial
-/// worktree state if git's own validation lands mid-stream.
-///
-/// Rules (subset of `git check-ref-format`):
-/// - non-empty, no NUL, no control chars
-/// - no leading `-` (would look like a flag)
-/// - no leading `/` (refuses absolute-style names)
-/// - no `..`, no `@{`, no whitespace, no `~^:?*[\\`
-/// - no segment starts with `.` or ends with `.lock`
-/// - no consecutive `//` slashes
-/// - not just `@`
+/// Coarse subset of `git check-ref-format --branch` enforced before
+/// shelling out — refuses partial-worktree state from git's own
+/// validation landing mid-stream. Rules: non-empty, not just `@`, no
+/// leading `-`, no leading or trailing `/`, no `..`/`@{`/`//`, no
+/// control chars or `~^:?*[\\`/whitespace, no segment starts with `.`
+/// or ends with `.lock` or `.`.
 pub fn validate_branch_name(s: &str) -> Result<(), GitError> {
     if s.is_empty() {
         return Err(GitError::new(
@@ -384,21 +357,11 @@ pub fn validate_branch_name(s: &str) -> Result<(), GitError> {
     Ok(())
 }
 
-/// Validate a `<commit-ish>` value passed as `base` to
-/// `worktree_add`. Looser than `validate_branch_name` because git
-/// commit-ish syntax legitimately includes `~`, `^`, and `^{...}`
-/// (e.g. `HEAD~1`, `main^`, `tag^{commit}`) — accepting these is
-/// part of the documented contract.
-///
-/// What this DOES enforce is the actual injection trust boundary:
-/// 1. non-empty
-/// 2. no leading `-` (git worktree add doesn't accept `--` to
-///    separate flags from positional args, so a base starting
-///    with `-` would be parsed as an option like `-d`/`--detach`)
-/// 3. no embedded NUL or control characters (would mangle the
-///    argv string git sees)
-/// 4. no whitespace (commit-ish refs never contain spaces; if
-///    the user gave us "HEAD --force" they're trying something)
+/// Looser than `validate_branch_name` so legitimate commit-ish forms
+/// (`HEAD~1`, `main^`, `tag^{commit}`) pass; the trust boundary still
+/// rejects: empty, leading `-` (would be parsed as a flag — git worktree
+/// add doesn't accept `--` to terminate options), control / NUL chars,
+/// and any whitespace (commit-ish refs never contain spaces).
 pub fn validate_base_ref(s: &str) -> Result<(), GitError> {
     if s.is_empty() {
         return Err(GitError::new("invalid_params", "base cannot be empty"));
@@ -426,18 +389,11 @@ pub fn validate_base_ref(s: &str) -> Result<(), GitError> {
     Ok(())
 }
 
-/// Lowercase a branch name for the Jira→worktree flow.
-/// `PROJ-456` → `proj-456`; preserves slashes (Jira hierarchies
-/// land as branch path components: `epic/PROJ-456` →
-/// `epic/proj-456`). Wrapped by `validate_branch_name` so any
-/// rule the validator enforces (no leading `.`, no `..`, no
-/// trailing `.`, etc.) still applies after lowercasing — the
-/// transform never produces a name git would reject without our
-/// validator catching it first.
-///
-/// Used by `git.worktree_add` when called with `sanitize_jira =
-/// true` from a Phase 15.2 trigger that's interpolating a
-/// `linked_jira` field straight from a Todo payload.
+/// Lowercase + run through `validate_branch_name`. Slashes are
+/// preserved (`epic/PROJ-456` → `epic/proj-456`). Used by
+/// `worktree_add` when `sanitize_jira = true`, so a trigger
+/// interpolating `linked_jira` from a Todo payload gets a valid
+/// kebab-style branch name without per-trigger massaging.
 pub fn sanitize_jira_branch(s: &str) -> Result<String, GitError> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -473,9 +429,8 @@ mod tests {
     use std::process::Command;
     use tempfile::tempdir;
 
-    /// Initialize a real git repo with one commit on `main`. We use
-    /// real `git` because the porcelain parsers depend on git's
-    /// exact output format.
+    /// Real `git` (not a fixture) because porcelain parsers depend on
+    /// git's exact output format.
     fn init_repo(dir: &Path) {
         for cmd in [
             vec!["init", "--initial-branch=main", "."],
