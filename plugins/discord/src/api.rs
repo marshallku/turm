@@ -24,19 +24,15 @@ use serde_json::{Value, json};
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Structured failure: `code` is one of `rate_limited`,
-/// `discord_<numeric>` (e.g. `discord_50001`), or `io_error` for
-/// transport-level failures with no Discord error body.
+/// `code` ∈ `rate_limited` / `discord_<numeric>` / `io_error`.
 pub struct ApiError {
     pub code: String,
     pub message: String,
 }
 
-/// Map a non-success response into a structured ApiError. Shared
-/// between every REST helper so the failure surface stays uniform —
-/// `rate_limited` for 429 with Retry-After, `discord_<numeric>` when
-/// the body parses as Discord's `{code, message}` shape, `io_error`
-/// otherwise.
+/// Shared error classifier — `rate_limited` (429 + Retry-After),
+/// `discord_<numeric>` (body parses as `{code, message}`), `io_error`
+/// (transport / unparseable body).
 fn classify_response_error(err: ureq::Error) -> ApiError {
     match err {
         ureq::Error::Status(429, r) => {
@@ -93,13 +89,9 @@ fn classify_response_error(err: ureq::Error) -> ApiError {
     }
 }
 
-/// Post a plain-text message to a channel or DM. Returns
-/// `(message_id, channel_id)` on success — `message_id` is the
-/// canonical handle for follow-up edits/reactions.
-///
-/// `content` must be ≤ 2000 chars (Discord's hard limit). Caller is
-/// responsible for truncation; the API rejects over-length with
-/// HTTP 400 `BASE_TYPE_MAX_LENGTH`.
+/// `(message_id, channel_id)` on success — `message_id` is the canonical
+/// handle for edits/reactions. `content` must be ≤ 2000 chars (Discord
+/// hard limit); over-length is rejected with `BASE_TYPE_MAX_LENGTH`.
 pub fn post_message(
     bot_token: &str,
     channel_id: &str,
@@ -134,11 +126,8 @@ pub fn post_message(
     Ok((message_id, posted_channel))
 }
 
-/// `GET /channels/{channel_id}/messages/{message_id}` — fetch a
-/// single message. Used by reaction-capture triggers to pull the
-/// original message body (reactions don't carry it). Returns the
-/// verbatim JSON object so callers can interpolate any field
-/// (`content`, `author.id`, `attachments[]`, etc.).
+/// Single-message fetch (reactions don't carry the body). Returns the
+/// verbatim Discord message object so triggers reach any nested field.
 pub fn get_message(bot_token: &str, channel_id: &str, message_id: &str) -> Result<Value, ApiError> {
     let resp = ureq::get(&format!(
         "{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}"
