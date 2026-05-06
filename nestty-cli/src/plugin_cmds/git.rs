@@ -183,15 +183,10 @@ pub fn dispatch(cmd: &GitCommand, socket_path: &str, json_out: bool) -> i32 {
     }
 }
 
-/// Workspace defaulting chain: explicit flag → env → cwd-derived
-/// (against either workspace `path` OR `worktree_root` — both
-/// places where worktrees live) → single-config-entry → error with
-/// the candidate list.
-///
-/// Returns `Ok(name)` on resolution, or `Err(exit_code)` after
-/// printing a diagnostic. The plugin's own `require_workspace`
-/// returns `not_found` without enumerating candidates, so we
-/// enumerate client-side instead — that's the actual ergonomic.
+/// Defaulting chain: `--workspace` → env → cwd-derived (matched against
+/// either `path` or `worktree_root`) → single-config-entry → error.
+/// Enumerates candidates client-side because the plugin's own
+/// `require_workspace` returns bare `not_found` without a list.
 fn resolve_workspace(socket_path: &str, explicit: Option<&str>) -> Result<String, i32> {
     if let Some(s) = explicit {
         return Ok(s.to_string());

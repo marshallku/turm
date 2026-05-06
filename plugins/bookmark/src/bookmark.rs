@@ -217,9 +217,8 @@ impl Bookmark {
         Ok(json!({ "ok": true, "id": m.id, "path": m.path.to_string_lossy() }))
     }
 
-    /// Resolve a `Match` from `{id}` or `{url}`. `id` accepts a prefix
-    /// of urlhash8 (>=1 hex char); ambiguity errors with the candidate
-    /// list. `url` is canonicalized first then matched by full hash.
+    /// `{id}` is a urlhash8 prefix (≥1 hex; ambiguity returns the
+    /// candidate list); `{url}` is canonicalized then full-hash matched.
     fn resolve(&self, params: &Value) -> Result<Match, (&'static str, String)> {
         if let Some(id) = params.get("id").and_then(Value::as_str) {
             return self.store.find_by_id(id).map_err(store_to_action_err);

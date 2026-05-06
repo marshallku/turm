@@ -26,9 +26,7 @@ const KEYRING_SERVICE: &str = "nestty-calendar";
 pub struct TokenSet {
     pub access_token: String,
     pub refresh_token: String,
-    /// Unix timestamp (seconds since epoch) at which `access_token`
-    /// expires. We refresh ~30s before this to avoid races with the
-    /// server clock.
+    /// Unix epoch seconds. Refresh fires ~30s early to dodge clock skew.
     pub expires_at_unix: u64,
     pub scope: String,
     pub token_type: String,
@@ -37,9 +35,8 @@ pub struct TokenSet {
 pub trait TokenStore: Send + Sync {
     fn load(&self) -> Option<TokenSet>;
     fn save(&self, t: &TokenSet) -> Result<(), String>;
-    /// Wipe stored credentials. Currently only invoked from tests, but
-    /// kept on the trait so a future `calendar.logout` action has a
-    /// uniform entry point.
+    /// Test-only today; on the trait so a future `calendar.logout`
+    /// action has a uniform entry point.
     #[allow(dead_code)]
     fn clear(&self) -> Result<(), String>;
     fn kind(&self) -> &'static str;
@@ -186,12 +183,9 @@ impl TokenStore for PlaintextStore {
     }
 }
 
-/// Per-process counter that disambiguates concurrent `save()` calls.
-/// Two saves in the same process otherwise collide on a pid-derived
-/// temp path: both open with truncate, the second's bytes clobber the
-/// first's, the first's rename can race ahead and the second's rename
-/// fails with ENOENT. Combining pid + seq makes each in-flight save
-/// own a unique temp file.
+/// pid+seq → unique temp file per in-flight save. pid alone collides
+/// when two saves run concurrently in the same process (the second
+/// truncate clobbers, then the loser's rename hits ENOENT).
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]

@@ -11,18 +11,10 @@ use nestty_core::theme::Theme;
 use crate::panel::Panel;
 use crate::socket::{EventBus, SocketCommand};
 
-/// Backstop for `poll_reply` so a wedged dispatch path can't leave a
-/// panel's `await nestty.call(...)` hung forever. Without this the 5ms
-/// glib re-arm runs indefinitely and the UI sticks at "loading…"
-/// with no error to recover from.
-///
-/// MUST be longer than `service_supervisor::DEFAULT_ACTION_TIMEOUT`
-/// (currently 120s — see service_supervisor.rs:54). The supervisor
-/// already enforces per-action deadlines and replies with a
-/// `timeout` error well before this fires, so this only triggers
-/// when something deeper than the supervisor's own timer is broken.
-/// 130s = 120s upper bound + 10s headroom for reply scheduling.
-/// Bump in lockstep if the supervisor's action timeout grows.
+/// Backstop so a wedged dispatch can't keep a panel's `await
+/// nestty.call(...)` hung forever. MUST exceed
+/// `service_supervisor::DEFAULT_ACTION_TIMEOUT` (120s + 10s headroom);
+/// the supervisor's per-action deadline normally fires first.
 const BRIDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(130);
 
 pub struct PluginPanel {

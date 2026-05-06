@@ -38,9 +38,7 @@ pub struct TokenSet {
 pub trait TokenStore: Send + Sync {
     fn load(&self) -> Option<TokenSet>;
     fn save(&self, tokens: &TokenSet) -> Result<(), String>;
-    /// Wipe stored credentials. Currently only invoked from tests, but
-    /// kept on the trait so a future `slack.logout` action has a
-    /// uniform entry point.
+    /// Test-only today; on the trait so a future `slack.logout` is uniform.
     #[allow(dead_code)]
     fn clear(&self) -> Result<(), String>;
     fn kind(&self) -> &'static str;

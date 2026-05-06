@@ -74,10 +74,7 @@ pub enum Atom {
     Num(f64),
     Bool(bool),
     Null,
-    /// Parenthesised sub-expression. Lets the user override the
-    /// default `&&`-binds-tighter-than-`||` precedence and group
-    /// arbitrary expressions inside a comparison position. Evaluator
-    /// recurses into the wrapped `Expr`.
+    /// `(...)` — overrides default `&&`-tighter-than-`||` precedence.
     Group(Box<Expr>),
 }
 
@@ -98,9 +95,8 @@ pub fn parse(src: &str) -> Result<Expr, String> {
     Ok(expr)
 }
 
-/// Evaluate a parsed expression against a firing event + the current
-/// context snapshot. Caller treats `Err` as "condition not satisfied"
-/// after logging.
+/// `Err` is treated as "condition not satisfied" by the caller (after
+/// logging) — see `TriggerEngine::dispatch`.
 pub fn eval(expr: &Expr, event: &Event, context: Option<&Context>) -> Result<bool, String> {
     let v = eval_expr(expr, event, context)?;
     match v {
@@ -563,12 +559,9 @@ fn eval_cmp(op: CmpOp, lhs: &Value, rhs: &Value) -> Result<bool, String> {
     }
 }
 
-/// Equality with cross-type numeric tolerance. `serde_json::Value`'s
-/// own `PartialEq` returns false for `Number(PosInt(1)) == Number(Float(1.0))`,
-/// which is surprising for trigger authors who write `event.count == 1`
-/// and assume the integer payload value compares equal. We normalize
-/// numeric Values to `f64` and compare those; everything else falls
-/// through to the standard `Value::eq`.
+/// `serde_json::Value::PartialEq` returns false for `1 == 1.0`. Trigger
+/// authors expect integer-vs-float to compare equal, so we normalize
+/// both to `f64` for the numeric case.
 fn values_eq(a: &Value, b: &Value) -> bool {
     if let (Some(an), Some(bn)) = (a.as_f64(), b.as_f64()) {
         return an == bn;

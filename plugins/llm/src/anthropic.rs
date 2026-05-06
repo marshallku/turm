@@ -45,10 +45,8 @@ pub struct Message<'a> {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CompleteResponse {
-    /// Concatenated text from all `content` blocks of type "text".
-    /// Anthropic returns content as an array of typed blocks; we
-    /// flatten text blocks here so callers don't need to walk the
-    /// structure for the common case.
+    /// Pre-flattened concatenation of all `content[type=text]` blocks
+    /// so callers don't need to walk Anthropic's typed-block array.
     pub text: String,
     pub model: String,
     pub stop_reason: Option<String>,
@@ -168,12 +166,8 @@ fn parse_response(body: Value) -> Result<CompleteResponse, String> {
     })
 }
 
-/// Quick credential validation: runs a minimal `messages` call
-/// (1 max_token user-prompt "ping") so the `auth` subcommand can
-/// surface invalid keys before persisting. Returns `()` on success.
-/// Exists separately from `complete` so we can give an unambiguous
-/// "auth ok" message on the CLI even when the actual response is
-/// truncated to a single token.
+/// 1-token "ping" against `messages` so the `auth` subcommand can
+/// surface invalid keys before persisting.
 pub fn validate_key(api_key: &str, model: &str) -> Result<(), String> {
     let req = CompleteRequest {
         model,

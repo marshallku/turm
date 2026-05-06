@@ -24,11 +24,9 @@ use serde_json::Value;
 
 use crate::client;
 
-/// Shared one-shot "call action, render response" entrypoint for the
-/// per-plugin CLI wrappers. Returns the process exit code (0 on
-/// success, 1 on transport error or `ok: false` response). On JSON
-/// mode dumps `result` as pretty JSON; otherwise calls the supplied
-/// human renderer with the parsed `result`.
+/// Shared call+render. `json_out` dumps `result` as pretty JSON;
+/// otherwise the `human` callback renders. Returns 0 on success,
+/// 1 on transport error / `ok: false`.
 pub fn call_and_render(
     socket_path: &str,
     method: &str,

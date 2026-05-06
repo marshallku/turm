@@ -21,15 +21,10 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-/// Atomic create-or-fail rename. On success, `to` now refers to the file
-/// previously at `from`. On `EEXIST`, returns `Err` with kind
-/// [`io::ErrorKind::AlreadyExists`] — `from` is left untouched and the
-/// caller is responsible for cleaning it up.
-///
-/// All other errors propagate as-is from the underlying syscall.
-///
-/// Why we bypass `std::fs::rename`: it maps to `rename(2)` which
-/// silently replaces an existing destination on Unix.
+/// `EEXIST` (`AlreadyExists`) when `to` is taken — `from` left for the
+/// caller to clean up. Other syscall errors pass through. Bypasses
+/// `std::fs::rename` because that maps to plain `rename(2)` which
+/// silently replaces on Unix.
 pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     let from_c = path_to_cstring(from)?;
     let to_c = path_to_cstring(to)?;

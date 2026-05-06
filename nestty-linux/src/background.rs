@@ -9,14 +9,9 @@ use nestty_core::config::NesttyConfig;
 
 use crate::terminal::parse_color;
 
-/// Window-level background layer: image + tint that sit underneath every
-/// tab/panel. Replaces the per-`TerminalPanel` background that only ever
-/// rendered inside one terminal's overlay.
-///
-/// Mounted as the base child of a `gtk4::Overlay` in `NesttyWindow`; the rest
-/// of the UI (statusbar, notebook, panels) is added on top as overlays. Every
-/// non-terminal surface (notebook header, statusbar, plugin webviews) is
-/// painted transparent so this layer shows through consistently.
+/// Image + tint mounted as the `gtk4::Overlay` base child in
+/// `NesttyWindow`. Statusbar / notebook / panels are layered on top as
+/// transparent overlays so this layer shows through consistently.
 pub struct BackgroundLayer {
     pub bg_picture: gtk4::Picture,
     pub tint_overlay: gtk4::Box,

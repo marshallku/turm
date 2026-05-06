@@ -26,10 +26,7 @@ const KEYRING_SERVICE: &str = "nestty-jira";
 pub struct TokenSet {
     pub email: String,
     pub api_token: String,
-    /// Stored alongside the credentials so the supervisor can resolve
-    /// the right Jira host even when the env var has been removed
-    /// (e.g. user authed once, then dropped the env from their
-    /// shell rc — the keyring entry still has everything we need).
+    /// Stored so the host survives env-var removal after a one-time auth.
     pub base_url: String,
     pub account_id: String,
     pub display_name: String,
@@ -38,9 +35,7 @@ pub struct TokenSet {
 pub trait TokenStore: Send + Sync {
     fn load(&self) -> Option<TokenSet>;
     fn save(&self, t: &TokenSet) -> Result<(), String>;
-    /// Wipe stored credentials. Currently only invoked from tests, but
-    /// kept on the trait so a future `jira.logout` action has a uniform
-    /// entry point.
+    /// Test-only today; on the trait so a future `jira.logout` is uniform.
     #[allow(dead_code)]
     fn clear(&self) -> Result<(), String>;
     fn kind(&self) -> &'static str;
@@ -198,11 +193,8 @@ impl TokenStore for PlaintextStore {
     }
 }
 
-/// Per-process counter that disambiguates concurrent `save()` calls.
-/// Without this, two saves in the same process collide on a pid-derived
-/// temp path: both open with truncate, the second's bytes clobber the
-/// first's, the first's rename can race ahead and the second's rename
-/// fails with ENOENT.
+/// pid+seq → unique temp file per in-flight save (pid alone collides
+/// when two saves run concurrently in the same process).
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]

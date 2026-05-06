@@ -25,9 +25,8 @@ use std::path::Path;
 
 use crate::client;
 
-/// Aggregate-mode dispatch. Returns process exit code (0 even when
-/// some sections are unavailable — only IPC transport failures or a
-/// rejected `context.snapshot` cause a non-zero exit).
+/// Returns 0 even when some sections are unavailable — only IPC
+/// transport failures or a rejected `context.snapshot` exit non-zero.
 pub fn dispatch(socket_path: &str, json_out: bool) -> i32 {
     let snapshot = match fetch(socket_path, "context.snapshot", json!({})) {
         Ok(v) => v,
@@ -131,11 +130,10 @@ fn fetch(socket_path: &str, method: &str, params: Value) -> Result<Value, (Strin
     }
 }
 
-/// Best-effort workspace resolution: preflight `git.list_workspaces`
-/// and longest-prefix-match `cwd` against either `path` or
-/// `worktree_root`, both canonicalized. Mirrors the resolver in
-/// `plugin_cmds::git`. Returns None on any failure (no aggregate
-/// section that depends on workspace gets rendered).
+/// Longest-prefix match cwd against canonicalized `path` /
+/// `worktree_root` from `git.list_workspaces`. Mirrors `plugin_cmds::git`'s
+/// resolver. `None` on any failure (workspace-bound aggregate sections
+/// then skip).
 fn resolve_workspace_from_cwd(socket_path: &str, cwd: &str) -> Option<String> {
     let resp = fetch(socket_path, "git.list_workspaces", json!({})).ok()?;
     let arr = resp.get("workspaces").and_then(Value::as_array)?;

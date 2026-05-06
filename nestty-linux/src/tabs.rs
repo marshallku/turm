@@ -149,11 +149,8 @@ impl TabManager {
         self.add_tab_with_cwd_and_initial_input(window, cwd, None)
     }
 
-    /// Same as `add_tab_with_cwd` but pipes `initial_input`
-    /// into the new shell AFTER `spawn_async`'s success
-    /// callback fires (so we never write to a PTY that has no
-    /// child attached). Used by `claude.start` to launch
-    /// `tmux new-session` reliably.
+    /// Pipes `initial_input` AFTER spawn_async's success callback fires —
+    /// without that ordering we'd write to a PTY with no child attached.
     pub fn add_tab_with_cwd_and_initial_input(
         self: &Rc<Self>,
         window: &gtk4::ApplicationWindow,
@@ -448,18 +445,8 @@ impl TabManager {
         self.notebook.set_show_tabs(true);
     }
 
-    /// Lay out the tab-bar action widget (toggle + add buttons) for the
-    /// current (`is_vertical_tabs()`, `collapsed`) combination.
-    ///
-    /// - **Vertical + collapsed**: orientation = Vertical, halign = Center,
-    ///   order = `[add, toggle]` so the `+` button sits above the toggle
-    ///   button. Without this, the narrow column hides the add button
-    ///   entirely (the original behavior).
-    /// - **Otherwise**: orientation = Horizontal, halign = Start,
-    ///   order = `[toggle, add]` (the construction default).
-    ///
-    /// Both buttons are always made visible — stacking gives the add
-    /// button room even when the column is tight.
+    /// Vertical+collapsed: stack `[add, toggle]` so the `+` button isn't
+    /// hidden by the narrow column. Otherwise: horizontal `[toggle, add]`.
     fn update_action_box_layout(&self, collapsed: bool) {
         let Some(action) = self.notebook.action_widget(gtk4::PackType::End) else {
             return;

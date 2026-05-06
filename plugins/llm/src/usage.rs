@@ -30,10 +30,8 @@ pub struct UsageRecord {
     pub model: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
-    /// Optional caller label so users can answer "how much did the
-    /// meeting-prep trigger cost me this month?". Set by the
-    /// `llm.complete` action via params.source — passes through
-    /// untouched.
+    /// Caller label from `params.source`, passed through untouched —
+    /// lets users group spend by trigger / source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
@@ -97,12 +95,9 @@ pub struct Aggregate {
     pub by_model: std::collections::BTreeMap<String, ModelStats>,
 }
 
-/// Read the usage log and aggregate. Optional `since` / `until`
-/// constrain the time range (RFC3339 strings; inclusive of `since`,
-/// exclusive of `until`). Optional `model_filter` returns only
-/// records for that exact model name. Malformed JSONL lines are
-/// counted as `parse_errors` and skipped; the aggregation never
-/// fails on a partial file.
+/// `since`/`until` are inclusive/exclusive RFC3339; `model_filter`
+/// is exact-match. Malformed JSONL lines are counted as `parse_errors`
+/// and skipped — aggregation never fails on a partial file.
 pub fn aggregate(
     path: &Path,
     since: Option<DateTime<Utc>>,

@@ -44,9 +44,8 @@ use crate::event::{CalendarEvent, to_json};
 use crate::gcal::Client;
 use crate::store::TokenStore;
 
-/// One firing record. We retain these until the event start has
-/// passed by `RETAIN_AFTER_START` so we don't re-fire if the user's
-/// machine sleeps and wakes up still inside the lead window.
+/// Firing records linger this long past start so a sleep/wake within
+/// the lead window doesn't re-fire.
 const RETAIN_AFTER_START: chrono::Duration = chrono::Duration::minutes(5);
 
 pub struct Poller {
@@ -138,15 +137,10 @@ impl Poller {
         Ok(())
     }
 
-    /// Fire iff the event's firing instant (`event.start - lead`)
-    /// has just arrived. "Just" = within `2 × poll_interval` of
-    /// `firing_time`, with a 2-minute floor so very fast polls still
-    /// give meaningful restart-catchup. The bound matters: without
-    /// it, a 60-min-lead reminder for an event 9 min away would
-    /// fire as a "catchup" 51 minutes late, which is no longer a
-    /// useful reminder. The dedupe set enforces exactly-once across
-    /// the consecutive ticks where `now` sits inside the firing
-    /// band.
+    /// Fires when `now` is in `[firing_time, firing_time + max(2×poll, 2min)]`.
+    /// The bounded "just-arrived" band stops a 60-min-lead reminder from
+    /// firing 51 minutes late as a "catchup". Dedupe set enforces
+    /// exactly-once across consecutive in-band ticks.
     fn should_fire(&self, event: &CalendarEvent, lead_minutes: u32, now: DateTime<Utc>) -> bool {
         let lead = chrono::Duration::minutes(lead_minutes as i64);
         let firing_time = event.start_time - lead;

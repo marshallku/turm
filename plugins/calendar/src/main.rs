@@ -295,9 +295,8 @@ fn handle_action(
     }
 }
 
-/// Validate `lookahead_hours` action param. Cap at one year so a
-/// `0` or massive integer can't yield a tight refresh loop or wrap
-/// to a negative value when cast to `i64` for `chrono::Duration`.
+/// Capped at one year — `0` or huge values would cause a tight refresh
+/// loop or wrap negative when cast to `i64` for `chrono::Duration`.
 fn parse_lookahead_param(params: &Value, default: u64) -> Result<u64, (String, String)> {
     const MAX_HOURS: u64 = 24 * 365;
     let Some(v) = params.get("lookahead_hours") else {

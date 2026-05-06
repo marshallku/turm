@@ -22,9 +22,7 @@ const KEYRING_SERVICE: &str = "nestty-llm";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenSet {
     pub api_key: String,
-    /// RFC3339 timestamp at which `auth` last validated this key.
-    /// Surfaced via `llm.auth_status` so users can confirm the
-    /// stored key has actually been exercised against Anthropic.
+    /// RFC3339 of last `auth` validation; surfaced via `llm.auth_status`.
     pub validated_at: Option<String>,
 }
 

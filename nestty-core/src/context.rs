@@ -4,12 +4,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
-/// Point-in-time snapshot of "what the user is currently doing."
-///
-/// v1 only carries the two fields with confirmed event-stream sources.
-/// Future fields (`recent_commits`, `upcoming_events`, `unread_mentions`,
-/// `open_documents`, …) land alongside their providers — see
-/// `docs/workflow-runtime.md`.
+/// "What the user is currently doing" — v1 carries only the two fields
+/// with confirmed event-stream sources. See `docs/workflow-runtime.md`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Context {
     pub active_panel: Option<String>,
@@ -21,15 +17,7 @@ struct Inner {
     cwd_by_panel: HashMap<String, PathBuf>,
 }
 
-/// Live context — drained by the caller from an `EventBus` subscription.
-///
-/// Drive pattern (caller side):
-/// ```ignore
-/// let rx = bus.subscribe("*");
-/// while let Some(event) = rx.try_recv() {
-///     ctx.apply_event(&event);
-/// }
-/// ```
+/// Caller drains an `EventBus` subscription into `apply_event`.
 pub struct ContextService {
     inner: RwLock<Inner>,
 }

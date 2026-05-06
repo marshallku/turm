@@ -156,9 +156,8 @@ fn poll_token(config: &Config, device_code: &str) -> Result<Option<TokenSet>, Po
     }))
 }
 
-/// Exchange a refresh_token for a new access_token. Returns a fresh
-/// `TokenSet` that preserves the original refresh_token (Google does
-/// not rotate it on refresh).
+/// Returns a fresh `TokenSet` carrying the original refresh_token —
+/// Google doesn't rotate it on refresh.
 pub fn refresh(config: &Config, existing: &TokenSet) -> Result<TokenSet, String> {
     if config.is_minimal() {
         return Err("client_id / client_secret missing".to_string());

@@ -33,16 +33,13 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub workspace_label: String,
-    /// Bot token from env, if supplied. The keyring-stored value is
-    /// authoritative at runtime — the env value is only used by the
-    /// `auth` subcommand to seed the store. None at runtime is the
-    /// expected case once `auth` has been run once.
+    /// Env-only seed for the `auth` subcommand — keyring is authoritative
+    /// at runtime, so `None` is the expected steady state.
     pub bot_token_env: Option<String>,
     pub plaintext_path: PathBuf,
     pub require_secure_store: bool,
-    /// Initial reconnect delay; doubles up to `reconnect_max` on
-    /// repeated connect failures. Reset to initial on a clean
-    /// disconnect (server-rotated reconnect, RESUMED).
+    /// Doubles up to `reconnect_max` on repeated failures; resets on
+    /// clean disconnect (server-rotated reconnect, RESUMED).
     pub reconnect_initial: Duration,
     pub reconnect_max: Duration,
     pub fatal_error: Option<String>,
@@ -99,9 +96,8 @@ fn default_plaintext_path(workspace_label: &str) -> PathBuf {
         .join(format!("discord-token-{workspace_label}.json"))
 }
 
-/// Workspace labels become keyring entry names. Same charset as the
-/// KB / Todo plugins so a stray `..` can't escape into other
-/// keyring namespaces.
+/// `[A-Za-z0-9_\-.@]+` minus reserved `.`/`..` — trust-boundary
+/// against a stray label escaping into other keyring namespaces.
 fn validate_workspace_label(s: &str) -> Result<(), String> {
     if s.is_empty() {
         return Err("workspace label cannot be empty".to_string());

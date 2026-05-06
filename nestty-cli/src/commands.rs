@@ -25,12 +25,9 @@ pub enum Command {
     /// Ping the running nestty instance
     Ping,
 
-    /// Show the current workflow context. Default mode (or with
-    /// `--full`) aggregates panel + cwd + git status + todos +
-    /// calendar (next 2h) + messenger auth into one view.
-    /// `--json` (without `--full`) keeps the raw `context.snapshot`
-    /// shape for backward compatibility with scripts piping it;
-    /// `--json --full` emits the aggregate as a single object.
+    /// Show workflow context. Default (or `--full`) aggregates panel +
+    /// cwd + git + todos + calendar + messenger auth. Bare `--json` keeps
+    /// the raw `context.snapshot` shape; `--json --full` emits the aggregate.
     Context {
         /// Aggregate cross-plugin context (default in human mode;
         /// opt-in for `--json`).
@@ -78,19 +75,16 @@ pub enum Command {
     #[command(subcommand)]
     Plugin(PluginCommand),
 
-    /// Todo plugin shortcuts (Phase 19.1a — wraps `todo.*` actions
-    /// with prefix-resolved ids and a human-readable list view)
+    /// Todo shortcuts (`todo.*` actions with prefix-resolved ids + list view)
     #[command(subcommand)]
     Todo(TodoCommand),
 
-    /// Git plugin shortcuts (Phase 19.1b — wraps `git.*` actions
-    /// with cwd-derived workspace defaulting + human-readable
-    /// table renderers for workspaces / worktrees / status)
+    /// Git shortcuts (`git.*` actions with cwd-derived workspace defaulting
+    /// + table renderers for workspaces / worktrees / status)
     #[command(subcommand)]
     Git(GitCommand),
 
-    /// Bookmark plugin shortcuts (BM-1 — wraps `bookmark.*` actions
-    /// for URL → KB note capture with urlhash8 prefix resolution)
+    /// Bookmark shortcuts (`bookmark.*` URL → KB capture; urlhash8 prefix)
     #[command(subcommand)]
     Bookmark(BookmarkCommand),
 

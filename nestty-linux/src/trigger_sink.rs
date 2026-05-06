@@ -9,42 +9,16 @@ use serde_json::{Value, json};
 
 use crate::socket::SocketCommand;
 
-/// Action names handled exclusively at `LiveTriggerSink::dispatch_action`
-/// — neither registered in `ActionRegistry` nor present in
-/// `socket::dispatch`'s legacy match arm. The `ServiceSupervisor` MUST
-/// treat these as reserved when approving plugin `provides[]` so a
-/// plugin manifest declaring `provides = ["system.spawn"]` can't
-/// register the name into the registry and thereby make it reachable
-/// through `nestctl call` (the unix socket is reachable from any
-/// process running as the user; arbitrary process spawn from socket =
-/// trust break).
+/// Trigger-only methods. Reserved by `ServiceSupervisor` so a plugin
+/// manifest can't register them — the unix socket is reachable from any
+/// user process, and arbitrary process spawn from socket would be a
+/// trust break.
 pub const TRIGGER_ONLY_RESERVED_METHODS: &[&str] = &["system.spawn"];
 
-/// `TriggerSink` impl that tries the in-process `ActionRegistry` first,
-/// then falls through to `socket::dispatch` (via the same channel that
-/// plugins use) for actions still living in the legacy match arm. This is
-/// what makes legacy commands like `tab.new`, `terminal.exec`, `webview.*`
-/// reachable from triggers without migrating each one into the registry.
-///
-/// **Async error visibility:**
-/// - Sync registered handlers: errors come back through the
-///   `try_dispatch` callback synchronously (the callback fires inline
-///   before `try_dispatch` returns), so they're logged the same tick
-///   the trigger fires — no observable latency vs the old
-///   sync-return-value flow.
-/// - Blocking registered handlers (every service-plugin action): the
-///   registry spawns a worker thread, the callback fires from the
-///   worker after the handler returns, and any error is logged from
-///   that thread. The trigger pump reports the action as queued
-///   immediately (`fired += 1`); failures surface in the log shortly
-///   after.
-/// - Legacy fallthrough (`socket::dispatch`): same model as before —
-///   queued via `dispatch_tx`, replies drained by a dedicated
-///   consumer thread that logs `ok=false` responses.
-///
-/// All three paths log via `eprintln!` with a `[nestty] trigger ...`
-/// prefix so a misconfigured trigger is visible regardless of which
-/// path handled it.
+/// Tries `ActionRegistry` first, falls through to `socket::dispatch`
+/// for legacy match-arm actions. All three paths (sync registry,
+/// blocking registry worker, legacy fallthrough) log `[nestty] trigger
+/// ...` on failure so misconfigured triggers stay visible.
 pub struct LiveTriggerSink {
     registry: Arc<ActionRegistry>,
     dispatch_tx: mpsc::Sender<SocketCommand>,
@@ -81,49 +55,17 @@ impl LiveTriggerSink {
 }
 
 impl LiveTriggerSink {
-    /// `system.spawn` — trigger-only fire-and-forget process exec.
+    /// Trigger-only fire-and-forget exec. Reachable ONLY from
+    /// `[[triggers]]` config (same trust surface as `[keybindings]
+    /// spawn:`) — `nestctl call system.spawn` returns `unknown_method`.
     ///
-    /// Intercepted here (NOT registered in `ActionRegistry`, NOT in
-    /// `socket::dispatch`'s match arm) so it's reachable ONLY from
-    /// `[[triggers]]` config — the same trust surface as
-    /// `[keybindings]` `spawn:`. `nestctl call system.spawn` returns
-    /// `unknown_method` by design, since the unix socket is reachable
-    /// from any process running as the user (including arbitrary
-    /// scripts that pull `NESTTY_SOCKET` from env).
-    ///
-    /// Param shape: `{ argv: ["program", "arg1", ...] }`. nestty does
-    /// NOT auto-wrap argv in a shell — by default every `{event.*}`
-    /// and `{context.*}` interpolation lands as a literal argv element
-    /// where shell metacharacters can't be re-parsed, so a malicious
-    /// payload field can't inject `; rm -rf ~`. The user CAN pick
-    /// `["sh", "-c", "<string>"]` themselves to opt into shell
-    /// evaluation, but at that point the bare-argv guarantee no
-    /// longer applies and they own auditing every value spliced into
-    /// the shell string.
-    ///
-    /// Designed for the Hyprland WebKit-freeze cure. Two empirical
-    /// findings from end-to-end testing on Hyprland 0.54.3, both
-    /// reflected in the shipped example
-    /// (`examples/triggers/hyprland-webkit-fix.toml`):
-    ///
-    /// 1. `hyprctl --batch "<cmd1>; <cmd2>"` does NOT cure; two
-    ///    SEPARATE `hyprctl dispatch` calls chained with `&&` DO.
-    ///    Reproducible across many trials; mechanism not
-    ///    characterized.
-    /// 2. The trigger fires on workspace return regardless of which
-    ///    window holds focus, so `resizeactive` often retargets an
-    ///    unrelated window. The example uses `resizewindowpixel
-    ///    '<delta>,class:com.marshall.nestty'` (focus-agnostic).
-    ///
-    /// The `&&` chain forces a `sh -c` wrapper. That stays safe only
-    /// because the snippet has zero `{event.X}` or `{context.X}`
-    /// interpolations and `window.restored` itself emits an empty
-    /// `{}` payload — both conditions documented in the example
-    /// file's preamble. Triggers that interpolate ANY field into the
-    /// shell string violate the safety contract.
-    ///
-    /// Spawned children are reaped on a worker thread so they don't
-    /// become zombies; non-zero exits log to stderr.
+    /// Param shape: `{ argv: ["program", "arg1", ...] }`. argv is NOT
+    /// auto-wrapped in a shell, so each `{event.*}`/`{context.*}` lands
+    /// as a literal argv element where metacharacters can't be re-parsed
+    /// — `; rm -rf ~` in a payload field stays inert. Users opting into
+    /// `["sh", "-c", "<string>"]` lose that guarantee and own auditing
+    /// every value spliced into the shell string. Children reaped on a
+    /// worker; non-zero exits log.
     fn handle_system_spawn(params: Value) -> ActionResult {
         let argv = params
             .get("argv")

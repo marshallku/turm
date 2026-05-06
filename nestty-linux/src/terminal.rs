@@ -13,13 +13,9 @@ use nestty_core::theme::Theme;
 use crate::panel::Panel;
 use crate::search::SearchBar;
 
-/// Strip the `file://hostname` prefix off an OSC 7 URI to yield a real path.
-///
-/// VTE reports the current directory as `file://<hostname>/abs/path`. Naive
-/// `strip_prefix("file://")` leaves the hostname mixed into the path
-/// (`arch/home/...`), which is what Linux event consumers were observing.
-/// Both `terminal.cwd_changed` event emission and `terminal.state` use this
-/// helper so payloads stay consistent across paths.
+/// VTE reports cwd as `file://<hostname>/abs/path`. Naive
+/// `strip_prefix("file://")` would leave the hostname mixed in. Shared
+/// by `terminal.cwd_changed` emission and `terminal.state` for shape parity.
 pub(crate) fn normalize_osc7_uri(uri: &str) -> String {
     if let Some(rest) = uri.strip_prefix("file://") {
         if let Some(idx) = rest.find('/') {
@@ -48,15 +44,10 @@ pub struct TerminalPanel {
 }
 
 impl TerminalPanel {
-    /// Spawn the shell. `cwd = None` inherits from the nestty
-    /// process; `Some(path)` is used by `claude.start` to drop
-    /// straight into a worktree. `initial_input`, when set, is
-    /// fed into the PTY ONLY AFTER `spawn_async`'s success
-    /// callback fires — i.e. only after the shell is actually
-    /// attached. This eliminates the race where writing to the
-    /// PTY too eagerly could land before the child is wired up.
-    /// If the spawn fails, the initial input is dropped (a
-    /// child-less PTY would have nowhere to deliver it).
+    /// `cwd = None` inherits the nestty process cwd. `initial_input` is
+    /// fed to the PTY only after `spawn_async`'s success callback fires
+    /// (writing pre-attach would race against child wiring); on spawn
+    /// failure it's dropped (no child = nowhere to deliver).
     pub fn new_with_cwd_and_initial_input(
         config: &NesttyConfig,
         cwd: Option<&std::path::Path>,

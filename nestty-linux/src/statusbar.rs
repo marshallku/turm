@@ -26,9 +26,7 @@ pub struct StatusBar {
     labels: Rc<RefCell<HashMap<String, gtk4::Label>>>,
 }
 
-/// Parse module script output. Supports:
-/// - JSON: {"text": "...", "tooltip": "..."}
-/// - Plain text: used as-is
+/// JSON `{text, tooltip?}` if it parses, otherwise the raw trimmed string.
 fn parse_output(output: &str) -> (String, Option<String>) {
     let trimmed = output.trim();
     if trimmed.starts_with('{')
@@ -81,14 +79,9 @@ fn run_module_exec(
     rx
 }
 
-/// Apply theme CSS to the status bar widget tree.
-///
-/// `position` is the configured statusbar position (`"top"` or `"bottom"`).
-/// The 1-px separator goes on whichever edge faces the notebook content;
-/// before the window-level transparency change this looked OK either way
-/// because the bar painted its own opaque `surface0` strip, but with a
-/// transparent bg the border would otherwise float against the window
-/// edge instead of dividing the bar from the rest of the UI.
+/// Separator goes on the edge facing the notebook (`top` → bottom-edge,
+/// `bottom` → top-edge); with the transparent bar bg a wrong-edge border
+/// would float against the window frame instead of dividing the UI.
 fn apply_theme_css(theme: &Theme, height: u32, position: &str) {
     let border_edge = if position == "top" {
         "border-bottom"

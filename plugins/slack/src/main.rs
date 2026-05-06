@@ -453,19 +453,15 @@ fn handle_get_message(
     }
 }
 
-/// Slack object ids: `[A-Z0-9]+`. Channels start with C/D/G; users
-/// with U/W; teams with T. We don't enforce the prefix because
-/// `slack.get_message` is also useful for DM channels (D…) and
-/// shared-channel mirrors. Just enforce the charset.
+/// `[A-Z0-9]+`. Prefix (C/D/G/U/W/T) is intentionally NOT enforced —
+/// `get_message` works for DM channels and shared-channel mirrors too.
 fn is_valid_slack_id(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
-/// Slack timestamps are `<seconds>.<microseconds>` — two decimal
-/// segments separated by exactly one `.`. Both segments are digits
-/// only.
+/// `<seconds>.<microseconds>` — exactly two digit-only segments.
 fn is_valid_slack_ts(s: &str) -> bool {
     let parts: Vec<&str> = s.split('.').collect();
     parts.len() == 2

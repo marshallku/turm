@@ -42,10 +42,8 @@ impl Client {
         })
     }
 
-    /// List events on the primary calendar between `time_min` and `time_max`.
-    /// Follows `nextPageToken` so callers don't silently lose events past
-    /// the first page when the lookahead window is busy. Capped at
-    /// `MAX_PAGES` to bound worst-case work if the server misbehaves.
+    /// Walks `nextPageToken` (capped at `MAX_PAGES`) so a busy window
+    /// doesn't silently lose events past page 1.
     pub fn list_events(
         &mut self,
         time_min: DateTime<Utc>,
@@ -177,10 +175,7 @@ impl std::fmt::Display for GcalError {
     }
 }
 
-/// Minimal RFC 3986 percent-encode for path/query segments. We don't
-/// pull in `url::form_urlencoded` because we control all inputs; this
-/// covers RFC3339 dates, opaque event ids, and the small set of
-/// characters that show up in those strings.
+/// Minimal RFC 3986 percent-encode for path/query segments.
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {

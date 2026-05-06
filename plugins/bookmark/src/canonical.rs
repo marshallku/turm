@@ -24,9 +24,7 @@
 use sha1::{Digest, Sha1};
 use url::Url;
 
-/// Exact tracking-param matches. `utm_*` is handled as a prefix glob
-/// in `is_tracking_param` so `utm_id`, `utm_name`, etc. (Marketing
-/// invents them) are stripped without us having to maintain a list.
+/// Exact matches. `utm_*` is a prefix-glob in `is_tracking_param`.
 const TRACKING_PARAMS: &[&str] = &["gclid", "fbclid", "mc_cid", "mc_eid", "ref"];
 
 fn is_tracking_param(key: &str) -> bool {

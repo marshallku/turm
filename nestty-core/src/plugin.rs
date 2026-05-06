@@ -53,9 +53,8 @@ fn default_module_interval() -> u64 {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginModuleDef {
     pub name: String,
-    /// Shell command to execute. stdout is used as module text content.
-    /// If stdout is JSON with a "text" field, that's used instead.
-    /// Optional "tooltip" field for hover text.
+    /// Shell command. stdout becomes module text — or, if it's JSON with a
+    /// `text` field, that value is used (with optional `tooltip`).
     pub exec: String,
     /// Execution interval in seconds
     #[serde(default = "default_module_interval")]
@@ -71,14 +70,9 @@ pub struct PluginModuleDef {
     pub class: Option<String>,
 }
 
-/// Long-running supervised subprocess plugin component.
-///
-/// Service plugins extend the per-call `[[commands]]` lifecycle with a
-/// supervised stdio-RPC channel that survives across many requests. The
-/// manifest is the source of truth for what each service may publish or
-/// handle (`provides` / `subscribes`); the supervisor uses these for
-/// pre-spawn conflict resolution and for asymmetric validation of the
-/// runtime `initialize` reply (subset OK, superset rejected).
+/// Supervised stdio-RPC subprocess. `provides`/`subscribes` are the
+/// pre-spawn conflict-resolution + init-reply-subset check inputs;
+/// see `service_supervisor`'s module preamble.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginServiceDef {
     /// Service identifier within the plugin (a single plugin may host
@@ -101,10 +95,8 @@ pub struct PluginServiceDef {
     /// Restart behavior for unexpected exits. Defaults to `on-crash`.
     #[serde(default = "default_restart", deserialize_with = "deserialize_restart")]
     pub restart: RestartPolicy,
-    /// Action names this service handles. Manifest-declared so the
-    /// supervisor can resolve cross-plugin conflicts BEFORE any process is
-    /// spawned (lexical-name winner takes the action; loser skips just that
-    /// entry, retains its other registrations).
+    /// Pre-spawn conflict resolution: lexical-name winner takes a
+    /// contested action; loser skips just that entry.
     #[serde(default)]
     pub provides: Vec<String>,
     /// Bus event-kind globs the service wants forwarded via

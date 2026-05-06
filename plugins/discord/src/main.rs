@@ -410,11 +410,9 @@ fn handle_get_message(
     }
 }
 
-/// Validate that `params[key]` is a Discord snowflake (non-empty
-/// decimal-only string). Returns the validated &str. Used for every
-/// path-parameter interpolation point so a malicious or buggy
-/// trigger can't redirect an authenticated request at a different
-/// Discord API endpoint.
+/// Trust-boundary: snowflake check (non-empty decimal-only string)
+/// before splicing into a Discord API path so a malformed param can't
+/// redirect the authenticated request elsewhere.
 fn require_snowflake<'a>(params: &'a Value, key: &str) -> Result<&'a str, (String, String)> {
     let s = params.get(key).and_then(Value::as_str).ok_or_else(|| {
         (

@@ -175,9 +175,8 @@ fn strip_quotes(s: &str) -> &str {
     s
 }
 
-/// Render a frontmatter block with a fixed key order, plus body. Always
-/// inline for lists. Output starts with `---\n` and ends with
-/// `---\n\n<body>` (or just `---\n` when body is empty).
+/// Fixed key order; lists always inline. Output: `---\n...---\n\n<body>`
+/// (or `---\n...---\n` for empty body).
 pub fn render(fm: &Frontmatter, body: &str) -> String {
     // Stable canonical key order so diffs stay clean even after vim edits
     // shuffle them. Unknown keys go after, alphabetically (BTreeMap).

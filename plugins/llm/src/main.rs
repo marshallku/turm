@@ -303,10 +303,8 @@ fn handle_auth_status(config: &Config, store: &Arc<dyn TokenStore>) -> Value {
     })
 }
 
-/// Resolve the API key from a single source — env wins if present,
-/// otherwise full store-load. Mirrors the slack/calendar pattern
-/// (no cross-source mixing — N/A here since we only have one
-/// token, but the contract stays uniform).
+/// Env wins, store fallback (slack/calendar pattern; single token so
+/// no cross-source mixing pitfall).
 fn resolve_api_key(config: &Config, store: &dyn TokenStore) -> Option<String> {
     if !config.api_key.is_empty() {
         return Some(config.api_key.clone());

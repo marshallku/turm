@@ -72,12 +72,8 @@ pub fn run() {
     app.run();
 }
 
-/// Trigger window destroy on every window the application owns.
-/// Prefers `window.close()` (dispatches the standard delete-event +
-/// destroy chain) over `app.quit()` because the latter exits the
-/// main loop without giving widgets a chance to fire their destroy
-/// signals — and the supervisor's `shutdown_all` is wired to the
-/// window's destroy signal.
+/// `window.close()` (not `app.quit()`) so destroy signals fire — the
+/// supervisor's `shutdown_all` hook is wired to window destroy.
 fn close_all_windows(app: &Application) {
     for w in app.windows() {
         w.close();

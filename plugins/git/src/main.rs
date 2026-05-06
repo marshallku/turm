@@ -594,22 +594,16 @@ fn compute_worktree_target(ws: &Workspace, branch: &str) -> PathBuf {
     p
 }
 
-/// `Path::starts_with` only matches whole components, so
-/// `/a/foo-evil` does NOT match prefix `/a/foo`. This is the
-/// behavior we want for the `worktree_remove` / `status` allow-list.
+/// Whole-component prefix match (so `/a/foo-evil` does NOT match
+/// `/a/foo`) — what the `worktree_remove`/`status` allow-list needs.
 fn path_starts_with(child: &Path, parent: &Path) -> bool {
     child.starts_with(parent)
 }
 
-/// Walk the components of `target` past `root` and refuse if any
-/// existing component is a symlink. `target` MUST already pass a
-/// lexical `starts_with(root)` check — this defends only against
-/// the symlinks-inside-the-allowed-tree case, not arbitrary
-/// out-of-tree paths.
-///
-/// `Err::Forbidden` on symlink detected; `Err::Io` on stat
-/// failure that isn't NotFound (so a permission error doesn't
-/// silently pass — the boundary check has to actually run).
+/// Walks components past `root`; refuses symlinks. `target` must
+/// already pass `starts_with(root)`. Defends only the
+/// inside-the-allowed-tree case. Permission errors propagate (a
+/// silent pass would skip the boundary check).
 fn check_no_symlink_ancestors(root: &Path, target: &Path) -> Result<(), (String, String)> {
     let suffix = match target.strip_prefix(root) {
         Ok(s) => s,

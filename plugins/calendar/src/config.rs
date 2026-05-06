@@ -72,11 +72,9 @@ impl Config {
     }
 }
 
-/// Reject account labels that could break out of the plaintext-store
-/// directory or cause keyring entry collisions. The label is interpolated
-/// directly into both the keyring entry name and the plaintext file path
-/// (`calendar-token-<account>.json`), so it must not contain path
-/// separators, control characters, or the reserved `.` / `..` segments.
+/// `[A-Za-z0-9_\-.@]+` minus reserved `.`/`..`. Trust-boundary: the
+/// label is interpolated into both the keyring entry name and the
+/// plaintext file path (`calendar-token-<account>.json`).
 fn validate_account_label(s: &str) -> Result<(), String> {
     if s.is_empty() {
         return Err("NESTTY_CALENDAR_ACCOUNT: cannot be empty".to_string());
@@ -123,10 +121,8 @@ fn parse_lead_minutes(raw: &str) -> Result<Vec<u32>, String> {
     Ok(out)
 }
 
-/// Parse a strictly-positive integer env var. Zero is rejected
-/// because both poll-interval and lookahead-window would silently
-/// degrade the plugin (tight loop, empty window respectively) if a
-/// caller set them to 0 by mistake.
+/// Strictly-positive — zero would silently degrade poll-interval (tight
+/// loop) or lookahead-window (empty) on a caller typo.
 fn parse_nonzero_int<T>(var: &str, default: T) -> Result<T, String>
 where
     T: std::str::FromStr + PartialEq + Default + Copy,
@@ -160,9 +156,7 @@ fn default_plaintext_path(account: &str) -> std::path::PathBuf {
         .join(format!("calendar-token-{account}.json"))
 }
 
-/// Minimal `$XDG_CONFIG_HOME` resolver to avoid pulling in the `dirs`
-/// crate just for one path. Falls back to `$HOME/.config` and finally
-/// `None` on platforms without `$HOME`.
+/// `$XDG_CONFIG_HOME` → `$HOME/.config` → `None`.
 fn dirs_config_dir() -> Option<std::path::PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
         && !xdg.is_empty()

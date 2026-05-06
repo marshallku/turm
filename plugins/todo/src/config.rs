@@ -25,12 +25,9 @@ pub struct Config {
     pub root: PathBuf,
     pub default_workspace: String,
     pub poll_interval: Duration,
-    /// Set when env validation surfaced a malformed value. Distinct
-    /// from "root missing" — that's expected on first run and we
-    /// auto-create. A fatal error means the runtime config is
-    /// unsafe to use (workspace label that escapes the root,
-    /// out-of-range poll interval). Watcher refuses to start when
-    /// set; actions return `config_error`.
+    /// Set on malformed env (workspace escape, out-of-range poll
+    /// interval). Watcher refuses to start; actions return `config_error`.
+    /// "Root missing" is NOT fatal — first-run auto-creates.
     pub fatal_error: Option<String>,
 }
 
@@ -92,10 +89,8 @@ fn default_root() -> PathBuf {
     PathBuf::from("./docs/todos")
 }
 
-/// Workspace labels become directory names under `root`. Same
-/// charset as KB's folder validation so the well-trodden security
-/// path applies: rejects `..`, embedded slashes, control chars, the
-/// reserved `.` / `..` aliases.
+/// `[A-Za-z0-9_\-.@]+` minus reserved `.`/`..` (KB's folder rules) —
+/// trust-boundary so the label can't escape `root`.
 pub fn validate_workspace(s: &str) -> Result<(), String> {
     if s.is_empty() {
         return Err("workspace label cannot be empty".to_string());

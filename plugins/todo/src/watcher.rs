@@ -49,9 +49,8 @@ use crate::{Writer, emit};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Snapshot {
-    /// Stored as nanoseconds since the Unix epoch — most filesystems
-    /// resolve to ms / us, but ns covers the future and lets us
-    /// detect rapid double-writes that share a second.
+    /// ns since Unix epoch (FS resolution is typically ms/us, but ns
+    /// resolves rapid double-writes that share a second).
     mtime_ns: i128,
     status: Status,
 }
@@ -61,10 +60,9 @@ pub struct Watcher {
     store: Arc<Store>,
     writer: Writer,
     initialized: Arc<AtomicBool>,
-    /// Set to `true` from main when stdin EOF / `shutdown` arrives.
-    /// Watcher checks this between scans and during its sleep so the
-    /// loop can exit promptly, drop its `writer` clone, and unblock the
-    /// writer thread's `rx.iter()` for a clean drain.
+    /// Set from main on stdin EOF / `shutdown`. Polled between scans
+    /// and during sleep so the loop exits promptly, drops its `writer`
+    /// clone, and lets the writer thread drain cleanly.
     shutdown: Arc<AtomicBool>,
 }
 
@@ -289,9 +287,7 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::tempdir;
 
-    /// `Writer` impl that captures bytes into a shared `Vec<u8>`.
-    /// Mirrors the test sink in main.rs so watcher unit tests can
-    /// read back the line-delimited frames the watcher emitted.
+    /// Read-back sink for watcher tests (mirrors main.rs's TestSink).
     struct TestSink(Arc<Mutex<Vec<u8>>>);
     impl std::io::Write for TestSink {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {

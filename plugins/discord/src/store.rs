@@ -24,9 +24,7 @@ const KEYRING_SERVICE: &str = "nestty-discord";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenSet {
     pub bot_token: String,
-    /// Discord user id of the bot (from `/users/@me`). Persisted so
-    /// `auth_status` can return it without a second API call on
-    /// every check.
+    /// Persisted from `/users/@me` so `auth_status` doesn't re-call.
     pub user_id: Option<String>,
     /// Bot username + discriminator (or new-style global name).
     /// Diagnostic only — surfaced by `discord.auth_status`.
