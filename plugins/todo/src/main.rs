@@ -28,6 +28,7 @@ compile_error!(
 );
 
 mod config;
+mod loop_prompt;
 mod prompt;
 mod store;
 mod todo;
@@ -214,6 +215,7 @@ fn handle_frame(
                         "todo.set_status",
                         "todo.start",
                         "todo.delete",
+                        "todo.render_loop_prompt",
                     ],
                     "subscribes": [],
                 }),
@@ -293,6 +295,7 @@ fn handle_action(
         "todo.set_status" => action_set_status(params, config, store),
         "todo.start" => action_start(params, config, store, writer),
         "todo.delete" => action_delete(params, config, store),
+        "todo.render_loop_prompt" => action_render_loop_prompt(params, config, store),
         other => Err((
             "action_not_found".into(),
             format!("todo plugin does not handle {other}"),
@@ -595,6 +598,63 @@ fn action_delete(
         (c.to_string(), m)
     })?;
     Ok(json!({ "id": id, "workspace": workspace }))
+}
+
+/// Render the autonomous-loop prompt for an existing todo.
+///
+/// The rendered protocol addresses the todo by id+workspace directly,
+/// so the `loop` tag is NOT required for this specific path to work.
+/// We auto-add it anyway for two reasons: (1) `nestctl todo list --tag
+/// loop` becomes a useful filter for finding active/historical agent
+/// loops, and (2) the parallel manual-fill template at
+/// `~/.claude/loop-template.md` uses `(workspace, tag=loop, title)` for
+/// its bootstrap lookup, so a todo created via this action can be
+/// resumed via the manual flow later without re-tagging by hand.
+///
+/// Returns `loop_tag_added: true` only when this call performed the tag
+/// mutation (so callers can surface "we changed something" vs "already
+/// tagged, no-op"); the post-call state is "todo has `loop`" either way.
+fn action_render_loop_prompt(
+    params: &Value,
+    config: &Config,
+    store: &Arc<Store>,
+) -> Result<Value, (String, String)> {
+    let workspace = string_param_or_default(params, "workspace", &config.default_workspace)?;
+    let id = required_string(params, "id")?;
+    let mut t = store.read(&workspace, &id).map_err(|e| {
+        let (c, m) = e.code_message();
+        (c.to_string(), m)
+    })?;
+    let already_tagged = t.tags.iter().any(|tag| tag == "loop");
+    if !already_tagged {
+        let mut new_tags = t.tags.clone();
+        new_tags.push("loop".into());
+        t = store
+            .update(
+                &workspace,
+                &id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(new_tags),
+                None,
+            )
+            .map_err(|e| {
+                let (c, m) = e.code_message();
+                (c.to_string(), m)
+            })?;
+    }
+    let prompt = loop_prompt::render(&t.title, &workspace, &id);
+    Ok(json!({
+        "id": id,
+        "workspace": workspace,
+        "loop_tag_added": !already_tagged,
+        "prompt": prompt,
+    }))
 }
 
 // -- param helpers --
@@ -1016,5 +1076,72 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.0, "action_not_found");
+    }
+
+    #[test]
+    fn render_loop_prompt_substitutes_title_and_workspace() {
+        let (_d, config, store, _tx, _rx) = fixture();
+        let t = action_create(&json!({"title": "doc trim"}), &config, &store).unwrap();
+        let r = action_render_loop_prompt(&json!({"id": t.id}), &config, &store).unwrap();
+        let prompt = r["prompt"].as_str().unwrap();
+        assert!(prompt.contains("LOOP NAME: doc trim"));
+        assert!(prompt.contains(&format!("TODO ID: {}", t.id)));
+        // workspace defaults to "default" in the fixture; verify it appears.
+        assert!(prompt.contains("WORKSPACE: default"));
+    }
+
+    #[test]
+    fn render_loop_prompt_auto_adds_loop_tag() {
+        let (_d, config, store, _tx, _rx) = fixture();
+        let t = action_create(&json!({"title": "x"}), &config, &store).unwrap();
+        assert!(!t.tags.iter().any(|tag| tag == "loop"));
+        let r = action_render_loop_prompt(&json!({"id": t.id}), &config, &store).unwrap();
+        assert_eq!(r["loop_tag_added"], json!(true));
+        // Re-fetch and confirm the tag actually persisted to the file.
+        let listed = action_list(&json!({}), &store).unwrap();
+        let todos = listed.get("todos").and_then(Value::as_array).unwrap();
+        let me = todos
+            .iter()
+            .find(|x| x["id"].as_str() == Some(t.id.as_str()))
+            .unwrap();
+        let tags = me["tags"].as_array().unwrap();
+        assert!(tags.iter().any(|v| v.as_str() == Some("loop")));
+    }
+
+    #[test]
+    fn render_loop_prompt_idempotent_when_already_tagged() {
+        let (_d, config, store, _tx, _rx) = fixture();
+        let t = action_create(
+            &json!({"title": "x", "tags": ["loop", "other"]}),
+            &config,
+            &store,
+        )
+        .unwrap();
+        let r = action_render_loop_prompt(&json!({"id": t.id}), &config, &store).unwrap();
+        assert_eq!(r["loop_tag_added"], json!(false));
+        // Tag set unchanged — no duplicate `loop` entry.
+        let listed = action_list(&json!({}), &store).unwrap();
+        let me = listed["todos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"].as_str() == Some(t.id.as_str()))
+            .unwrap();
+        let tags: Vec<&str> = me["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let loop_count = tags.iter().filter(|s| **s == "loop").count();
+        assert_eq!(loop_count, 1);
+    }
+
+    #[test]
+    fn render_loop_prompt_returns_not_found_for_missing_todo() {
+        let (_d, config, store, _tx, _rx) = fixture();
+        let err =
+            action_render_loop_prompt(&json!({"id": "T-missing"}), &config, &store).unwrap_err();
+        assert_eq!(err.0, "not_found");
     }
 }

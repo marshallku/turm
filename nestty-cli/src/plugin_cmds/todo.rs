@@ -8,6 +8,7 @@
 //! | `todo create <title> [--workspace …]` | `todo.create`     |
 //! | `todo list [--status …]`              | `todo.list`       |
 //! | `todo update <id> [flags…]`           | `todo.update`     |
+//! | `todo loop <id> [--copy]`             | `todo.render_loop_prompt` |
 //! | `todo set <id> --status <s>`          | `todo.set_status` |
 //! | `todo done <id>`                      | `todo.set_status` (status=done) |
 //! | `todo doing <id>`                     | `todo.set_status` (status=in_progress) |
@@ -197,6 +198,25 @@ pub enum TodoCommand {
         #[arg(long)]
         workspace: Option<String>,
     },
+    /// Render the autonomous-loop prompt for an existing todo and print
+    /// it (or copy to the system clipboard with `--copy`). Auto-tags
+    /// the todo with `loop` if not already — not because the rendered
+    /// protocol needs it (it addresses the todo by id+workspace), but
+    /// so `list --tag loop` discovers it later and the manual-fill
+    /// template at `~/.claude/loop-template.md` (which looks up by
+    /// `(workspace, tag=loop, title)`) can resume it without re-tagging.
+    Loop {
+        /// Todo id (full id or unique prefix)
+        id: String,
+        /// Scope id resolution to this workspace
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Pipe the rendered prompt to wl-copy (Wayland) or xclip (X11)
+        /// instead of stdout. Falls back to stdout with a note when no
+        /// clipboard tool is available.
+        #[arg(long)]
+        copy: bool,
+    },
 }
 
 /// Returns process exit code for `main.rs` to propagate.
@@ -385,7 +405,92 @@ pub fn dispatch(cmd: &TodoCommand, socket_path: &str, json_out: bool) -> i32 {
         TodoCommand::Show { id, workspace } => {
             show(socket_path, id, workspace.as_deref(), json_out)
         }
+        TodoCommand::Loop {
+            id,
+            workspace,
+            copy,
+        } => {
+            let r = match resolve_id(socket_path, id, workspace.as_deref()) {
+                Ok(r) => r,
+                Err(code) => return code,
+            };
+            let params = json!({ "id": r.id, "workspace": r.workspace });
+            call_and_render(
+                socket_path,
+                "todo.render_loop_prompt",
+                params,
+                json_out,
+                |v| {
+                    let prompt = v.get("prompt").and_then(Value::as_str).unwrap_or("");
+                    let tag_added = v
+                        .get("loop_tag_added")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    if *copy && pipe_to_clipboard(prompt) {
+                        eprintln!(
+                            "loop prompt for {} (ws={}) copied to clipboard{}",
+                            r.id,
+                            r.workspace,
+                            if tag_added { " — loop tag added" } else { "" },
+                        );
+                        eprintln!("paste into Claude Code's `/loop` to start.");
+                    } else {
+                        if *copy {
+                            eprintln!(
+                                "(no clipboard tool available — wl-copy/xclip not found; falling back to stdout)"
+                            );
+                        }
+                        print!("{prompt}");
+                    }
+                },
+            )
+        }
     }
+}
+
+/// Best-effort clipboard pipe. Prefers `wl-copy` when `WAYLAND_DISPLAY`
+/// is set, else `xclip -selection clipboard` when `DISPLAY` is set,
+/// else returns false so the caller can fall back to stdout. Stdin pipe
+/// failure (tool not on PATH, write error) also reports false.
+fn pipe_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let candidates: Vec<(&str, &[&str])> = {
+        let mut v: Vec<(&str, &[&str])> = Vec::new();
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            v.push(("wl-copy", &[]));
+        }
+        if std::env::var_os("DISPLAY").is_some() {
+            v.push(("xclip", &["-selection", "clipboard"]));
+        }
+        v
+    };
+    for (cmd, args) in candidates {
+        let mut child = match Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let Some(mut stdin) = child.stdin.take() else {
+            let _ = child.kill();
+            continue;
+        };
+        if stdin.write_all(text.as_bytes()).is_err() {
+            let _ = child.kill();
+            continue;
+        }
+        drop(stdin);
+        match child.wait() {
+            Ok(status) if status.success() => return true,
+            _ => continue,
+        }
+    }
+    false
 }
 
 /// `todo show` — fan out from one resolved id:

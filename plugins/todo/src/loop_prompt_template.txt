@@ -1,0 +1,66 @@
+# Auto-continue Loop (resume existing nestty todo)
+
+This prompt drives an existing nestty todo as a Claude Code autonomous
+loop. State lives in the todo's body (subtasks) and `prompt` frontmatter
+field (iter counter + owner-session lock).
+
+LOOP NAME: {TITLE}
+WORKSPACE: {WORKSPACE}
+TODO ID: {ID}
+
+GOAL: see the `## Goal` section of the existing todo body
+(`nestctl todo show {ID} --workspace {WORKSPACE}`).
+
+FIRST ITERATION: resume from the todo's current state.
+
+PROTOCOL:
+
+Identity & lock:
+- ACTIVE_SESSION = `basename "$(ls -t $HOME/.claude/projects/$(pwd | tr / -)/*.jsonl | head -1)" .jsonl`
+- TODO is identified by id `{ID}` in workspace `{WORKSPACE}`.
+- The `prompt` frontmatter field encodes loop metadata as
+  `iter=<n>; max_iter=<n>; owner=<session-id>`. Parse with simple
+  `key=value` split.
+
+Bootstrap (run only on first iteration when prompt frontmatter is
+absent or owner is unset):
+1. Compose initial prompt: `iter=0; max_iter=30; owner=<ACTIVE_SESSION>`.
+2. `nestctl todo update {ID} --workspace {WORKSPACE} --prompt '<...>'`
+3. `nestctl todo doing {ID} --workspace {WORKSPACE}`
+
+Per iteration:
+1. Fetch todo:
+   `nestctl todo show {ID} --workspace {WORKSPACE} --json`.
+2. Lock check: parse `prompt` field. If `owner` != ACTIVE_SESSION →
+   abort immediately, report "another session owns this loop", do NOT
+   call ScheduleWakeup. (User can re-take via
+   `nestctl todo update {ID} --prompt 'iter=<n>; max_iter=30; owner=<new>'`.)
+3. Iter cap: if `iter` >= `max_iter` → `nestctl todo block {ID}`,
+   summarise progress, do NOT call ScheduleWakeup.
+4. Pick one unfinished `- [ ]` subtask from body, execute it.
+5. Single update call:
+   `nestctl todo update {ID} \
+     --body "<body with that subtask flipped to - [x] and any newly
+       discovered GOAL-related subtasks appended>" \
+     --prompt 'iter=<n+1>; max_iter=30; owner=<ACTIVE_SESSION>'`
+   For just-add-a-subtask without finishing one, use
+   `nestctl todo update {ID} --append-subtask '<text>'`.
+6. Branch:
+   - All subtasks `- [x]` → `nestctl todo done {ID}`, summary report,
+     do NOT call ScheduleWakeup. Loop ends naturally.
+   - User input/decision required → `nestctl todo block {ID}`, do NOT
+     call ScheduleWakeup. Stop and let the user respond. Resuming the
+     same `/loop` prompt later finds the existing todo and re-locks
+     after the block→in_progress transition.
+   - Otherwise → call ScheduleWakeup with this entire prompt verbatim,
+     delay between 60 and 270 seconds (avoid 300 — cache window).
+7. Only append subtasks directly related to GOAL. Side-quests stay out.
+
+INVARIANTS:
+- Same id concurrent driving: lock check aborts the second session.
+- Body update and `prompt` update should go in **one** `nestctl todo
+  update` call (atomic file rewrite).
+- `prompt` frontmatter format is fixed:
+  `iter=<n>; max_iter=<n>; owner=<id>`.
+- ScheduleWakeup must receive this entire prompt verbatim — no
+  truncation, no summary. Protocol must self-contain to survive re-fires.

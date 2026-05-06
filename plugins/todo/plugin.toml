@@ -19,6 +19,7 @@ provides = [
     "todo.set_status",
     "todo.start",
     "todo.delete",
+    "todo.render_loop_prompt",
 ]
 subscribes = []
 # Optional env:

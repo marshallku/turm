@@ -522,6 +522,13 @@ function buildCard(t) {
     start.addEventListener("click", (e) => { e.stopPropagation(); onStart(t); });
     actions.appendChild(start);
   }
+  if (t.status !== "done") {
+    const loopBtn = document.createElement("button");
+    loopBtn.textContent = "🔁 loop";
+    loopBtn.title = "Copy autonomous-loop prompt to clipboard. Auto-tags this todo with `loop` so it shows up under list --tag loop and stays compatible with the manual-fill template's bootstrap. Paste into Claude /loop to start.";
+    loopBtn.addEventListener("click", (e) => { e.stopPropagation(); onLoop(loopBtn, t); });
+    actions.appendChild(loopBtn);
+  }
   card.appendChild(actions);
 
   // Pointer Events instead of HTML5 native drag-and-drop. WebKitGTK6
@@ -721,6 +728,70 @@ async function onStart(t) {
     alert(`start failed: ${err.message}`);
     if (wasNotInProgress) load();
   }
+}
+
+async function onLoop(button, t) {
+  // Render the autonomous-loop prompt for this todo and copy to
+  // clipboard. The action auto-tags the todo with `loop` for discovery
+  // (`list --tag loop`) and parity with the manual-fill template's
+  // `(workspace, tag=loop, title)` lookup; the rendered protocol itself
+  // addresses the todo by id+workspace and does not need the tag. The
+  // user pastes the result into Claude Code's `/loop`.
+  const original = button.textContent;
+  button.disabled = true;
+  try {
+    const { prompt } = await nestty.call("todo.render_loop_prompt", {
+      id: t.id, workspace: t.workspace,
+    });
+    if (await copyToClipboard(prompt)) {
+      button.textContent = "✓ copied";
+    } else {
+      // Final fallback if both navigator.clipboard and execCommand fail —
+      // the panel can't write to the clipboard, so surface the prompt to
+      // the user via alert. They at least see it; OS-level select-copy
+      // works even on alert text in most WebKitGTK builds.
+      button.textContent = "see alert";
+      alert(`Copy this prompt and paste into Claude /loop:\n\n${prompt}`);
+    }
+  } catch (err) {
+    button.textContent = "× failed";
+    alert(`render_loop_prompt failed: ${err.message}`);
+  } finally {
+    setTimeout(() => {
+      button.textContent = original;
+      button.disabled = false;
+    }, 1500);
+  }
+}
+
+async function copyToClipboard(text) {
+  // Prefer navigator.clipboard.writeText — supported in WebKitGTK6 for
+  // click-triggered (user-gesture) writes. Falls back to a hidden
+  // textarea + execCommand("copy") for environments where the async
+  // clipboard API is unavailable or rejects.
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Permission denied or no secure context — try the legacy path.
+    }
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  ta.style.pointerEvents = "none";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  document.body.removeChild(ta);
+  return ok;
 }
 
 newInput.addEventListener("keydown", async (e) => {
