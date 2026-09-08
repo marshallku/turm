@@ -325,6 +325,9 @@ pub enum Action {
     Redraw,
     /// Focus the always-on left sidebar for keyboard navigation (nvim-explorer-style).
     FocusSidebar,
+    /// `Ctrl-b R`: open the resume picker — past Claude/Codex conversations on disk,
+    /// newest first, fuzzy-filtered (decision #99).
+    ResumePicker,
     /// Arm the prefix (`Ctrl-b`). A global-table action like any other, but prefix
     /// entry always wins over a colliding user binding.
     EnterPrefix,
@@ -568,6 +571,7 @@ fn action_from_name(name: &str) -> Option<Action> {
         "popup" => Action::Popup,
         "redraw" => Action::Redraw,
         "focus-sidebar" => Action::FocusSidebar,
+        "resume-picker" => Action::ResumePicker,
         "prefix" => Action::EnterPrefix,
         _ => {
             // tab-1 .. tab-9
@@ -613,6 +617,7 @@ fn default_bindings() -> Vec<(Action, Ctx, &'static [&'static str])> {
         (ToggleSidebar, Prefix, &["s"]),
         (Redraw, Prefix, &["r"]),
         (FocusSidebar, Prefix, &["e"]),
+        (ResumePicker, Prefix, &["R"]),
         (NewTab, Prefix, &["c"]),
         (NextTab, Prefix, &["n"]),
         (PrevTab, Prefix, &["p"]),

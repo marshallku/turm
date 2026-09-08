@@ -71,6 +71,7 @@ All of these are remappable in `mux.toml` — see [Customizing bindings](#custom
 | --- | --- |
 | Toggle sidebar | `s` |
 | Focus sidebar (keyboard nav) | `e` |
+| Resume a past Claude/Codex conversation | `R` |
 | Notification center | `a` |
 | Jump to a blocked (attention) agent | `!` |
 | Detach this client | `d` (or `q`) |
@@ -94,6 +95,10 @@ These are fixed keys within their respective modes, not remappable prefix bindin
 ### Sidebar keyboard-focus (`Ctrl-b e`)
 
 `j`/`↓`, `k`/`↑` move · `h`/`←` → Sessions group · `l`/`→` → Agents group · `Enter` select · `Esc`/`q` exit.
+
+### Resume picker (`Ctrl-b R`)
+
+`↑`/`Ctrl-p`, `↓`/`Ctrl-n` move · `Enter` resume (or jump, if that conversation is already open in a pane) · `Ctrl-a` show/hide non-interactive runs · `Ctrl-r` rescan now · `Esc` close · `Backspace` delete filter char · any printable char extends the filter. See [Persistence & Agent Resume](./persistence.md#finding-a-conversation-you-closed-ctrl-b-r).
 
 ### Notification center (`Ctrl-b a`)
 

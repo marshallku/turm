@@ -54,6 +54,31 @@ Set `restore_agent_sessions = false` to always restart agents clean instead.
 
 ---
 
+## Finding a conversation you closed (`Ctrl-b R`)
+
+Persistence covers panes that were *open* when the server stopped. `Ctrl-b R` covers the other case: a conversation whose pane you closed days ago and whose id you no longer have.
+
+Both CLIs keep every transcript on disk, so comux lists them directly — `~/.claude/projects/<cwd>/<id>.jsonl` and `~/.codex/sessions/<date>/rollout-<ts>-<id>.jsonl`:
+
+```
+┌─ resume  (interactive · ^A all · ^R rescan) ────────────────────────────┐
+│ > copad█                                                      26 found │
+│ ▸ ▪ claude comux에 작업 하나 해보자. 지금 claude…      ~/dev/copad · now │
+│   ▪ claude 이거 지금 깃허브에 이슈 올라온 거 있어?   ~/dev/copad · 24m │
+│   ▪ codex  Pressure-test this plan before…            ~/dev/copad · 2d │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Newest first**, labelled with the prompt that opened the conversation, its directory and its age.
+- **Type to filter** — the query matches the prompt, the path and the tool together. Rows containing it verbatim come first, then fzf-style scattered matches.
+- **`Ctrl-a` toggles scope.** By default only conversations you drove *interactively* are listed. Headless runs (`claude -p` / the SDK, `codex exec`, agents driving agents) are hidden — on a machine that automates a lot they outnumber real sessions 25:1. `Ctrl-a` shows them too (the first toggle takes a moment: their titles are read on demand).
+- **`Enter` opens it in a new tab**, running `claude --resume <id>` / `codex resume <id>` in the conversation's own directory. If a space is already working in that directory, comux switches to it first; otherwise the tab lands in the current space. If the directory is gone (a deleted worktree), it opens in the current pane's directory and says so.
+- **A conversation that is already open** in one of this server's panes is marked `●`, and `Enter` jumps to that pane instead of starting a second copy of it.
+
+The scan runs on its own thread — the mux never blocks on it — and is reused for a few seconds, so reopening the picker is instant. `Ctrl-r` forces a fresh read.
+
+---
+
 ## Restarting the server
 
 `comux server restart` is the everyday way to pick up a new binary or clear render drift without losing anything:

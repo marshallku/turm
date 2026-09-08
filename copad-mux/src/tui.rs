@@ -34,6 +34,7 @@ use crate::notify;
 use crate::persist::{self, MAX_LEAVES_PER_TAB, MAX_TOTAL_PANES, PLayout};
 // The `Ctrl-f` switcher and the CLI's fuzzy picker share one filter, so typing the
 // same query narrows both lists identically.
+use crate::agentsessions;
 use crate::picker::fuzzy_match;
 use crate::procinfo;
 use crate::proto::MouseKind;
@@ -315,6 +316,37 @@ struct SidebarFocus {
     sel: usize,
 }
 
+/// The `Ctrl-b R` resume picker: past Claude/Codex conversations found on disk
+/// (`agentsessions`), newest first, fuzzy-filtered.
+struct ResumeState {
+    /// Fuzzy filter typed so far — matched against tool, prompt and path together.
+    filter: String,
+    sel: usize,
+    /// `Ctrl-a`: also list non-interactive runs (`claude -p` / SDK, `codex exec`), which
+    /// are the overwhelming majority and almost never what the user is looking for.
+    all: bool,
+    /// Conversation id → the pane already running it, sampled when the picker opened.
+    /// Selecting a live conversation JUMPS to that pane instead of resuming a second copy.
+    /// Best-effort and local: it only sees this server's panes, so a conversation open in
+    /// another comux server or a bare terminal is invisible here, exactly as it is to a
+    /// hand-typed `claude --resume`.
+    live: HashMap<String, TerminalId>,
+}
+
+/// One rendered row of the resume picker (post-filter).
+#[derive(Clone)]
+struct ResumeRow {
+    tool: agentsessions::Tool,
+    id: String,
+    cwd: Option<PathBuf>,
+    /// The prompt that opened the conversation (may be empty).
+    title: String,
+    /// `3h` / `2d` — how long ago the transcript was last written.
+    age: String,
+    /// The pane already running this conversation, if any.
+    live: Option<TerminalId>,
+}
+
 /// What feeding one key to the app implies for the caller (the server loop).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAction {
@@ -330,6 +362,15 @@ pub enum KeyAction {
 
 /// Height of the always-on bottom status bar (tmux-style).
 const STATUS_H: u16 = 1;
+
+/// How long a completed transcript scan is reused before the resume picker asks for a new
+/// one. Long enough that flipping the `Ctrl-a` scope or reopening the picker right away is
+/// free, short enough that a conversation you just closed shows up.
+const SCAN_TTL: Duration = Duration::from_secs(5);
+
+/// How long an outstanding scan blocks a new one. Past this it is presumed stuck (a stalled
+/// filesystem) and a replacement is allowed; its late result is dropped by request id.
+const SCAN_STUCK: Duration = Duration::from_secs(30);
 
 // Catppuccin Mocha — the owner's tmux status palette (`~/dotfiles/tmux/.tmux.conf`).
 const CAT_BASE: Color = Color::Rgb(0x1e, 0x1e, 0x2e);
@@ -400,6 +441,21 @@ pub struct App {
     notifications: VecDeque<Notification>,
     /// When `Some(sel)`, the notification center (`Ctrl-b a`) is open at row `sel`.
     center: Option<usize>,
+    /// When `Some`, the resume picker (`Ctrl-b R`) is open.
+    resume: Option<ResumeState>,
+    /// Where the detached transcript scanner publishes; read by [`Self::poll_agent_sessions`].
+    sessions: agentsessions::Shared,
+    /// The scan the picker renders. Copied out of `sessions` once per scan so rendering
+    /// never touches the scanner's mutex, and kept across a rescan so reopening the picker
+    /// shows the previous list instead of blanking to "scanning…".
+    sessions_shown: Vec<agentsessions::Entry>,
+    /// Request id of the newest scan asked for, the request id already displayed, whether
+    /// that request covered headless titles, and when it was issued (a reopen within
+    /// [`SCAN_TTL`] reuses the result instead of re-walking two directory trees).
+    scan_req: u64,
+    scan_shown: Option<u64>,
+    scan_deep: bool,
+    scan_at: Option<std::time::Instant>,
     /// Why the most recent pane spawn failed, recorded by [`Self::report_spawn_failure`]
     /// so the control API can report the SAME reason the TUI toasted. The CLI handlers
     /// detect failure by pane count and would otherwise only be able to say "could not
@@ -583,6 +639,13 @@ impl App {
             scroll_pane: None,
             notifications: VecDeque::new(),
             center: None,
+            resume: None,
+            sessions: agentsessions::idle(),
+            sessions_shown: Vec::new(),
+            scan_req: 0,
+            scan_shown: None,
+            scan_deep: false,
+            scan_at: None,
             last_spawn_error: None,
             sock_env,
             client_env,
@@ -1014,12 +1077,24 @@ impl App {
     fn new_tab(&mut self) {
         // Inherit the current pane's cwd into the new tab's shell (tmux-style).
         let cwd = self.focused_cwd();
+        let ws = self.ws.clone();
+        self.new_tab_in(&ws, cwd);
+        // A new tab may make the tab bar appear (1→2 tabs), shrinking the content
+        // height → re-derive the viewport, not just PTY sizes.
+        self.reflow();
+    }
+
+    /// Create a tab in `ws` whose shell starts in `cwd`, returning its terminal. `ws` must be
+    /// the workspace this client is attached to (the lease only authorizes mutations there),
+    /// so a caller targeting another space switches to it first. Rolls the tab back and
+    /// toasts if the PTY can't spawn, so state never holds a tab with no live terminal.
+    fn new_tab_in(&mut self, ws: &WorkspaceId, cwd: Option<PathBuf>) -> Option<TerminalId> {
         let events = match self.state.apply(Command::NewTab {
             origin: Origin::Client(self.client),
-            workspace: self.ws.clone(),
+            workspace: ws.clone(),
         }) {
             Ok(e) => e,
-            Err(_) => return,
+            Err(_) => return None,
         };
         let mut created: Option<(TabId, TerminalId)> = None;
         for e in &events {
@@ -1027,28 +1102,25 @@ impl App {
                 created = Some((tab.clone(), terminal.clone()));
             }
         }
-        if let Some((tab_id, term)) = created {
-            let pane_env = self.pane_env();
-            match PaneTerm::spawn_with_env(self.cols.max(1), self.rows.max(1), None, cwd, &pane_env)
-            {
-                Ok(pt) => {
-                    self.panes.insert(term, pt);
-                }
-                Err(reason) => {
-                    // Spawn failed — close the just-created tab so state never holds a
-                    // tab whose pane has no live terminal (blank render + dropped input).
-                    let _ = self.state.apply(Command::CloseTab {
-                        origin: Origin::Client(self.client),
-                        workspace: self.ws.clone(),
-                        tab: tab_id,
-                    });
-                    self.report_spawn_failure("new tab", &reason);
-                }
+        let (tab_id, term) = created?;
+        let pane_env = self.pane_env();
+        match PaneTerm::spawn_with_env(self.cols.max(1), self.rows.max(1), None, cwd, &pane_env) {
+            Ok(pt) => {
+                self.panes.insert(term.clone(), pt);
+                Some(term)
+            }
+            Err(reason) => {
+                // Spawn failed — close the just-created tab so state never holds a
+                // tab whose pane has no live terminal (blank render + dropped input).
+                let _ = self.state.apply(Command::CloseTab {
+                    origin: Origin::Client(self.client),
+                    workspace: ws.clone(),
+                    tab: tab_id,
+                });
+                self.report_spawn_failure("new tab", &reason);
+                None
             }
         }
-        // A new tab may make the tab bar appear (1→2 tabs), shrinking the content
-        // height → re-derive the viewport, not just PTY sizes.
-        self.reflow();
     }
 
     /// Switch the active tab by `delta` (wrapping): `+1` next, `-1` previous.
@@ -1193,6 +1265,16 @@ impl App {
         self.last_spawn_error = Some(reason.to_string());
         if notify::env_override().unwrap_or(true) {
             notify::desktop(&format!("comux: {what} failed"), reason);
+        }
+    }
+
+    /// Tell the user something about an action they just took, on the same channel and for
+    /// the same reason as [`Self::report_spawn_failure`]: the TUI has no message line, and a
+    /// `notify = false` user still needs feedback for a key they pressed. `COPAD_MUX_NOTIFY=0`
+    /// still hard-disables every toast.
+    fn report_note(&self, title: &str, body: &str) {
+        if notify::env_override().unwrap_or(true) {
+            notify::desktop(title, body);
         }
     }
 
@@ -2153,6 +2235,27 @@ impl App {
             return KeyAction::Continue;
         }
 
+        // The resume picker (`Ctrl-b R`) captures all input while open, for the same
+        // shared-state reason as the switcher above.
+        if self.resume.is_some() {
+            *prefix = false;
+            match k.code {
+                KeyCode::Down => self.resume_move(1),
+                KeyCode::Up => self.resume_move(-1),
+                KeyCode::Char('n') if ctrl => self.resume_move(1),
+                KeyCode::Char('p') if ctrl => self.resume_move(-1),
+                KeyCode::Enter => self.resume_select(),
+                // Ctrl-a, not `a`: every printable char belongs to the filter.
+                KeyCode::Char('a') if ctrl => self.resume_toggle_all(),
+                KeyCode::Char('r') if ctrl => self.resume_rescan(),
+                KeyCode::Esc => self.resume = None,
+                KeyCode::Backspace => self.resume_edit(None),
+                KeyCode::Char(c) if !ctrl => self.resume_edit(Some(c)),
+                _ => {}
+            }
+            return KeyAction::Continue;
+        }
+
         // Scrollback mode (`Ctrl-b [`): keys drive the BOUND pane's history (bound at
         // entry, so a focus change can't strand it). If that pane is gone, drop out.
         if let Some(term) = self.scroll_pane.clone() {
@@ -2266,6 +2369,7 @@ impl App {
             ResizeDown => self.resize_focused(Dir::Down, true),
             ResizeUp => self.resize_focused(Dir::Down, false),
             Popup => self.open_popup(),
+            ResumePicker => self.open_resume(),
             Redraw => return KeyAction::Redraw,
             FocusSidebar => self.open_sidebar_focus(),
             EnterPrefix => {} // handled by the caller (arms the prefix)
@@ -2991,6 +3095,301 @@ impl App {
         self.open_rename_prompt();
     }
 
+    // --- resume picker (Ctrl-b R) ---
+
+    /// Open the resume picker and ask for a scan. The list renders from the previous scan
+    /// (if any) while the new one runs, so reopening never blanks to "scanning…".
+    fn open_resume(&mut self) {
+        let live = self.live_agent_sessions();
+        self.resume = Some(ResumeState {
+            filter: String::new(),
+            sel: 0,
+            all: false,
+            live,
+        });
+        self.request_scan(false, false);
+    }
+
+    /// Ask the detached scanner for a fresh transcript listing.
+    ///
+    /// `deep` also reads titles for headless transcripts (only the `Ctrl-a` view shows
+    /// them, and they cost most of the scan). `force` bypasses the freshness reuse — a
+    /// completed scan younger than [`SCAN_TTL`] that already covers what we need is reused
+    /// so flipping the scope back and forth doesn't re-walk two directory trees.
+    fn request_scan(&mut self, deep: bool, force: bool) {
+        // Already scanning: adding another thread would just put two 256 MB reads in each
+        // other's way (`Ctrl-r` held down, or a scope flip mid-scan). The outstanding one is
+        // abandoned only if it looks stuck.
+        let outstanding = self.scan_shown != Some(self.scan_req);
+        if outstanding && self.scan_at.is_some_and(|t| t.elapsed() < SCAN_STUCK) {
+            return;
+        }
+        let covered = self.scan_deep || !deep;
+        let fresh = self.scan_at.is_some_and(|t| t.elapsed() < SCAN_TTL);
+        if !force && fresh && covered {
+            return;
+        }
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        self.scan_req += 1;
+        self.scan_deep = deep;
+        self.scan_at = Some(std::time::Instant::now());
+        agentsessions::spawn_scan(self.sessions.clone(), self.scan_req, home, deep);
+    }
+
+    /// Adopt a completed scan that matches the newest request. Returns whether the picker
+    /// needs a repaint. Called from the server loop, never from the key path — the scan
+    /// itself runs on its own thread and may take a second.
+    pub fn poll_agent_sessions(&mut self) -> bool {
+        if self.resume.is_none() {
+            return false;
+        }
+        let Some(scan) = self.sessions.lock().ok().and_then(|g| g.as_ref().cloned()) else {
+            return false;
+        };
+        // Not what we asked for (a stale scan), or already on screen.
+        if scan.req != self.scan_req || self.scan_shown == Some(scan.req) {
+            return false;
+        }
+        self.sessions_shown = scan.entries;
+        self.scan_shown = Some(scan.req);
+        self.clamp_resume();
+        true
+    }
+
+    /// `Ctrl-a`: include non-interactive runs. Their titles are only read by a deep scan,
+    /// so entering the "all" view asks for one (the rows appear immediately regardless).
+    fn resume_toggle_all(&mut self) {
+        let Some(st) = &mut self.resume else { return };
+        st.all = !st.all;
+        st.sel = 0;
+        let deep = st.all;
+        if deep {
+            self.request_scan(true, false);
+        }
+    }
+
+    /// `Ctrl-r`: re-read the transcript directories now (a conversation that ended while
+    /// the picker was open is otherwise missing until the freshness window expires).
+    fn resume_rescan(&mut self) {
+        let deep = self.resume.as_ref().is_some_and(|st| st.all);
+        let live = self.live_agent_sessions();
+        if let Some(st) = &mut self.resume {
+            st.live = live;
+        }
+        self.request_scan(deep, true);
+    }
+
+    /// Edit the fuzzy filter: `Some(c)` appends, `None` backspaces. Resets the selection.
+    fn resume_edit(&mut self, c: Option<char>) {
+        if let Some(st) = &mut self.resume {
+            match c {
+                Some(c) => st.filter.push(c),
+                None => {
+                    st.filter.pop();
+                }
+            }
+            st.sel = 0;
+        }
+    }
+
+    /// Move the selection by `delta`, wrapping over the filtered rows.
+    fn resume_move(&mut self, delta: i32) {
+        let n = self
+            .resume
+            .as_ref()
+            .map(|st| self.resume_rows(st).len())
+            .unwrap_or(0) as i32;
+        if n == 0 {
+            return;
+        }
+        if let Some(st) = &mut self.resume {
+            st.sel = (st.sel as i32 + delta).rem_euclid(n) as usize;
+        }
+    }
+
+    /// Keep the selection in range after the row set changes under it (a scan landing).
+    fn clamp_resume(&mut self) {
+        let n = self
+            .resume
+            .as_ref()
+            .map(|st| self.resume_rows(st).len())
+            .unwrap_or(0);
+        if let Some(st) = &mut self.resume {
+            st.sel = if n == 0 { 0 } else { st.sel.min(n - 1) };
+        }
+    }
+
+    /// The rows to show: scan entries in recency order, hidden headless runs dropped unless
+    /// `all`, fuzzy-filtered over tool + prompt + path together (so `copad codex` narrows by
+    /// project AND tool).
+    fn resume_rows(&self, st: &ResumeState) -> Vec<ResumeRow> {
+        let now = std::time::SystemTime::now();
+        // Two tiers: rows whose text CONTAINS the query verbatim, then rows it merely
+        // scatters through. A subsequence match over a whole prompt plus a path hits almost
+        // everything (typing `copad` matched 26 of 61 rows), so without the split a typed
+        // word buries its own hits under coincidences. Recency order holds within each tier.
+        let mut exact = Vec::new();
+        let mut fuzzy = Vec::new();
+        for e in self.sessions_shown.iter().filter(|e| st.all || !e.headless) {
+            let path = e.cwd.as_deref().map(home_short).unwrap_or_default();
+            let Some(rank) =
+                resume_rank(&st.filter, &format!("{} {} {path}", e.tool.bin(), e.title))
+            else {
+                continue;
+            };
+            let secs = now
+                .duration_since(e.mtime)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let row = ResumeRow {
+                tool: e.tool,
+                id: e.id.clone(),
+                cwd: e.cwd.clone(),
+                title: e.title.clone(),
+                age: agentsessions::fmt_age(secs),
+                live: st.live.get(&e.id).cloned(),
+            };
+            if rank == 0 {
+                exact.push(row)
+            } else {
+                fuzzy.push(row)
+            }
+        }
+        exact.extend(fuzzy);
+        exact
+    }
+
+    /// Conversation id → the pane running it, for every agent pane this server knows about.
+    /// Sampled when the picker opens (each lookup reads the agent's own state file).
+    fn live_agent_sessions(&self) -> HashMap<String, TerminalId> {
+        let mut out = HashMap::new();
+        for (tid, label) in &self.labels {
+            if label.kind != procinfo::Kind::Agent {
+                continue;
+            }
+            if let Some(id) = agentstate::agent_session_id(&label.text, label.pid) {
+                out.insert(id, tid.clone());
+            }
+        }
+        out
+    }
+
+    /// Act on the selected row: jump to the pane already running that conversation, else
+    /// open it in a new tab. An empty selection (over-narrow filter) keeps the picker open.
+    fn resume_select(&mut self) {
+        let Some(row) = self
+            .resume
+            .as_ref()
+            .and_then(|st| self.resume_rows(st).get(st.sel).cloned())
+        else {
+            return;
+        };
+        self.resume = None;
+        match row.live.clone() {
+            Some(term) => self.jump_to_terminal(&term),
+            None => self.open_resumed(row),
+        }
+    }
+
+    /// Open `row`'s conversation in a new tab: in the space already working in that
+    /// directory when there is one, else in the current space.
+    ///
+    /// The space switch happens BEFORE the tab is created (a client may only mutate the
+    /// workspace it is attached to) and is undone if the pane fails to spawn, so a failed
+    /// resume leaves the user exactly where they were.
+    fn open_resumed(&mut self, row: ResumeRow) {
+        let argv = agentsessions::resume_argv(row.tool, &row.id);
+        let Some(line) = build_command_line(&argv) else {
+            return;
+        };
+        // A recorded cwd that no longer exists (deleted worktree) would fail the spawn, so
+        // fall back to the focused pane's directory rather than refusing to resume at all.
+        let gone = row.cwd.as_ref().is_some_and(|c| !c.is_dir());
+        let cwd = row
+            .cwd
+            .clone()
+            .filter(|c| c.is_dir())
+            .or_else(|| self.focused_cwd());
+        let prev = self.ws.clone();
+        let target = self.resume_target_space(cwd.as_deref());
+        self.switch_session(target.clone());
+        match self.new_tab_in(&target, cwd.clone()) {
+            Some(term) => {
+                if let Some(pt) = self.panes.get(&term) {
+                    pt.input(format!("{line}\n").as_bytes());
+                }
+                if gone {
+                    let where_ = cwd
+                        .as_ref()
+                        .map(|c| c.display().to_string())
+                        .unwrap_or_else(|| "the default directory".into());
+                    self.report_note(
+                        "comux: resumed elsewhere",
+                        &format!("recorded directory is gone — opened in {where_}"),
+                    );
+                }
+            }
+            None => self.switch_session(prev),
+        }
+        self.reflow();
+    }
+
+    /// The space to resume into: the one already working in `cwd`. Scored so the CLOSEST
+    /// relationship wins — an exact cwd match first, then the deepest space containing
+    /// `cwd`, then the shallowest space nested inside it (a repo-root conversation should
+    /// find the space sitting in `repo/src`). Ties prefer the current space, so a resume
+    /// never moves the user for no reason. No relationship at all → the current space.
+    fn resume_target_space(&self, cwd: Option<&std::path::Path>) -> WorkspaceId {
+        let Some(cwd) = cwd else {
+            return self.ws.clone();
+        };
+        let target = crate::worktree::canonical_or_lexical(cwd);
+        let mut best: Option<((u8, usize), WorkspaceId)> = None;
+        for wid in self.session_ids() {
+            for pane_cwd in self.session_cwds(&wid) {
+                let Some(score) =
+                    cwd_affinity(&crate::worktree::canonical_or_lexical(&pane_cwd), &target)
+                else {
+                    continue;
+                };
+                let better = match &best {
+                    None => true,
+                    // On a tie, keep the user where they are rather than moving them.
+                    Some((s, w)) => score > *s || (score == *s && wid == self.ws && w != &self.ws),
+                };
+                if better {
+                    best = Some((score, wid.clone()));
+                }
+            }
+        }
+        best.map(|(_, w)| w).unwrap_or_else(|| self.ws.clone())
+    }
+
+    /// Every pane cwd in `wid` — the live `process_cwd`, falling back to the recorded
+    /// spawn cwd when the process read fails (same fallback as the worktree lookup).
+    fn session_cwds(&self, wid: &WorkspaceId) -> Vec<PathBuf> {
+        let Some(w) = self.state.workspace(wid) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for t in &w.tabs {
+            for p in t.layout.panes() {
+                if let Some(tid) = t.layout.terminal_of(&p)
+                    && let Some(pane) = self.panes.get(tid)
+                    && let Some(cwd) = pane
+                        .pid()
+                        .and_then(procinfo::process_cwd)
+                        .or_else(|| pane.spawn_cwd().cloned())
+                {
+                    out.push(cwd);
+                }
+            }
+        }
+        out
+    }
+
     // --- sidebar keyboard focus (Ctrl-b e) ---
 
     /// Focus the sidebar for keyboard nav, revealing it if hidden. Falls back to the
@@ -3374,6 +3773,9 @@ impl App {
         if self.center.is_some() {
             self.render_center(buf);
         }
+        if self.resume.is_some() {
+            self.render_resume(buf);
+        }
         if self.prompt.is_some() {
             self.render_prompt(buf);
         }
@@ -3388,6 +3790,7 @@ impl App {
         if self.popup.is_none()
             && self.scroll_pane.is_none()
             && self.center.is_none()
+            && self.resume.is_none()
             && self.prompt.is_none()
             && self.confirm.is_none()
             && self.menu.is_none()
@@ -5061,6 +5464,176 @@ impl App {
 
     /// The notification center (`Ctrl-b a`): a centered box listing logged agent-turn
     /// events, newest first — Enter jumps to the source pane, `d` dismisses.
+    /// The resume picker (`Ctrl-b R`): a centered box listing past Claude/Codex
+    /// conversations, newest first, with the fuzzy filter on top. Wider than the `Ctrl-f`
+    /// switcher because each row carries a prompt AND a path.
+    fn render_resume(&self, buf: &mut Buffer) {
+        let Some(st) = self.resume.as_ref() else {
+            return;
+        };
+        let area = buf.area;
+        let rows_data = self.resume_rows(st);
+
+        let maxw = area.width.saturating_sub(2).max(1);
+        let w = ((area.width as u32 * 4 / 5) as u16).clamp(30.min(maxw), maxw);
+        let maxh = area.height.saturating_sub(2).max(1);
+        let h = ((area.height as u32 * 3 / 4) as u16).clamp(6.min(maxh), maxh);
+        let x0 = (area.width.saturating_sub(w)) / 2;
+        let y0 = (area.height.saturating_sub(h)) / 2;
+        let bg = Color::Reset;
+        let border = Style::default().fg(CAT_MAUVE).bg(bg);
+
+        for y in y0..(y0 + h).min(area.height) {
+            for x in x0..(x0 + w).min(area.width) {
+                let sym = if y == y0 && x == x0 {
+                    "┌"
+                } else if y == y0 && x == x0 + w - 1 {
+                    "┐"
+                } else if y == y0 + h - 1 && x == x0 {
+                    "└"
+                } else if y == y0 + h - 1 && x == x0 + w - 1 {
+                    "┘"
+                } else if y == y0 || y == y0 + h - 1 {
+                    "─"
+                } else if x == x0 || x == x0 + w - 1 {
+                    "│"
+                } else {
+                    " "
+                };
+                if let Some(bc) = buf.cell_mut(Position::new(x, y)) {
+                    bc.set_symbol(sym);
+                    bc.set_skip(false);
+                    let edge = y == y0 || y == y0 + h - 1 || x == x0 || x == x0 + w - 1;
+                    bc.set_style(if edge {
+                        border
+                    } else {
+                        Style::default().bg(bg)
+                    });
+                }
+            }
+        }
+
+        // Display-width-aware writer (a Korean prompt is 2 columns per char): advances `x`
+        // and blanks the trailing cell of a wide glyph so the client's diff stays in step.
+        let right_edge = x0 + w - 1;
+        let put = |buf: &mut Buffer, x: &mut u16, y: u16, s: &str, style: Style| {
+            for ch in s.chars() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                if cw == 0 || *x + cw > right_edge {
+                    continue;
+                }
+                if let Some(bc) = buf.cell_mut(Position::new(*x, y)) {
+                    let mut sb = [0u8; 4];
+                    bc.set_symbol(ch.encode_utf8(&mut sb));
+                    bc.set_skip(false);
+                    bc.set_style(style);
+                }
+                if cw == 2
+                    && let Some(bc) = buf.cell_mut(Position::new(*x + 1, y))
+                {
+                    bc.set_symbol(" ");
+                    bc.set_skip(true);
+                    bc.set_style(style);
+                }
+                *x += cw;
+            }
+        };
+
+        let mut tx = x0 + 2;
+        put(
+            buf,
+            &mut tx,
+            y0,
+            &format!(
+                " resume  ({} · ^A {} · ^R rescan) ",
+                if st.all { "all" } else { "interactive" },
+                if st.all { "interactive" } else { "all" }
+            ),
+            Style::default()
+                .fg(CAT_MAUVE)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        );
+
+        let inner_x = x0 + 2;
+        let inner_w = w.saturating_sub(4) as usize;
+
+        // Row 1: the fuzzy filter with a block cursor, and the match count on the right.
+        let mut fx = inner_x;
+        put(
+            buf,
+            &mut fx,
+            y0 + 1,
+            &clip_width(&format!("> {}█", st.filter), inner_w.saturating_sub(10)),
+            Style::default().fg(CAT_TEXT).bg(bg),
+        );
+        let count = format!("{} found", rows_data.len());
+        let mut cx = inner_x + (inner_w.saturating_sub(count.width())) as u16;
+        put(
+            buf,
+            &mut cx,
+            y0 + 1,
+            &count,
+            Style::default().fg(CAT_OVERLAY).bg(bg),
+        );
+
+        let list_top = y0 + 2;
+        let visible = (h.saturating_sub(3)) as usize; // two header rows + bottom border
+        if rows_data.is_empty() {
+            let msg = if self.sessions_shown.is_empty() && self.scan_shown.is_none() {
+                "  scanning ~/.claude and ~/.codex…"
+            } else if self.sessions_shown.is_empty() {
+                "  no Claude or Codex transcripts found"
+            } else {
+                "  (no match)"
+            };
+            let mut mx = inner_x;
+            put(
+                buf,
+                &mut mx,
+                list_top,
+                msg,
+                Style::default().fg(CAT_OVERLAY).bg(bg),
+            );
+            return;
+        }
+
+        let start = if st.sel >= visible {
+            st.sel + 1 - visible
+        } else {
+            0
+        };
+        for (i, row) in rows_data.iter().enumerate().skip(start).take(visible) {
+            let y = list_top + (i - start) as u16;
+            let selected = i == st.sel;
+            // Right side first: it is fixed-size, and the prompt gets whatever is left.
+            let path = row.cwd.as_deref().map(home_short).unwrap_or_default();
+            let right = format!("{path} · {}", row.age);
+            let glyph = if row.live.is_some() { "●" } else { "▪" };
+            let arrow = if selected { "▸" } else { " " };
+            let head = format!("{arrow} {glyph} {:<6} ", row.tool.bin());
+            let title = if row.title.is_empty() {
+                "(no prompt recorded)"
+            } else {
+                &row.title
+            };
+            let line = resume_line(&head, title, &right, inner_w);
+
+            let st_row = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(CAT_MAUVE)
+                    .add_modifier(Modifier::BOLD)
+            } else if row.live.is_some() {
+                Style::default().fg(CAT_GREEN).bg(bg)
+            } else {
+                Style::default().fg(CAT_TEXT).bg(bg)
+            };
+            let mut x = inner_x;
+            put(buf, &mut x, y, &line, st_row);
+        }
+    }
+
     /// Draw the inline single-line prompt (new-session name / rename) as a small
     /// centered box with the typed text + a block cursor. Clamps on tiny terminals.
     fn render_prompt(&self, buf: &mut Buffer) {
@@ -5454,6 +6027,90 @@ fn divider_touches(fr: &PaneRect, x: u16, y: u16) -> bool {
 /// Truncate a tab-chip label on DISPLAY width (max 12 cells; `comm` is already ≤15 on
 /// Linux but a long process or custom name still shouldn't dominate the bar), adding an
 /// ellipsis when clipped. Width-aware so CJK/emoji names truncate cleanly.
+/// `/Users/me/dev/copad` → `~/dev/copad`, so a row spends its width on the part that
+/// distinguishes it. Left alone when it isn't under `$HOME`.
+fn home_short(path: &std::path::Path) -> String {
+    home_short_in(path, std::env::var_os("HOME").map(PathBuf::from).as_deref())
+}
+
+/// [`home_short`] with `$HOME` passed in, so it can be asserted without mutating the process
+/// environment (which a parallel test run shares).
+fn home_short_in(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    match home.map(|h| path.strip_prefix(h)) {
+        Some(Ok(rest)) if rest.as_os_str().is_empty() => "~".into(),
+        Some(Ok(rest)) => format!("~/{}", rest.display()),
+        _ => path.display().to_string(),
+    }
+}
+
+/// Truncate `s` to at most `max` DISPLAY columns (`…` marks the cut), so a CJK prompt in a
+/// picker row can't overrun its box the way a char count would.
+fn clip_width(s: &str, max: usize) -> String {
+    if s.width() <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cw + 1 > max {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// How closely a space's pane directory `pane` relates to `target`, the directory a
+/// conversation ran in. Higher is better; `None` = unrelated.
+///
+/// Both containment directions count, because either can be the space the user thinks of as
+/// "that project": a `/repo` conversation should find a space sitting in `/repo/src`, and a
+/// `/repo/src` conversation should find a space sitting at `/repo`. Among containing spaces
+/// the DEEPEST wins (closest to the conversation); among nested ones the SHALLOWEST does
+/// (`/repo` beats `/repo/a/b/c` for a `/repo` conversation).
+/// How well the resume picker's filter matches one row's text: `Some(0)` = the query appears
+/// verbatim, `Some(1)` = its chars appear in order (fzf-style), `None` = no match. An empty
+/// query matches everything at the top tier. Case-insensitive for ASCII, like `fuzzy_match`.
+fn resume_rank(query: &str, hay: &str) -> Option<u8> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    if hay
+        .to_ascii_lowercase()
+        .contains(&query.to_ascii_lowercase())
+    {
+        return Some(0);
+    }
+    fuzzy_match(query, hay).then_some(1)
+}
+
+/// One picker row as a single padded line: `head` + as much of `title` as fits, then `right`
+/// pushed to the far edge. Padded to exactly `inner_w` display columns so the selection
+/// highlight covers the row, and never wider than that even with CJK text.
+fn resume_line(head: &str, title: &str, right: &str, inner_w: usize) -> String {
+    let right = clip_width(right, inner_w / 2);
+    let avail = inner_w.saturating_sub(head.width() + right.width() + 2);
+    let left = format!("{head}{}", clip_width(title, avail));
+    let pad = inner_w.saturating_sub(left.width() + right.width());
+    format!("{left}{}{right}", " ".repeat(pad))
+}
+
+fn cwd_affinity(pane: &std::path::Path, target: &std::path::Path) -> Option<(u8, usize)> {
+    let depth = pane.components().count();
+    if pane == target {
+        Some((3, usize::MAX))
+    } else if target.starts_with(pane) {
+        Some((2, depth))
+    } else if pane.starts_with(target) {
+        Some((1, usize::MAX - depth))
+    } else {
+        None
+    }
+}
+
 fn clip_chip(name: &str) -> String {
     const MAX: usize = 12;
     if name.width() <= MAX {
@@ -6186,11 +6843,11 @@ fn key_to_bytes(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
 mod tests {
     use super::{
         AgentItem, AgentRow, AgentState, CAT_GREEN, CAT_RED, CAT_YELLOW, Menu, MenuAction,
-        agent_items, agents_span_spaces, band_rows, build_command_line,
-        detect_alt_screen_transition, extract_selection, filter_env, fmt_elapsed,
-        list_window_start, menu_origin, merge_env, merge_labels, reload_note, sel_bounds, sel_cols,
-        shell_quote, split_sidebar, status_since, tab_window, usage_should_roll,
-        usage_threshold_color, window_max_start, window_start_var, wrap_page,
+        agent_items, agents_span_spaces, band_rows, build_command_line, clip_width, cwd_affinity,
+        detect_alt_screen_transition, extract_selection, filter_env, fmt_elapsed, home_short_in,
+        list_window_start, menu_origin, merge_env, merge_labels, reload_note, resume_line,
+        resume_rank, sel_bounds, sel_cols, shell_quote, split_sidebar, status_since, tab_window,
+        usage_should_roll, usage_threshold_color, window_max_start, window_start_var, wrap_page,
     };
     use crate::model::{TerminalId, WorkspaceId};
     use crate::procinfo::{Kind, Label};
@@ -6514,6 +7171,82 @@ mod tests {
                 ("SSH_CONNECTION", "1.2.3.4"),
             ])
         );
+    }
+
+    #[test]
+    fn resume_rank_puts_verbatim_matches_ahead_of_scattered_ones() {
+        assert_eq!(resume_rank("", "anything"), Some(0));
+        assert_eq!(resume_rank("copad", "claude fix it ~/dev/copad"), Some(0));
+        assert_eq!(resume_rank("COPAD", "~/dev/copad"), Some(0));
+        // Every char in order but not contiguous — a match, but a worse one. This is the
+        // coincidence that used to outrank real hits by sitting higher in recency order.
+        assert_eq!(resume_rank("copad", "claude open a pad ~/dev/x"), Some(1));
+        assert_eq!(resume_rank("copad", "claude 확인해봐 ~/dev/manifest"), None);
+        assert_eq!(resume_rank("zzq", "claude ~/dev/copad"), None);
+    }
+
+    #[test]
+    fn resume_line_fills_exactly_the_row_width() {
+        use unicode_width::UnicodeWidthStr;
+        let head = " ▪ claude ";
+        // A CJK title is 2 columns per char and must not push the row past its box.
+        let line = resume_line(head, &"세션".repeat(40), "~/dev/copad · 3h", 60);
+        assert_eq!(line.width(), 60);
+        // A short row is padded (so the selection highlight covers it) with the right-hand
+        // detail flush to the edge.
+        let line = resume_line(head, "fix it", "~/x · 2d", 60);
+        assert_eq!(line.width(), 60);
+        assert!(line.ends_with("~/x · 2d"));
+        assert!(line.starts_with(" ▪ claude fix it"));
+    }
+
+    #[test]
+    fn cwd_affinity_prefers_the_closest_space_in_either_direction() {
+        use std::path::Path;
+        let target = Path::new("/u/dev/copad");
+        // Exact match beats everything.
+        assert!(
+            cwd_affinity(Path::new("/u/dev/copad"), target)
+                > cwd_affinity(Path::new("/u/dev"), target)
+        );
+        // A space CONTAINING the conversation beats one nested inside it...
+        assert!(
+            cwd_affinity(Path::new("/u/dev"), target)
+                > cwd_affinity(Path::new("/u/dev/copad/copad-mux"), target)
+        );
+        // ...and among containing spaces the deepest (closest) one wins.
+        assert!(cwd_affinity(Path::new("/u/dev"), target) > cwd_affinity(Path::new("/u"), target));
+        // Among nested spaces the shallowest (closest) one wins.
+        assert!(
+            cwd_affinity(Path::new("/u/dev/copad/copad-mux"), target)
+                > cwd_affinity(Path::new("/u/dev/copad/copad-mux/src"), target)
+        );
+        // Unrelated trees never match, and a sibling with a shared prefix is not a parent.
+        assert_eq!(cwd_affinity(Path::new("/other"), target), None);
+        assert_eq!(cwd_affinity(Path::new("/u/dev/copad-mux"), target), None);
+    }
+
+    #[test]
+    fn clip_width_counts_display_columns() {
+        // Korean is 2 columns per char: 4 chars = 8 columns, so 6 columns keeps 2 + `…`.
+        assert_eq!(clip_width("세션목록", 8), "세션목록");
+        assert_eq!(clip_width("세션목록", 6), "세션…");
+        assert_eq!(clip_width("abcdef", 6), "abcdef");
+        assert_eq!(clip_width("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn home_short_only_rewrites_inside_home() {
+        use std::path::Path;
+        let home = Some(Path::new("/u/me"));
+        assert_eq!(
+            home_short_in(Path::new("/u/me/dev/copad"), home),
+            "~/dev/copad"
+        );
+        assert_eq!(home_short_in(Path::new("/u/me"), home), "~");
+        assert_eq!(home_short_in(Path::new("/opt/x"), home), "/opt/x");
+        // No HOME at all → the path is shown as-is rather than mangled.
+        assert_eq!(home_short_in(Path::new("/u/me/x"), None), "/u/me/x");
     }
 
     #[test]
