@@ -57,9 +57,21 @@ pub enum PaneContent {
         cwd: Option<String>,
     },
     Webview {
-        /// An explicitly approved canonical (origin-only) URL — never the live
-        /// URL (creds / OAuth codes / signed URLs).
+        /// The pane's URL under the active `[browser] restore` policy. Under the
+        /// default `origin` policy this is the canonical origin only — never the
+        /// live URL (creds / OAuth codes / signed URLs). Under the opt-in `url` /
+        /// `full` policies it carries more; see `browser::restore`.
         url: String,
+        /// Full browser state for this pane: tab list, active index, profile.
+        /// Additive and `#[serde(default)]`, so v3 files written before the
+        /// Browser Workbench keep loading and `SESSION_VERSION` does not move.
+        ///
+        /// **Downgrade is lossy but never corrupt** (codex plan r2-I4): an older
+        /// binary round-trips the file and drops this field, degrading the pane
+        /// to today's single-URL restore. That is the accepted behaviour — the
+        /// alternative (a version bump) would wipe every user's whole layout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane: Option<crate::browser::BrowserPaneSnap>,
     },
     Plugin {
         name: String,
@@ -214,6 +226,7 @@ mod tests {
         SplitSnap::Leaf {
             content: PaneContent::Webview {
                 url: url.to_string(),
+                pane: None,
             },
         }
     }
@@ -352,5 +365,111 @@ mod tests {
         let json = serde_json::to_string_pretty(&s).unwrap();
         let back = parse_session(&json).expect("our own output parses back");
         assert_eq!(s, back);
+    }
+
+    // ---- Browser Workbench: the additive `pane` field (plan B1) ----
+
+    #[test]
+    fn a_pre_workbench_v3_webview_pane_still_loads() {
+        // The whole reason `pane` is `#[serde(default)]` rather than a version
+        // bump: every existing user's layout file lacks the field.
+        let raw = r#"{
+            "version": 3,
+            "current_tab": 0,
+            "tabs": [{ "root": {
+                "type": "leaf",
+                "content": { "kind": "webview", "url": "https://github.com" }
+            }}]
+        }"#;
+        let s = parse_session(raw).expect("legacy v3 webview pane must still load");
+        let SplitSnap::Leaf { content } = &s.tabs[0].root else {
+            panic!("expected a leaf");
+        };
+        assert_eq!(
+            content,
+            &PaneContent::Webview {
+                url: "https://github.com".into(),
+                pane: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_pane_without_browser_state_serializes_exactly_as_before() {
+        // `skip_serializing_if` keeps the on-disk shape byte-identical for
+        // users who never open a second browser tab, so an older binary reading
+        // the file sees nothing new at all.
+        let json = serde_json::to_string(&PaneContent::Webview {
+            url: "https://e.com".into(),
+            pane: None,
+        })
+        .unwrap();
+        assert!(!json.contains("pane"), "{json}");
+    }
+
+    #[test]
+    fn browser_tabs_round_trip_through_a_session_document() {
+        use crate::browser::{BrowserPaneSnap, BrowserTabSnap};
+
+        let pane = BrowserPaneSnap {
+            tabs: vec![
+                BrowserTabSnap::new("tab-a", "https://github.com/o/r/pull/42"),
+                BrowserTabSnap::new("tab-b", "https://example.com"),
+            ],
+            active: 1,
+            profile: "default".into(),
+        };
+        let session = Session {
+            version: SESSION_VERSION,
+            current_tab: 0,
+            tabs: vec![TabSnap {
+                custom_title: None,
+                root: SplitSnap::Leaf {
+                    content: PaneContent::Webview {
+                        url: "https://github.com/o/r/pull/42".into(),
+                        pane: Some(pane),
+                    },
+                },
+            }],
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        assert_eq!(parse_session(&json).expect("round-trips"), session);
+    }
+
+    #[test]
+    fn an_older_binary_downgrades_a_browser_pane_lossily_but_not_corruptly() {
+        // codex plan r2-I4. Simulate the old binary by parsing into a shape that
+        // has no `pane` field and re-serializing: the layout survives, the tab
+        // list is dropped, and nothing about the document becomes invalid.
+        use crate::browser::{BrowserPaneSnap, BrowserTabSnap};
+
+        let with_tabs = PaneContent::Webview {
+            url: "https://github.com".into(),
+            pane: Some(BrowserPaneSnap {
+                tabs: vec![BrowserTabSnap::new("tab-a", "https://github.com")],
+                active: 0,
+                profile: "default".into(),
+            }),
+        };
+        let json = serde_json::to_string(&with_tabs).unwrap();
+
+        // An old binary's view of the same variant.
+        #[derive(serde::Serialize, serde::Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum OldPaneContent {
+            Webview { url: String },
+        }
+        let old: OldPaneContent = serde_json::from_str(&json).expect("old binary still parses");
+        let rewritten = serde_json::to_string(&old).unwrap();
+
+        // Re-read with the current model: valid, and degraded to a single URL.
+        let back: PaneContent = serde_json::from_str(&rewritten).unwrap();
+        assert_eq!(
+            back,
+            PaneContent::Webview {
+                url: "https://github.com".into(),
+                pane: None,
+            }
+        );
     }
 }

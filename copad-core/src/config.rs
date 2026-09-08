@@ -353,6 +353,76 @@ impl KeybindingsConfig {
     }
 }
 
+fn default_restore_policy() -> String {
+    "origin".to_string()
+}
+
+fn default_secret_confirm() -> String {
+    "once".to_string()
+}
+
+/// `[browser]` — the webview panes' behaviour. See
+/// `docs/browser-workbench-plan.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserConfig {
+    /// How much of a live URL may be persisted: `origin` (default) | `url` |
+    /// `full`. **`url` and `full` are sensitive persistence** — the token
+    /// denylist cannot save a `/reset/<token>` path, and mode 0600 is no
+    /// defence against an agent running as the same user. See
+    /// `browser::restore::RestorePolicy`.
+    #[serde(default = "default_restore_policy")]
+    pub restore: String,
+    /// Profile whose data store new browser panes use. `default` maps onto the
+    /// platform's PRE-EXISTING default store; any other name starts logged out
+    /// (see `browser::profile`).
+    #[serde(default = "default_profile")]
+    pub profile: String,
+    /// `once` (default) = confirm a credential fill once per (origin,
+    /// credential) per app run; `always` = every time.
+    #[serde(default = "default_secret_confirm")]
+    pub secret_confirm: String,
+    /// Capture request/response bodies in the network log. Off by default —
+    /// bodies are the most likely place for a secret to end up in a file the
+    /// agent can read.
+    #[serde(default)]
+    pub capture_bodies: bool,
+}
+
+fn default_profile() -> String {
+    crate::browser::DEFAULT_PROFILE.to_string()
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            restore: default_restore_policy(),
+            profile: default_profile(),
+            secret_confirm: default_secret_confirm(),
+            capture_bodies: false,
+        }
+    }
+}
+
+impl BrowserConfig {
+    /// Parse `restore`, falling back to the safe default on an unknown value
+    /// rather than failing the whole config load — a typo must never silently
+    /// escalate what reaches disk, and must never brick startup either.
+    pub fn restore_policy(&self) -> crate::browser::RestorePolicy {
+        crate::browser::RestorePolicy::parse(&self.restore).unwrap_or_default()
+    }
+
+    pub fn confirm_every_fill(&self) -> bool {
+        self.secret_confirm.eq_ignore_ascii_case("always")
+    }
+
+    pub fn log_caps(&self) -> crate::browser::LogCaps {
+        crate::browser::LogCaps {
+            capture_bodies: self.capture_bodies,
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CopadConfig {
     #[serde(default)]
@@ -372,6 +442,9 @@ pub struct CopadConfig {
 
     #[serde(default)]
     pub statusbar: StatusBarConfig,
+
+    #[serde(default)]
+    pub browser: BrowserConfig,
 
     #[serde(default)]
     pub keybindings: KeybindingsConfig,
@@ -820,5 +893,50 @@ subpath = "apps/web"
         );
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
+    }
+
+    // ---- [browser] ----
+
+    #[test]
+    fn browser_defaults_to_the_safe_restore_policy_and_the_platform_default_profile() {
+        let c = BrowserConfig::default();
+        assert_eq!(c.restore_policy(), crate::browser::RestorePolicy::Origin);
+        assert_eq!(c.profile, crate::browser::DEFAULT_PROFILE);
+        assert!(!c.capture_bodies);
+        assert!(!c.confirm_every_fill());
+    }
+
+    #[test]
+    fn an_absent_browser_section_still_yields_the_safe_defaults() {
+        let c: CopadConfig = toml::from_str("[terminal]\n").unwrap();
+        assert_eq!(
+            c.browser.restore_policy(),
+            crate::browser::RestorePolicy::Origin
+        );
+    }
+
+    #[test]
+    fn a_typo_in_restore_falls_back_to_origin_rather_than_escalating() {
+        // A misspelled policy must never silently widen what reaches disk, and
+        // must never brick startup either.
+        let c: CopadConfig = toml::from_str("[browser]\nrestore = \"ful\"\n").unwrap();
+        assert_eq!(
+            c.browser.restore_policy(),
+            crate::browser::RestorePolicy::Origin
+        );
+    }
+
+    #[test]
+    fn opting_into_full_restore_is_honoured() {
+        let c: CopadConfig = toml::from_str(
+            "[browser]\nrestore = \"full\"\ncapture_bodies = true\nsecret_confirm = \"always\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.browser.restore_policy(),
+            crate::browser::RestorePolicy::Full
+        );
+        assert!(c.browser.log_caps().capture_bodies);
+        assert!(c.browser.confirm_every_fill());
     }
 }
