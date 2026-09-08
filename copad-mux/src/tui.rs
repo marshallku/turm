@@ -1161,20 +1161,21 @@ impl App {
         let Some(active) = self.active_tab_id() else {
             return;
         };
-        self.close_tab(&self.ws.clone(), active);
+        let _ = self.close_tab(&self.ws.clone(), active);
     }
 
     /// Close a specific tab of `ws` (context menu can target a non-active one) and reap
-    /// its shells. Rejected when it is the workspace's last tab.
-    fn close_tab(&mut self, ws: &WorkspaceId, tab: TabId) {
-        let events = match self.state.apply(Command::CloseTab {
+    /// its shells. Rejected when it is the workspace's last tab — the key/menu callers
+    /// discard that `Err` (nothing to say), while the control API turns it into the
+    /// response's error string.
+    fn close_tab(&mut self, ws: &WorkspaceId, tab: TabId) -> Result<(), MuxError> {
+        // `?` on the last-tab refusal: the tab is kept and the caller decides whether
+        // that is worth reporting.
+        let events = self.state.apply(Command::CloseTab {
             origin: Origin::Client(self.client),
             workspace: ws.clone(),
             tab,
-        }) {
-            Ok(e) => e,
-            Err(_) => return, // e.g. last tab — keep it
-        };
+        })?;
         for e in &events {
             if let Event::TabClosed { terminals, .. } = e {
                 for t in terminals {
@@ -1185,6 +1186,7 @@ impl App {
         // Closing a tab may hide the tab bar (2→1 tabs), growing the content
         // height → re-derive the viewport.
         self.reflow();
+        Ok(())
     }
 
     /// Make `wid` the active session, re-attaching the local client as its controller
@@ -1479,16 +1481,20 @@ impl App {
 
     fn perform_confirm(&mut self, action: ConfirmAction) {
         match action {
-            ConfirmAction::KillSession(wid) => self.kill_session(&wid),
+            ConfirmAction::KillSession(wid) => {
+                self.kill_session(&wid);
+            }
         }
     }
 
     /// Remove a session (workspace), reap its PTYs, and switch to a survivor if it was
     /// active. Revalidates the target still exists and isn't the last session (it may
-    /// have changed between opening the confirm and pressing `y`).
-    fn kill_session(&mut self, wid: &WorkspaceId) {
+    /// have changed between opening the confirm and pressing `y`). Returns whether the
+    /// session was actually removed — the key/menu paths ignore it (the confirm modal
+    /// already vetted the target), the control API reports it.
+    fn kill_session(&mut self, wid: &WorkspaceId) -> bool {
         if self.state.workspace(wid).is_none() || self.state.workspace_count() <= 1 {
-            return;
+            return false;
         }
         let killing_active = &self.ws == wid;
         if let Some(terms) = self.state.remove_workspace(wid) {
@@ -1500,6 +1506,7 @@ impl App {
             // `self.ws` still names the removed session, so `switch_session` proceeds.
             self.switch_session(surv);
         }
+        true
     }
 
     /// Open the inline new-session name prompt (`Ctrl-b C`); Enter commits, Esc cancels.
@@ -1855,6 +1862,28 @@ impl App {
                     Resp::err(format!("no tab at index {index}"))
                 }
             }
+            Req::CloseTab { index } => {
+                // Read the tab's identity + pane count BEFORE closing so the outcome
+                // message can name what went away (the tab is gone afterwards).
+                let Some(w) = self.state.workspace(&self.ws) else {
+                    return Resp::err("no workspace");
+                };
+                let Some(tab) = w.tabs.get(*index) else {
+                    return Resp::err(format!("no tab at index {index}"));
+                };
+                let id = tab.id.clone();
+                let label = tab.name.clone().unwrap_or_else(|| id.to_string());
+                let panes = tab.layout.panes().len();
+                match self.close_tab(&self.ws.clone(), id) {
+                    Ok(()) => Resp::message(format!(
+                        "closed tab {index} '{label}' ({panes} pane(s) reaped)"
+                    )),
+                    Err(MuxError::CannotCloseLastTab) => Resp::err(
+                        "cannot close the last tab of a session — use `comux kill-session` instead",
+                    ),
+                    Err(e) => Resp::err(e.to_string()),
+                }
+            }
             Req::RenameTab { index, name } => {
                 // No index → the ACTIVE tab (so a pane's shell can rename its own tab).
                 let tab = match index {
@@ -1963,6 +1992,34 @@ impl App {
                     Resp::ok()
                 } else {
                     Resp::err(format!("no session at index {index}"))
+                }
+            }
+            Req::KillSession { index } => {
+                let Some(wid) = self.session_ids().get(*index).cloned() else {
+                    return Resp::err(format!("no session at index {index}"));
+                };
+                // Same floor the TUI's `Ctrl-b X` enforces — report it rather than
+                // no-op silently, which is what a script would otherwise see.
+                if self.state.workspace_count() <= 1 {
+                    return Resp::err("cannot kill the last session (the mux always keeps one)");
+                }
+                let (label, tabs, panes) = self
+                    .state
+                    .workspace(&wid)
+                    .map(|w| {
+                        (
+                            w.name.clone().unwrap_or_else(|| wid.to_string()),
+                            w.tabs.len(),
+                            w.tabs.iter().map(|t| t.layout.panes().len()).sum::<usize>(),
+                        )
+                    })
+                    .unwrap_or_else(|| (wid.to_string(), 0, 0));
+                if self.kill_session(&wid) {
+                    Resp::message(format!(
+                        "killed session {index} '{label}' ({tabs} tab(s), {panes} pane(s) reaped)"
+                    ))
+                } else {
+                    Resp::err(format!("could not kill session {index}"))
                 }
             }
             Req::WorktreeCreate { branch, from, cwd } => {
@@ -2819,7 +2876,9 @@ impl App {
     fn run_menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::RenameTab(ws, tab) => self.open_rename_tab_prompt_for(ws, tab),
-            MenuAction::CloseTab(ws, tab) => self.close_tab(&ws, tab),
+            MenuAction::CloseTab(ws, tab) => {
+                let _ = self.close_tab(&ws, tab);
+            }
             MenuAction::NewTab(ws) => {
                 if self.ws == ws {
                     self.new_tab();

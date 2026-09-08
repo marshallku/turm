@@ -510,6 +510,43 @@ fn snapshot_grid<L: EventListener>(term: &Term<L>) -> Snapshot {
     }
 }
 
+/// How long a closed pane's shell gets to honour its `SIGHUP` before it is killed.
+const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Make sure `pid` is dead before the reaper thread drops the `Pty` that will `waitpid` for it.
+///
+/// Detaching the wait keeps the loop alive, but on its own it would only trade a wedged
+/// server for a leak: a shell that ignores `SIGHUP` outlives its pane forever, holding the
+/// PTY's descriptors and the reaper thread with it. So escalate — `SIGHUP` first (the same
+/// signal `Pty::drop` will send, so a well-behaved shell still takes its normal exit path),
+/// then `SIGKILL` once the grace is up.
+///
+/// Two things here are deliberate and easy to "fix" wrongly:
+///
+/// * **It must run on the thread that is about to do the wait, and before it.** An
+///   un-`wait`ed child keeps its pid reserved — it turns into a zombie, not a free slot —
+///   so no signal from here can land on an unrelated process that recycled the number. An
+///   escalation racing the wait from a second thread would have no such guarantee. (For the
+///   same reason we never `waitpid` here ourselves: `Pty::drop` sends its OWN `SIGHUP`
+///   afterwards, which would then be aimed at a freed pid.)
+/// * **There is no liveness poll.** For exactly the reason above, `kill(pid, 0)` succeeds
+///   just as well for the zombie of a shell that already obeyed the `SIGHUP`, so polling it
+///   would return "alive" every time and buy nothing. We sleep the grace out and then send a
+///   `SIGKILL` that a zombie simply discards.
+fn reap_child(pid: Option<u32>) {
+    // pid 1 / 0 are not ours to signal; treat an unknown pid as nothing to do.
+    let Some(pid) = pid.filter(|p| *p > 1).map(|p| p as libc::pid_t) else {
+        return;
+    };
+    // SAFETY: plain signal syscalls against a child pid this thread is about to reap, so
+    // the pid cannot have been recycled.
+    unsafe {
+        libc::kill(pid, libc::SIGHUP);
+        std::thread::sleep(REAP_GRACE);
+        libc::kill(pid, libc::SIGKILL);
+    }
+}
+
 impl Drop for PaneTerm {
     fn drop(&mut self) {
         if let Some(fd) = self.fg_fd.take() {
@@ -517,20 +554,22 @@ impl Drop for PaneTerm {
             unsafe { libc::close(fd) };
         }
         let _ = self.sender.send(Msg::Shutdown);
+        // Everything past this point happens on a DETACHED thread, and teardown never blocks
+        // the caller. It can't: joining the io-thread hands back alacritty's `EventLoop`,
+        // which owns the `Pty`, and `Pty::drop` SIGHUPs the shell and then `waitpid`s for it
+        // with NO timeout. A shell that doesn't die on that SIGHUP — a `zsh -l` still sourcing
+        // its rc files loses that race often enough to hit on an ordinary close — would block
+        // whoever dropped the pane, and on the server that is the single-writer main loop: no
+        // frames, no control requests, flock held, fixable only with an external SIGKILL.
         if let Some(jh) = self.io_thread.take() {
-            // Bounded join: normally the io-thread exits immediately on `Shutdown`, but a
-            // wedged PTY/shell must NOT hang teardown (that would strand a live server
-            // holding its flock). Give it a short grace, then DETACH (drop the handle) and
-            // let the OS reap it — never block forever.
-            for _ in 0..50 {
-                if jh.is_finished() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            if jh.is_finished() {
-                let _ = jh.join();
-            }
+            let pid = self.child_pid;
+            std::thread::spawn(move || {
+                // Escalate BEFORE the join, not after: killing the shell EOFs the PTY, which
+                // is also what frees an io-thread that never acted on `Shutdown` — otherwise
+                // the join below could hang and nothing would ever reap the child.
+                reap_child(pid);
+                drop(jh.join());
+            });
         }
     }
 }

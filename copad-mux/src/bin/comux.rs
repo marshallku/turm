@@ -10,8 +10,9 @@
 //!                            `comux new-session work` == `comux ctl new-session work`
 //!
 //! Control commands: list | split | resize | focus | close | send | list-tabs | new-tab |
-//! select-tab | rename-tab | list-sessions | new-session [name] | rename-session |
-//! select-session | worktree <create|list|rm> | reload | health | kill-server.
+//! select-tab | close-tab | rename-tab | list-sessions | new-session [name] |
+//! rename-session | select-session | kill-session | worktree <create|list|rm> | reload |
+//! health | kill-server.
 //!
 //! The server holds the shells; the client renders + forwards input and can detach
 //! (`Ctrl-b d`) / reattach, so a session survives the terminal that launched it.
@@ -31,8 +32,10 @@ fn print_usage() {
          \x20 comux new-session [name]    create a session (optionally named)\n\
          \x20 comux list-sessions         list sessions\n\
          \x20 comux select-session <i>    switch to a session\n\
+         \x20 comux kill-session [i]      kill a session (no index → picker)\n\
          \x20 comux new-tab               create a tab\n\
          \x20 comux rename-tab [i] <name> rename the active tab (or by index; \"\" clears)\n\
+         \x20 comux close-tab [i]         close a tab (no index → picker)\n\
          \x20 comux split -h|-v           split the focused pane\n\
          \x20 comux worktree create <br>  git worktree + a session in it (also list|rm)\n\
          \x20 comux reload                re-read mux.toml on the live server (tmux source-file)\n\

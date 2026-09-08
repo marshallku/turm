@@ -24,7 +24,7 @@ Split the focused pane and move around inside a tab:
 | Resize left / down / up / right | `Ctrl-b H`/`J`/`K`/`L` | `comux resize <index> <dir>` |
 | Close the focused pane | `Ctrl-b x` | `comux close <index>` |
 
-`comux focus` / `close` / `select-tab` / `select-session` with **no index** open a fuzzy picker over the live listing instead of erroring — see [Leave the argument out and pick](./index.md#leave-the-argument-out-and-pick).
+`comux focus` / `close` / `select-tab` / `close-tab` / `select-session` / `kill-session` with **no index** open a fuzzy picker over the live listing instead of erroring — see [Leave the argument out and pick](./index.md#leave-the-argument-out-and-pick).
 
 Directional focus also has **prefix-less** bindings so you don't need to reach for `Ctrl-b` every time: `Ctrl+Shift+h/j/k/l` or `Ctrl+Shift+Arrow`.
 
@@ -44,11 +44,14 @@ comux send 1 "git status"        # inject text (as if typed) into pane 1
 | New tab | `Ctrl-b c` | `comux new-tab` |
 | Next / previous tab | `Ctrl-b n` / `Ctrl-b p` | — |
 | Jump to tab 1–9 | `Ctrl-b 1`…`9`, or prefix-less `Alt+1`…`9` | `comux select-tab <index>` |
-| Close tab | `Ctrl-b &` | — |
+| Close tab | `Ctrl-b &` | `comux close-tab [index]` |
 | Rename tab | `Ctrl-b ,` | `comux rename-tab [index] <name>` |
 | List tabs | — | `comux list-tabs` |
 
 > **`Alt`/`Option`+number** needs your terminal set to send Option/Alt as Meta.
+
+`comux close-tab` closes a tab and reaps its shells, like `Ctrl-b &`. A session always keeps at
+least one tab, so closing the last one is refused — kill the session instead.
 
 ### Naming tabs
 
@@ -72,10 +75,14 @@ A session is a self-contained workspace. Create several — say one per project 
 | --- | --- | --- |
 | New session (inline name prompt) | `Ctrl-b C` | `comux new-session [name]` |
 | Rename session | `Ctrl-b $` | `comux rename-session [index] <name>` |
-| Kill session (with y/n confirm) | `Ctrl-b X` | — |
+| Kill session (with y/n confirm) | `Ctrl-b X` | `comux kill-session [index]` |
 | Next / previous session | `Ctrl-b )` / `Ctrl-b (` | — |
 | Switch to a session | via sidebar / `Ctrl-f` | `comux select-session <index>` |
 | List sessions | — | `comux list-sessions` |
+
+`comux kill-session` is the CLI form of `Ctrl-b X` — but where the key opens a `y`/`n` confirm, the
+CLI kills straight away (tmux `kill-session` behaves the same). The mux always keeps at least one
+session, so killing the last one is refused.
 
 ### cwd inheritance
 

@@ -37,6 +37,11 @@ pub enum Req {
     NewTab,
     /// Make the tab at `index` (as printed by `list-tabs`) active.
     SelectTab { index: usize },
+    /// Close the tab at `index` (as printed by `list-tabs`) and reap its shells —
+    /// the `Ctrl-b &` / context-menu "close tab" action, reachable from a script.
+    /// Refused when it is the session's LAST tab (a session always keeps ≥1; kill the
+    /// session instead). Unlike the TUI there is no confirm — tmux `kill-window` parity.
+    CloseTab { index: usize },
     /// Rename the tab at `index` (as printed by `list-tabs`), or the ACTIVE tab when
     /// `index` is `None` — so a shell inside a pane can rename its own tab without
     /// knowing its position. An empty `name` clears back to the process/index label.
@@ -67,6 +72,11 @@ pub enum Req {
     },
     /// Make the session at `index` (as printed by `list-sessions`) active.
     SelectSession { index: usize },
+    /// Kill the session at `index` (as printed by `list-sessions`): drop its tabs and
+    /// reap every shell in them, switching to a survivor when it was the active one.
+    /// Refused when it is the LAST session (the mux keeps ≥1). Unlike the TUI's
+    /// `Ctrl-b X` there is no y/n confirm — tmux `kill-session` parity.
+    KillSession { index: usize },
     /// Create a git worktree for `branch` (sibling of the repo's MAIN worktree) and open
     /// a session in it, switching to it. `cwd` is the caller's dir (the repo is resolved
     /// from it); `from` is the base ref for the new branch (`None` → HEAD).
@@ -357,8 +367,8 @@ pub fn run_client(args: &[String]) -> i32 {
     let Some(cmd) = rest.first().map(|s| s.as_str()) else {
         eprintln!(
             "usage: comux <list|split|resize|focus|close|send|list-tabs|new-tab|select-tab|\
-             rename-tab [index] <name>|list-sessions|new-session [name]|\
-             rename-session [index] <name>|select-session|\
+             close-tab|rename-tab [index] <name>|list-sessions|new-session [name]|\
+             rename-session [index] <name>|select-session|kill-session|\
              worktree <create|list|rm>|reload|health|kill-server> [args]"
         );
         return 2;
@@ -418,6 +428,24 @@ pub fn run_client(args: &[String]) -> i32 {
                 Err(code) => return code,
             };
             Req::SelectTab { index: idx }
+        }
+        // The two destructive selection verbs. They picker on an omitted index like
+        // their non-destructive siblings rather than defaulting to the ACTIVE tab /
+        // session the way `rename-*` does: an explicit pick is what makes a bare
+        // `comux close-tab` safe to type.
+        "close-tab" | "kill-tab" => {
+            let idx = match pick_index(rest.get(1), json_out, Target::TabClose) {
+                Ok(i) => i,
+                Err(code) => return code,
+            };
+            Req::CloseTab { index: idx }
+        }
+        "kill-session" => {
+            let idx = match pick_index(rest.get(1), json_out, Target::SessionKill) {
+                Ok(i) => i,
+                Err(code) => return code,
+            };
+            Req::KillSession { index: idx }
         }
         "split" => {
             // -h/--horizontal → side by side (right); -v/--vertical → stacked (down).
@@ -524,7 +552,9 @@ const EXIT_CANCELLED: i32 = 130;
 #[derive(Clone, Copy)]
 enum Target {
     Session,
+    SessionKill,
     Tab,
+    TabClose,
     PaneFocus,
     PaneClose,
 }
@@ -535,7 +565,9 @@ impl Target {
     fn usage(self) -> &'static str {
         match self {
             Target::Session => "comux select-session [index]   (no index → fuzzy picker)",
+            Target::SessionKill => "comux kill-session [index]   (no index → fuzzy picker)",
             Target::Tab => "comux select-tab [index]   (no index → fuzzy picker)",
+            Target::TabClose => "comux close-tab [index]   (no index → fuzzy picker)",
             Target::PaneFocus => "comux focus [index]   (no index → fuzzy picker)",
             Target::PaneClose => "comux close [index]   (no index → fuzzy picker)",
         }
@@ -544,7 +576,9 @@ impl Target {
     fn title(self) -> &'static str {
         match self {
             Target::Session => "switch to session",
+            Target::SessionKill => "kill which session?",
             Target::Tab => "switch to tab",
+            Target::TabClose => "close which tab?",
             Target::PaneFocus => "focus a pane",
             Target::PaneClose => "close a pane",
         }
@@ -554,17 +588,23 @@ impl Target {
     /// failure, not a cancellation.
     fn empty(self) -> &'static str {
         match self {
-            Target::Session => "no sessions to pick from",
-            Target::Tab => "no tabs to pick from",
+            Target::Session | Target::SessionKill => "no sessions to pick from",
+            Target::Tab | Target::TabClose => "no tabs to pick from",
             Target::PaneFocus | Target::PaneClose => "no panes to pick from",
         }
     }
 
     /// Fetch the listing and render it as picker rows paired with the index each row
     /// resolves to (paired so the two can never drift apart while filtering).
+    ///
+    /// The destructive variants share their sibling's listing and deliberately offer
+    /// EVERY row rather than pre-filtering the ones the server would refuse (a session's
+    /// last tab, the last session) — unlike `pick_worktree`, where hiding still leaves
+    /// candidates. Here the refusable row is typically the only one, so hiding it would
+    /// report an empty picker in place of the server's error, which names the reason.
     fn rows(self) -> Result<Vec<(picker::Item, usize)>, i32> {
         match self {
-            Target::Session => {
+            Target::Session | Target::SessionKill => {
                 let sessions = query(&Req::ListSessions)?.sessions.unwrap_or_default();
                 Ok(sessions
                     .iter()
@@ -588,7 +628,7 @@ impl Target {
                     })
                     .collect())
             }
-            Target::Tab => {
+            Target::Tab | Target::TabClose => {
                 let tabs = query(&Req::ListTabs)?.tabs.unwrap_or_default();
                 Ok(tabs
                     .iter()
@@ -1445,6 +1485,34 @@ mod server_admin_tests {
         // An explicit empty name clears (Some with empty string), no args is usage.
         check(&["rename-tab", ""], Some((None, "")));
         check(&["rename-tab"], None);
+    }
+
+    /// The two destructive verbs must keep their kebab-case wire names: `close-tab` /
+    /// `kill-session` are what a script sends, and `kill-session` must stay a DIFFERENT
+    /// verb from the long-standing `kill-server` (one drops a workspace, the other the
+    /// whole daemon) — a rename that collapsed them would be catastrophic and silent.
+    #[test]
+    fn close_tab_and_kill_session_round_trip() {
+        assert_eq!(
+            serde_json::to_string(&Req::CloseTab { index: 1 }).unwrap(),
+            r#"{"cmd":"close-tab","index":1}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Req::KillSession { index: 2 }).unwrap(),
+            r#"{"cmd":"kill-session","index":2}"#
+        );
+        assert!(matches!(
+            serde_json::from_str::<Req>(r#"{"cmd":"close-tab","index":3}"#).unwrap(),
+            Req::CloseTab { index: 3 }
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Req>(r#"{"cmd":"kill-session","index":0}"#).unwrap(),
+            Req::KillSession { index: 0 }
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Req>(r#"{"cmd":"kill-server"}"#).unwrap(),
+            Req::KillServer
+        ));
     }
 
     /// An old client's `rename-session` (bare `index`) and a new index-less request must

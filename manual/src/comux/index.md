@@ -51,11 +51,13 @@ The full verb list:
 | `list-tabs` / `tabs` | — | List the workspace's tabs |
 | `new-tab` | — | Create + activate a tab |
 | `select-tab` | `[index]` | Activate a tab by index (no index → fuzzy picker) |
+| `close-tab` / `kill-tab` | `[index]` | Close a tab and reap its shells (no index → fuzzy picker) |
 | `rename-tab` | `[index] <name…>` | Rename a tab (no index = active; `""` clears) |
 | `list-sessions` / `sessions` | — | List sessions |
 | `new-session` | `[name…]` | Create + switch to a session (starts the server if needed) |
 | `rename-session` / `rename` | `[index] <name…>` | Rename a session (no index = active) |
 | `select-session` | `[index]` | Switch to a session (no index → fuzzy picker) |
+| `kill-session` | `[index]` | Kill a session and reap its shells (no index → fuzzy picker) |
 | `worktree create` (`new`/`add`) | `<branch> [--from <ref>] [--no-attach] [--json]` | Create a git worktree + a session in it |
 | `worktree list` (`ls`) | `[--plain\|--json]` | List worktrees (flags which have a live session) |
 | `worktree rm` (`remove`) | `[path\|branch] [-f] [-d] [--json]` | Remove a worktree (no target → fuzzy picker) |
@@ -75,6 +77,7 @@ Every verb above whose argument is written `[index]` / `[path|branch]` opens a *
 ```bash
 comux worktree rm      # lists the repo's removable worktrees — type to narrow, Enter to remove
 comux select-session   # same for sessions; also select-tab, focus, close
+comux kill-session     # destructive verbs picker too — close-tab and kill-session
 ```
 
 Type to filter (fzf-style subsequence, matching the name *and* the dim detail column), `↑`/`↓` or `Ctrl-n`/`Ctrl-p` to move, `Enter` to pick, `Esc` (or `Ctrl-c`) to cancel — cancelling exits `130` and does nothing. The picker draws inline below your prompt and erases itself on exit, so your scrollback stays clean.
