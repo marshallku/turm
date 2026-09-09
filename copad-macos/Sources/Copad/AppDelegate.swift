@@ -2130,10 +2130,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let hadTarget = target != nil
 
+        // `WebViewController.anyProtected`, not a walk over this window's panes.
+        // The capture, event and persistence paths all ask the registry, and a
+        // second implementation of the same predicate is a second implementation
+        // that can disagree — which the window-walk version already did once
+        // (see `profileHasProtectedTab`: a pane in an inactive copad tab has no
+        // `view.window`, so a window-based lookup answered "just this pane").
+        // One reading means the RPC gate cannot end up more permissive than the
+        // capture script it exists to be consistent with.
         let decision = BrowserFFI.authorize(
             method: method,
             mode: (target?.tabMode ?? .automation).rawValue,
-            profileProtected: vc.anyProtectedWebView,
+            profileProtected: WebViewController.anyProtected,
         )
         guard decision.allowed else {
             return .refused(RPCError(
@@ -2169,7 +2177,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let now = BrowserFFI.authorize(
                 method: method,
                 mode: (target?.tabMode ?? .automation).rawValue,
-                profileProtected: vc.anyProtectedWebView,
+                profileProtected: WebViewController.anyProtected,
             )
             guard now.allowed else {
                 completion(RPCError(

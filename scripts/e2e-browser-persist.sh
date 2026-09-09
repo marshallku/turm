@@ -64,6 +64,39 @@ PY
 }
 
 RC=0
+
+# Every instance this run launched, so the reaper below can get them all.
+#
+# This script starts SIX app instances and kills each one inline when its case
+# is done. That is not enough on its own: a failing assertion `exit`s, and Ctrl-C
+# never reaches the inline kill at all — which is how a run on 2026-09-09 left a
+# debug Copad holding a temp $HOME for seventeen hours. The inline kills stay
+# (they keep six GUIs from piling up during a pass); this is the backstop.
+#
+# A FILE, not an array: `launch` is called inside `$(...)`, a subshell, so an
+# array appended there would not survive back into the parent. The record is
+# written before the caller ever reads the pid, so an interrupt between the spawn
+# and the read is still reapable.
+LAUNCHED=$(mktemp /private/tmp/copad-e2e-pids-XXXXXX)
+cleanup() {
+    # Tolerates a missing record so it is safe to run more than once and safe to
+    # run before the record exists at all.
+    [ -n "${LAUNCHED:-}" ] && [ -f "$LAUNCHED" ] || return 0
+    while read -r pid home sock; do
+        [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
+        [ -n "$sock" ] && rm -f "$sock"
+        [ -n "$home" ] && rm -rf "$home"
+    done <"$LAUNCHED"
+    rm -f "$LAUNCHED"
+}
+# Cleanup runs on EXIT only. `trap cleanup EXIT INT TERM` looks equivalent and is
+# not: bash runs a signal handler and then RESUMES the script, so the cleanup
+# would delete the temp $HOME the very next command reads from and the run would
+# carry on asserting against wiped state. INT/TERM therefore just `exit` with the
+# conventional status, which fires the EXIT trap exactly once (codex C1).
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 SESSION_REL="Library/Application Support/copad/session.json"
 
 # The Swift side resolves config through `homeDirectoryForCurrentUser`, which
@@ -115,6 +148,9 @@ launch() {
     HOME="$home" "$APP" >"$home/app.log" 2>&1 &
     local pid=$!
     local sock="/tmp/copad-$pid.sock"
+    # Recorded before the socket wait, so an instance that never came up is
+    # reaped too rather than surviving as an orphan with no socket to find it by.
+    echo "$pid $home $sock" >>"$LAUNCHED"
     for _ in $(seq 1 40); do [ -S "$sock" ] && break; sleep 0.25; done
     [ -S "$sock" ] || { echo "FAIL: no gui socket at $sock"; tail -5 "$home/app.log"; kill -9 "$pid" 2>/dev/null; return 1; }
     echo "$pid $sock"

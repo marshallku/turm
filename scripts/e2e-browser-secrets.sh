@@ -55,7 +55,14 @@ cleanup() {
             -s com.marshall.copad.browser -a "$CRED_ID" >/dev/null 2>&1 || true
     fi
 }
-trap cleanup EXIT INT TERM
+# Cleanup runs on EXIT only. `trap cleanup EXIT INT TERM` looks equivalent and is
+# not: bash runs a signal handler and then RESUMES the script, so the cleanup
+# would delete the temp $HOME the very next command reads from and the run would
+# carry on asserting against wiped state. INT/TERM therefore just `exit` with the
+# conventional status, which fires the EXIT trap exactly once (codex C1).
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 WWW=$(mktemp -d /private/tmp/copad-www-XXXXXX)
 cat > "$WWW/login.html" <<'HTML'

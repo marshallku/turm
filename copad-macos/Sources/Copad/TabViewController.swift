@@ -216,12 +216,6 @@ final class TabViewController: NSViewController {
     /// freezing one while its sibling stays scriptable would be a boundary with
     /// a door in it. Panes are single-profile until work unit B3, so "this
     /// window" and "this profile" are the same set today.
-    var anyProtectedWebView: Bool {
-        paneManagers.contains { manager in
-            manager.allPanels().contains { ($0 as? WebViewController)?.hasProtectedTab == true }
-        }
-    }
-
     func webView(id: String) -> WebViewController? {
         panel(id: id) as? WebViewController
     }

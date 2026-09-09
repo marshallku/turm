@@ -41,7 +41,14 @@ cleanup() {
     [ -n "${SERVER_PID:-}" ] && kill -9 "$SERVER_PID" 2>/dev/null
     [ -n "${WWW:-}" ] && rm -rf "$WWW"
 }
-trap cleanup EXIT INT TERM
+# Cleanup runs on EXIT only. `trap cleanup EXIT INT TERM` looks equivalent and is
+# not: bash runs a signal handler and then RESUMES the script, so the cleanup
+# would delete the temp $HOME the very next command reads from and the run would
+# carry on asserting against wiped state. INT/TERM therefore just `exit` with the
+# conventional status, which fires the EXIT trap exactly once (codex C1).
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Three tall pages, so a back-list has somewhere to go and the scroll offset
 # has room to survive.
