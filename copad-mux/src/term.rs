@@ -142,14 +142,17 @@ impl EventListener for MuxListener {
             // nothing on screen changed.
             // An EMPTY payload is a legitimate request to CLEAR the clipboard, not a no-op,
             // so it is captured like any other write.
-            Event::ClipboardStore(ClipboardType::Clipboard, text) => {
-                if text.len() <= MAX_CLIPBOARD_BYTES {
-                    // Stamp INSIDE the critical section: taking the ticket first would let two
-                    // writers commit in the opposite order and leave the older text in the slot.
-                    let mut slot = self.clipboard.lock().unwrap();
-                    *slot = Some((next_clipboard_seq(), text));
-                }
+            Event::ClipboardStore(ClipboardType::Clipboard, text)
+                if text.len() <= MAX_CLIPBOARD_BYTES =>
+            {
+                // Stamp INSIDE the critical section: taking the ticket first would let two
+                // writers commit in the opposite order and leave the older text in the slot.
+                let mut slot = self.clipboard.lock().unwrap();
+                *slot = Some((next_clipboard_seq(), text));
             }
+            // Over the cap. Dropped WHOLE rather than truncated — half a clipboard silently
+            // replacing what you copied is worse than the write not landing at all.
+            Event::ClipboardStore(ClipboardType::Clipboard, _) => {}
             // The X11 PRIMARY selection (OSC 52 selector `p`/`s`). comux has no notion of it
             // (and macOS has none at all), so it is dropped rather than silently aliased onto
             // the real clipboard — an app asking for PRIMARY does not expect a Cmd-V clobber.

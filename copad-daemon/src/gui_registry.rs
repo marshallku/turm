@@ -83,6 +83,15 @@ pub fn method_capability(method: &str) -> Option<&'static str> {
         "terminal.read" | "terminal.state" | "terminal.exec" | "terminal.feed"
         | "terminal.history" | "terminal.context" => Some("terminal"),
         m if m.starts_with("webview.") => Some("webview"),
+        // `browser.*` rides the `webview` capability rather than getting one of
+        // its own. The split between the two namespaces is naming, not a
+        // boundary (the boundary is `TabMode`, checked in
+        // `copad_core::browser::authorize`) — `browser.secret.*` is served by
+        // the same webview subsystem, in the same GUI process, behind the same
+        // gate. A separate capability would need both GUIs to advertise it, and
+        // a GUI that had not yet been updated would answer `unknown_method` for
+        // a method it in fact implements.
+        m if m.starts_with("browser.") => Some("webview"),
         m if m.starts_with("background.") => Some("background"),
         "statusbar.show" | "statusbar.hide" | "statusbar.toggle" => Some("statusbar"),
         // Both open a GUI-owned panel; `agent.ui` is the capability the cockpit
@@ -105,7 +114,8 @@ pub fn method_capability(method: &str) -> Option<&'static str> {
 /// upstream, so we match that for any method that can transitively trigger
 /// a plugin RPC or a heavy WebView call.
 pub fn method_invoke_timeout(method: &str) -> Duration {
-    if method.starts_with("webview.") || method == "claude.start" {
+    if method.starts_with("webview.") || method.starts_with("browser.") || method == "claude.start"
+    {
         Duration::from_secs(120)
     } else {
         Duration::from_secs(5)
@@ -509,6 +519,31 @@ mod tests {
         assert_eq!(method_capability("webview.state"), Some("webview"));
         assert_eq!(method_capability("system.ping"), None);
         assert_eq!(method_capability("kb.search"), None);
+    }
+
+    #[test]
+    fn the_browser_namespace_routes_to_the_gui_like_webview_does() {
+        // `browser.secret.*` is implemented in the GUI process behind the same
+        // `copad_core::browser::authorize` gate as `webview.*`. Without this the
+        // daemon treats it as daemon-owned by omission, and a `coctl secret`
+        // call answers `unknown_method` for a method the GUI implements — which
+        // is exactly the "is it a typo or is it not built?" ambiguity the
+        // Browser Workbench registers methods to remove.
+        assert_eq!(method_capability("browser.secret.list"), Some("webview"));
+        assert_eq!(method_capability("browser.secret.fill"), Some("webview"));
+        assert_eq!(method_capability("browser.secret.save"), Some("webview"));
+        assert_eq!(method_capability("browser.secret.delete"), Some("webview"));
+    }
+
+    #[test]
+    fn browser_methods_get_the_long_webview_timeout() {
+        // A credential fill rebuilds a web view and waits on a keychain; the 5s
+        // default would time out a call that was going to succeed.
+        assert!(method_invoke_timeout("browser.secret.fill") > Duration::from_secs(5));
+        assert_eq!(
+            method_invoke_timeout("browser.secret.fill"),
+            method_invoke_timeout("webview.execute_js")
+        );
     }
 
     #[test]

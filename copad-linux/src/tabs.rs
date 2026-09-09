@@ -918,6 +918,36 @@ impl TabManager {
     }
 
     /// Find a panel by ID
+    /// Profile a new browser pane is born into. `webview.open` has no pane to
+    /// be judged against, so the gate judges it against this.
+    pub fn default_browser_profile(&self) -> String {
+        self.config.borrow().browser.profile.clone()
+    }
+
+    /// Is ANY webview pane in `profile` currently protected?
+    ///
+    /// Protection freezes the PROFILE, not the pane (decision #100): a
+    /// concurrent pane on the same data store is another window onto the same
+    /// cookies, so refusing reads on only the protected pane would leave a
+    /// sibling automation pane reading the same authenticated session.
+    pub fn any_protected_webview_in_profile(&self, profile: &str) -> bool {
+        use copad_core::browser::TabMode;
+        let tabs = self.tabs.borrow();
+        for tab in tabs.iter() {
+            let mut panels = Vec::new();
+            tab.root.borrow().collect_panels(&mut panels);
+            for panel in panels {
+                if let Some(wv) = panel.as_webview()
+                    && wv.profile == profile
+                    && wv.mode() == TabMode::Protected
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn find_panel_by_id(&self, id: &str) -> Option<Rc<PanelVariant>> {
         let tabs = self.tabs.borrow();
         for tab in tabs.iter() {
@@ -1106,8 +1136,13 @@ impl TabManager {
     fn create_webview_panel(self: &Rc<Self>, url: &str) -> Rc<PanelVariant> {
         let config = self.config.borrow();
         let theme = copad_core::theme::Theme::by_name(&config.theme.name).unwrap_or_default();
+        // Read from the same place `default_browser_profile` does. A pane born
+        // into one profile while the gate judged `webview.open` against another
+        // would break "protection freezes the profile" the moment a non-default
+        // profile exists.
+        let profile = config.browser.profile.clone();
         drop(config);
-        let webview_panel = WebViewPanel::new(url, &theme);
+        let webview_panel = WebViewPanel::new(url, &theme, profile);
         let panel = Rc::new(PanelVariant::WebView(webview_panel));
 
         // Hook webview events

@@ -213,6 +213,22 @@ pub fn dispatch(
     // exactly once with the response, and the dispatcher returns
     // immediately for the blocking case so a slow plugin can't stall the
     // socket-server thread or the GTK timer that pumps it.
+    // Browser Workbench gate (B1c). Runs BEFORE `try_dispatch`, not before the
+    // legacy match: a browser method registered as an action would otherwise
+    // route around the gate entirely. The decision itself is
+    // `copad_core::browser::authorize` — see `crate::browser`.
+    let browser_ctx = match crate::browser::gate(req, mgr) {
+        crate::browser::Gate::NotBrowser => None,
+        crate::browser::Gate::Refused(err) => {
+            cmd.reply_with_completion(
+                event_bus,
+                Response::error(req.id.clone(), &err.code, &err.message),
+            );
+            return;
+        }
+        crate::browser::Gate::Allowed(ctx) => Some(ctx),
+    };
+
     let req_id_for_reply = req.id.clone();
     let reply = cmd.reply.clone();
     if actions.try_dispatch(
@@ -341,87 +357,125 @@ pub fn dispatch(
         }
 
         // -- WebView commands --
+        // `browser_ctx` is `Some` for exactly the methods `browser::classify`
+        // knows, which is exactly the arms below; a `None` here would mean the
+        // gate and this match disagree about what a browser method is.
         "webview.open" => {
+            let ctx = browser_ctx.as_ref().expect("gate classified webview.open");
             let resp = handle_webview_open(req, mgr, window);
-            cmd.reply_with_completion(event_bus, resp);
+            browser_reply(&cmd, event_bus, mgr, ctx, resp);
         }
 
         "webview.navigate" => {
+            let ctx = browser_ctx
+                .as_ref()
+                .expect("gate classified webview.navigate");
             let resp = handle_webview_navigate(req, mgr);
-            cmd.reply_with_completion(event_bus, resp);
+            browser_reply(&cmd, event_bus, mgr, ctx, resp);
         }
 
         "webview.back" => {
+            let ctx = browser_ctx.as_ref().expect("gate classified webview.back");
             let resp = with_webview_panel(req, mgr, |wv| {
                 wv.go_back();
                 Response::success(req.id.clone(), json!({ "status": "ok" }))
             });
-            cmd.reply_with_completion(event_bus, resp);
+            browser_reply(&cmd, event_bus, mgr, ctx, resp);
         }
 
         "webview.forward" => {
+            let ctx = browser_ctx
+                .as_ref()
+                .expect("gate classified webview.forward");
             let resp = with_webview_panel(req, mgr, |wv| {
                 wv.go_forward();
                 Response::success(req.id.clone(), json!({ "status": "ok" }))
             });
-            cmd.reply_with_completion(event_bus, resp);
+            browser_reply(&cmd, event_bus, mgr, ctx, resp);
         }
 
         "webview.reload" => {
+            let ctx = browser_ctx
+                .as_ref()
+                .expect("gate classified webview.reload");
             let resp = with_webview_panel(req, mgr, |wv| {
                 wv.reload();
                 Response::success(req.id.clone(), json!({ "status": "ok" }))
             });
-            cmd.reply_with_completion(event_bus, resp);
+            browser_reply(&cmd, event_bus, mgr, ctx, resp);
         }
 
         "webview.execute_js" => {
-            handle_webview_execute_js(cmd, mgr, event_bus);
+            let ctx = browser_ctx
+                .as_ref()
+                .expect("gate classified webview.execute_js");
+            handle_webview_execute_js(cmd, mgr, event_bus, ctx);
             // Response sent from callback
         }
 
         "webview.get_content" => {
-            handle_webview_get_content(cmd, mgr, event_bus);
+            let ctx = browser_ctx
+                .as_ref()
+                .expect("gate classified webview.get_content");
+            handle_webview_get_content(cmd, mgr, event_bus, ctx);
             // Response sent from callback
         }
 
         "webview.screenshot" => {
-            handle_webview_screenshot(cmd, mgr, event_bus);
+            let ctx = browser_ctx
+                .as_ref()
+                .expect("gate classified webview.screenshot");
+            handle_webview_screenshot(cmd, mgr, event_bus, ctx);
             // Response sent from callback
         }
 
         "webview.query" => {
-            handle_webview_query(cmd, mgr, event_bus);
+            let ctx = browser_ctx.as_ref().expect("gate classified webview.query");
+            handle_webview_query(cmd, mgr, event_bus, ctx);
             // Response sent from callback
         }
 
         "webview.query_all" => {
-            handle_webview_query_all(cmd, mgr, event_bus);
+            let ctx = browser_ctx
+                .as_ref()
+                .expect("gate classified webview.query_all");
+            handle_webview_query_all(cmd, mgr, event_bus, ctx);
             // Response sent from callback
         }
 
         "webview.get_styles" => {
-            handle_webview_get_styles(cmd, mgr, event_bus);
+            let ctx = browser_ctx
+                .as_ref()
+                .expect("gate classified webview.get_styles");
+            handle_webview_get_styles(cmd, mgr, event_bus, ctx);
             // Response sent from callback
         }
 
         "webview.click" => {
-            handle_webview_click(cmd, mgr, event_bus);
+            let ctx = browser_ctx.as_ref().expect("gate classified webview.click");
+            handle_webview_click(cmd, mgr, event_bus, ctx);
             // Response sent from callback
         }
 
         "webview.fill" => {
-            handle_webview_fill(cmd, mgr, event_bus);
+            let ctx = browser_ctx.as_ref().expect("gate classified webview.fill");
+            handle_webview_fill(cmd, mgr, event_bus, ctx);
             // Response sent from callback
         }
 
         "webview.scroll" => {
-            handle_webview_scroll(cmd, mgr, event_bus);
+            let ctx = browser_ctx
+                .as_ref()
+                .expect("gate classified webview.scroll");
+            handle_webview_scroll(cmd, mgr, event_bus, ctx);
             // Response sent from callback
         }
 
         "webview.page_info" => {
-            handle_webview_page_info(cmd, mgr, event_bus);
+            let ctx = browser_ctx
+                .as_ref()
+                .expect("gate classified webview.page_info");
+            handle_webview_page_info(cmd, mgr, event_bus, ctx);
             // Response sent from callback
         }
 
@@ -430,6 +484,7 @@ pub fn dispatch(
         // internal consistency beats matching macOS's resolver here.
         "webview.state" => {
             use webkit6::prelude::WebViewExt;
+            let ctx = browser_ctx.as_ref().expect("gate classified webview.state");
             let resp = with_webview_panel(req, mgr, |wv| {
                 Response::success(
                     req.id.clone(),
@@ -442,12 +497,15 @@ pub fn dispatch(
                     }),
                 )
             });
-            cmd.reply_with_completion(event_bus, resp);
+            browser_reply(&cmd, event_bus, mgr, ctx, resp);
         }
 
         "webview.devtools" => {
+            let ctx = browser_ctx
+                .as_ref()
+                .expect("gate classified webview.devtools");
             let resp = handle_webview_devtools(req, mgr);
-            cmd.reply_with_completion(event_bus, resp);
+            browser_reply(&cmd, event_bus, mgr, ctx, resp);
         }
 
         // Zero-based, matching the index `tab.info` reports. Diverges from
@@ -803,6 +861,23 @@ fn handle_bg_set_tint(req: &Request, bg: &Rc<BackgroundLayer>) -> Response {
 
 // -- WebView command helpers --
 
+/// Reply to a browser method, applying the delivery-time half of the gate.
+///
+/// Every browser reply goes through here, including the early `invalid_params`
+/// / `not_found` errors, because a protected write's ERROR leaks the same bit
+/// its result does — "the selector was not found" is still an answer about the
+/// page. `finalize` collapses both into one fixed response, and only while the
+/// profile is protected.
+fn browser_reply(
+    cmd: &SocketCommand,
+    event_bus: &EventBus,
+    mgr: &Rc<TabManager>,
+    ctx: &crate::browser::GateCtx,
+    resp: Response,
+) {
+    cmd.reply_with_completion(event_bus, crate::browser::finalize(mgr, ctx, resp));
+}
+
 fn handle_webview_open(
     req: &Request,
     mgr: &Rc<TabManager>,
@@ -885,13 +960,21 @@ fn with_webview_panel(
     }
 }
 
-fn handle_webview_execute_js(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &EventBus) {
+fn handle_webview_execute_js(
+    cmd: SocketCommand,
+    mgr: &Rc<TabManager>,
+    event_bus: &EventBus,
+    ctx: &crate::browser::GateCtx,
+) {
     let req = &cmd.request;
     let id = match req.params.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(req.id.clone(), "invalid_params", "Missing 'id' param"),
             );
             return;
@@ -900,8 +983,11 @@ fn handle_webview_execute_js(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus
     let code = match req.params.get("code").and_then(|v| v.as_str()) {
         Some(c) => c.to_string(),
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(req.id.clone(), "invalid_params", "Missing 'code' param"),
             );
             return;
@@ -911,8 +997,11 @@ fn handle_webview_execute_js(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus
     let panel = match mgr.find_panel_by_id(&id) {
         Some(p) => p,
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(
                     req.id.clone(),
                     "not_found",
@@ -925,8 +1014,11 @@ fn handle_webview_execute_js(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus
     let wv = match panel.as_webview() {
         Some(wv) => wv,
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(req.id.clone(), "wrong_panel_type", "Panel is not a webview"),
             );
             return;
@@ -934,27 +1026,37 @@ fn handle_webview_execute_js(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus
     };
 
     let req_id = req.id.clone();
-    let method = req.method.clone();
     let silent = cmd.silent_completion;
     let bus = event_bus.clone();
     let reply = cmd.reply;
+    // The delivery-time half of the gate: re-asks `authorize` against live
+    // state, so a read that was in flight when the tab entered `Protected` is
+    // suppressed rather than answered with what it already had.
+    let out = crate::browser::BrowserReply::new(reply, bus, silent, ctx.clone(), mgr.clone());
     wv.execute_js(&code, move |result| {
         let resp = match result {
             Ok(value) => Response::success(req_id, json!({ "result": value })),
             Err(e) => Response::error(req_id, "js_error", &e),
         };
-        copad_daemon::socket::publish_legacy_completion(&bus, &method, silent, &resp);
-        let _ = reply.send(resp);
+        out.send(resp);
     });
 }
 
-fn handle_webview_get_content(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &EventBus) {
+fn handle_webview_get_content(
+    cmd: SocketCommand,
+    mgr: &Rc<TabManager>,
+    event_bus: &EventBus,
+    ctx: &crate::browser::GateCtx,
+) {
     let req = &cmd.request;
     let id = match req.params.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(req.id.clone(), "invalid_params", "Missing 'id' param"),
             );
             return;
@@ -973,8 +1075,11 @@ fn handle_webview_get_content(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bu
     let panel = match mgr.find_panel_by_id(&id) {
         Some(p) => p,
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(
                     req.id.clone(),
                     "not_found",
@@ -987,8 +1092,11 @@ fn handle_webview_get_content(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bu
     let wv = match panel.as_webview() {
         Some(wv) => wv,
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(req.id.clone(), "wrong_panel_type", "Panel is not a webview"),
             );
             return;
@@ -996,27 +1104,37 @@ fn handle_webview_get_content(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bu
     };
 
     let req_id = req.id.clone();
-    let method = req.method.clone();
     let silent = cmd.silent_completion;
     let bus = event_bus.clone();
     let reply = cmd.reply;
+    // The delivery-time half of the gate: re-asks `authorize` against live
+    // state, so a read that was in flight when the tab entered `Protected` is
+    // suppressed rather than answered with what it already had.
+    let out = crate::browser::BrowserReply::new(reply, bus, silent, ctx.clone(), mgr.clone());
     wv.execute_js(&js_code, move |result| {
         let resp = match result {
             Ok(content) => Response::success(req_id, json!({ "content": content })),
             Err(e) => Response::error(req_id, "js_error", &e),
         };
-        copad_daemon::socket::publish_legacy_completion(&bus, &method, silent, &resp);
-        let _ = reply.send(resp);
+        out.send(resp);
     });
 }
 
-fn handle_webview_screenshot(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &EventBus) {
+fn handle_webview_screenshot(
+    cmd: SocketCommand,
+    mgr: &Rc<TabManager>,
+    event_bus: &EventBus,
+    ctx: &crate::browser::GateCtx,
+) {
     let req = &cmd.request;
     let id = match req.params.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(req.id.clone(), "invalid_params", "Missing 'id' param"),
             );
             return;
@@ -1026,8 +1144,11 @@ fn handle_webview_screenshot(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus
     let panel = match mgr.find_panel_by_id(&id) {
         Some(p) => p,
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(
                     req.id.clone(),
                     "not_found",
@@ -1040,8 +1161,11 @@ fn handle_webview_screenshot(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus
     let wv = match panel.as_webview() {
         Some(wv) => wv,
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(req.id.clone(), "wrong_panel_type", "Panel is not a webview"),
             );
             return;
@@ -1049,10 +1173,13 @@ fn handle_webview_screenshot(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus
     };
 
     let req_id = req.id.clone();
-    let method = req.method.clone();
     let silent = cmd.silent_completion;
     let bus = event_bus.clone();
     let reply = cmd.reply;
+    // The delivery-time half of the gate: re-asks `authorize` against live
+    // state, so a read that was in flight when the tab entered `Protected` is
+    // suppressed rather than answered with what it already had.
+    let out = crate::browser::BrowserReply::new(reply, bus, silent, ctx.clone(), mgr.clone());
     let path = req
         .params
         .get("path")
@@ -1077,19 +1204,27 @@ fn handle_webview_screenshot(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus
             }
             Err(e) => Response::error(req_id, "snapshot_error", &e),
         };
-        copad_daemon::socket::publish_legacy_completion(&bus, &method, silent, &resp);
-        let _ = reply.send(resp);
+        out.send(resp);
     });
 }
 
 /// Helper: run a JS snippet from webview::js module on a webview panel, send result via reply
-fn run_js_command(cmd: SocketCommand, mgr: &Rc<TabManager>, js_code: String, event_bus: &EventBus) {
+fn run_js_command(
+    cmd: SocketCommand,
+    mgr: &Rc<TabManager>,
+    js_code: String,
+    event_bus: &EventBus,
+    ctx: &crate::browser::GateCtx,
+) {
     let req = &cmd.request;
     let id = match req.params.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(req.id.clone(), "invalid_params", "Missing 'id' param"),
             );
             return;
@@ -1099,8 +1234,11 @@ fn run_js_command(cmd: SocketCommand, mgr: &Rc<TabManager>, js_code: String, eve
     let panel = match mgr.find_panel_by_id(&id) {
         Some(p) => p,
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(
                     req.id.clone(),
                     "not_found",
@@ -1113,8 +1251,11 @@ fn run_js_command(cmd: SocketCommand, mgr: &Rc<TabManager>, js_code: String, eve
     let wv = match panel.as_webview() {
         Some(wv) => wv,
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(req.id.clone(), "wrong_panel_type", "Panel is not a webview"),
             );
             return;
@@ -1122,10 +1263,13 @@ fn run_js_command(cmd: SocketCommand, mgr: &Rc<TabManager>, js_code: String, eve
     };
 
     let req_id = req.id.clone();
-    let method = req.method.clone();
     let silent = cmd.silent_completion;
     let bus = event_bus.clone();
     let reply = cmd.reply;
+    // The delivery-time half of the gate: re-asks `authorize` against live
+    // state, so a read that was in flight when the tab entered `Protected` is
+    // suppressed rather than answered with what it already had.
+    let out = crate::browser::BrowserReply::new(reply, bus, silent, ctx.clone(), mgr.clone());
     wv.execute_js(&js_code, move |result| {
         let resp = match result {
             Ok(json_str) => {
@@ -1137,17 +1281,24 @@ fn run_js_command(cmd: SocketCommand, mgr: &Rc<TabManager>, js_code: String, eve
             }
             Err(e) => Response::error(req_id, "js_error", &e),
         };
-        copad_daemon::socket::publish_legacy_completion(&bus, &method, silent, &resp);
-        let _ = reply.send(resp);
+        out.send(resp);
     });
 }
 
-fn handle_webview_query(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &EventBus) {
+fn handle_webview_query(
+    cmd: SocketCommand,
+    mgr: &Rc<TabManager>,
+    event_bus: &EventBus,
+    ctx: &crate::browser::GateCtx,
+) {
     let selector = match cmd.request.params.get("selector").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(
                     cmd.request.id.clone(),
                     "invalid_params",
@@ -1158,15 +1309,23 @@ fn handle_webview_query(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &Ev
         }
     };
     let js = crate::webview::js::query_selector(&selector);
-    run_js_command(cmd, mgr, js, event_bus);
+    run_js_command(cmd, mgr, js, event_bus, ctx);
 }
 
-fn handle_webview_query_all(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &EventBus) {
+fn handle_webview_query_all(
+    cmd: SocketCommand,
+    mgr: &Rc<TabManager>,
+    event_bus: &EventBus,
+    ctx: &crate::browser::GateCtx,
+) {
     let selector = match cmd.request.params.get("selector").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(
                     cmd.request.id.clone(),
                     "invalid_params",
@@ -1183,15 +1342,23 @@ fn handle_webview_query_all(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus:
         .and_then(|v| v.as_u64())
         .unwrap_or(50) as u32;
     let js = crate::webview::js::query_selector_all(&selector, limit);
-    run_js_command(cmd, mgr, js, event_bus);
+    run_js_command(cmd, mgr, js, event_bus, ctx);
 }
 
-fn handle_webview_get_styles(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &EventBus) {
+fn handle_webview_get_styles(
+    cmd: SocketCommand,
+    mgr: &Rc<TabManager>,
+    event_bus: &EventBus,
+    ctx: &crate::browser::GateCtx,
+) {
     let selector = match cmd.request.params.get("selector").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(
                     cmd.request.id.clone(),
                     "invalid_params",
@@ -1209,15 +1376,23 @@ fn handle_webview_get_styles(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
     let js = crate::webview::js::get_styles(&selector, &properties);
-    run_js_command(cmd, mgr, js, event_bus);
+    run_js_command(cmd, mgr, js, event_bus, ctx);
 }
 
-fn handle_webview_click(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &EventBus) {
+fn handle_webview_click(
+    cmd: SocketCommand,
+    mgr: &Rc<TabManager>,
+    event_bus: &EventBus,
+    ctx: &crate::browser::GateCtx,
+) {
     let selector = match cmd.request.params.get("selector").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(
                     cmd.request.id.clone(),
                     "invalid_params",
@@ -1228,15 +1403,23 @@ fn handle_webview_click(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &Ev
         }
     };
     let js = crate::webview::js::click(&selector);
-    run_js_command(cmd, mgr, js, event_bus);
+    run_js_command(cmd, mgr, js, event_bus, ctx);
 }
 
-fn handle_webview_fill(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &EventBus) {
+fn handle_webview_fill(
+    cmd: SocketCommand,
+    mgr: &Rc<TabManager>,
+    event_bus: &EventBus,
+    ctx: &crate::browser::GateCtx,
+) {
     let selector = match cmd.request.params.get("selector").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(
                     cmd.request.id.clone(),
                     "invalid_params",
@@ -1249,8 +1432,11 @@ fn handle_webview_fill(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &Eve
     let value = match cmd.request.params.get("value").and_then(|v| v.as_str()) {
         Some(v) => v.to_string(),
         None => {
-            cmd.reply_with_completion(
+            browser_reply(
+                &cmd,
                 event_bus,
+                mgr,
+                ctx,
                 Response::error(
                     cmd.request.id.clone(),
                     "invalid_params",
@@ -1261,10 +1447,15 @@ fn handle_webview_fill(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &Eve
         }
     };
     let js = crate::webview::js::fill(&selector, &value);
-    run_js_command(cmd, mgr, js, event_bus);
+    run_js_command(cmd, mgr, js, event_bus, ctx);
 }
 
-fn handle_webview_scroll(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &EventBus) {
+fn handle_webview_scroll(
+    cmd: SocketCommand,
+    mgr: &Rc<TabManager>,
+    event_bus: &EventBus,
+    ctx: &crate::browser::GateCtx,
+) {
     let selector = cmd
         .request
         .params
@@ -1284,12 +1475,17 @@ fn handle_webview_scroll(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &E
         .and_then(|v| v.as_i64())
         .unwrap_or(0) as i32;
     let js = crate::webview::js::scroll(selector.as_deref(), x, y);
-    run_js_command(cmd, mgr, js, event_bus);
+    run_js_command(cmd, mgr, js, event_bus, ctx);
 }
 
-fn handle_webview_page_info(cmd: SocketCommand, mgr: &Rc<TabManager>, event_bus: &EventBus) {
+fn handle_webview_page_info(
+    cmd: SocketCommand,
+    mgr: &Rc<TabManager>,
+    event_bus: &EventBus,
+    ctx: &crate::browser::GateCtx,
+) {
     let js = crate::webview::js::page_info();
-    run_js_command(cmd, mgr, js, event_bus);
+    run_js_command(cmd, mgr, js, event_bus, ctx);
 }
 
 fn handle_webview_devtools(req: &Request, mgr: &Rc<TabManager>) -> Response {

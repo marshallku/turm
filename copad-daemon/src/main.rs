@@ -24,7 +24,9 @@ use copad_daemon::daemon_trigger_sink::DaemonTriggerSink;
 use copad_daemon::gui_registry::GuiRegistry;
 use copad_daemon::plugin_exec::{ShellError, spawn_plugin_shell};
 use copad_daemon::service_supervisor::ServiceSupervisor;
-use copad_daemon::socket::{self, DaemonState, LEGACY_DISPATCH_METHODS, SocketPrep, new_event_bus};
+use copad_daemon::socket::{
+    self, BROWSER_RESERVED_METHODS, DaemonState, LEGACY_DISPATCH_METHODS, SocketPrep, new_event_bus,
+};
 use copad_daemon::trigger_pump::PumpState;
 use copad_daemon::trigger_sink::TRIGGER_ONLY_RESERVED_METHODS;
 use serde_json::json;
@@ -999,6 +1001,7 @@ fn activate_supervisor(
         .iter()
         .copied()
         .chain(TRIGGER_ONLY_RESERVED_METHODS.iter().copied())
+        .chain(BROWSER_RESERVED_METHODS.iter().copied())
         .collect();
     ServiceSupervisor::new(
         event_bus.clone(),

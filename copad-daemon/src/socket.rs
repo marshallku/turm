@@ -146,6 +146,40 @@ pub const LEGACY_DISPATCH_METHODS: &[&str] = &[
     "statusbar.toggle",
 ];
 
+/// Browser Workbench methods a GUI has REGISTERED but not yet implemented.
+///
+/// Reserved against plugin `provides[]` for the same reason as
+/// [`LEGACY_DISPATCH_METHODS`], but kept separate because they are not
+/// dispatchable yet: the command palette lists that one, and offering the user
+/// `browser.secret.fill` before it exists would advertise a non-feature.
+///
+/// The reservation is what stops a plugin claiming a name in the window between
+/// a method being registered and being built. That window is the dangerous one:
+/// `coctl secret fill` would reach the plugin instead of the GUI, and the
+/// credential boundary these methods exist to enforce
+/// (`copad_core::browser::authorize`) would never run. A plugin cannot read the
+/// secret that way — it never leaves the keychain — but it can impersonate the
+/// surface that handles it.
+///
+/// Move an entry into [`LEGACY_DISPATCH_METHODS`] when a GUI implements it.
+pub const BROWSER_RESERVED_METHODS: &[&str] = &[
+    "webview.tab.new",
+    "webview.tab.list",
+    "webview.tab.select",
+    "webview.tab.close",
+    "webview.tab.move",
+    "webview.tab.protect",
+    "webview.profile.list",
+    "webview.profile.clear",
+    "browser.secret.list",
+    "browser.secret.fill",
+    "browser.secret.save",
+    "browser.secret.delete",
+    "webview.net",
+    "webview.console",
+    "webview.clear_log",
+];
+
 pub fn new_event_bus() -> EventBus {
     Arc::new(CoreEventBus::new())
 }

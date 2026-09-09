@@ -41,12 +41,34 @@ fn build_webview_css(theme: &copad_core::theme::Theme) -> String {
 
 pub struct WebViewPanel {
     pub id: String,
+    /// Identity of the PAGE, distinct from `id`, which identifies the pane.
+    ///
+    /// Minted here even though a pane holds exactly one page today: a tab id is
+    /// the key its history blob is named by (`browser::tabs::history_path`), so
+    /// introducing it later would mean migrating blobs that were written under
+    /// a different identity. One pane = one tab until the tab strip lands.
+    pub tab_id: String,
+    /// Data store this pane's cookies and logins belong to, from
+    /// `[browser] profile`.
+    ///
+    /// Nothing acts on a non-default value yet — the named-store plumbing is a
+    /// later work unit — but the authorization gate reasons about profiles
+    /// rather than panes, so the pane has to carry the same value
+    /// `TabManager::default_browser_profile` reports or the two disagree about
+    /// which panes a protection freezes.
+    pub profile: String,
     pub container: gtk4::Box,
     pub webview: webkit6::WebView,
+    mode: std::cell::Cell<copad_core::browser::TabMode>,
 }
 
 impl WebViewPanel {
-    pub fn new(url: &str, theme: &copad_core::theme::Theme) -> Self {
+    /// Whether this pane currently admits automation.
+    pub fn mode(&self) -> copad_core::browser::TabMode {
+        self.mode.get()
+    }
+
+    pub fn new(url: &str, theme: &copad_core::theme::Theme, profile: String) -> Self {
         // Dedicated web context for process isolation + sandbox paths
         let web_context = webkit6::WebContext::new();
         web_context.add_path_to_sandbox("/tmp", false);
@@ -277,8 +299,11 @@ impl WebViewPanel {
 
         Self {
             id: uuid::Uuid::new_v4().to_string(),
+            tab_id: uuid::Uuid::new_v4().to_string(),
+            profile,
             container,
             webview,
+            mode: std::cell::Cell::new(copad_core::browser::TabMode::Automation),
         }
     }
 
