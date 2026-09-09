@@ -24,6 +24,8 @@ final class TabViewController: NSViewController {
     /// path only saved on orderly `applicationWillTerminate`. This VC is the
     /// single writer. Suppressed during restore so replay doesn't re-save.
     private var sessionSaveTimer: Timer?
+    /// Removal tokens for the controller-scoped notification observers.
+    private var globalObservers: [any NSObjectProtocol] = []
     private var suppressSessionSave = false
 
     /// Reopens a plugin panel by name on session restore (decision #61 slice 6).
@@ -198,6 +200,19 @@ final class TabViewController: NSViewController {
             return true
         }
         return false
+    }
+
+    /// True when ANY webview in this window is in protected mode.
+    ///
+    /// Protection freezes the whole profile, not one tab: a concurrent tab on
+    /// the same profile is another window onto the same shared storage, so
+    /// freezing one while its sibling stays scriptable would be a boundary with
+    /// a door in it. Panes are single-profile until work unit B3, so "this
+    /// window" and "this profile" are the same set today.
+    var anyProtectedWebView: Bool {
+        paneManagers.contains { manager in
+            manager.allPanels().contains { ($0 as? WebViewController)?.tabMode == .protected }
+        }
     }
 
     func webView(id: String) -> WebViewController? {
@@ -428,6 +443,41 @@ final class TabViewController: NSViewController {
     /// Debounced persistence trigger (v3) — call after any structural mutation
     /// (new/close/switch tab, split, rename). Coalesces bursts into one atomic
     /// write ~800ms later on the main run loop. No-op while restoring.
+    deinit {
+        for token in globalObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+
+    /// Notification observers that are per-CONTROLLER, not per-tab.
+    ///
+    /// These used to be registered inside `addTab`, which meant one extra
+    /// observer for every tab ever opened — none of them removed when a tab
+    /// closed. Every navigation then enqueued a growing number of main-actor
+    /// tasks and timer resets, quietly making the app slower the longer it ran.
+    /// Registered once here, with the tokens kept so `deinit` can remove them.
+    private func registerGlobalObserversIfNeeded() {
+        guard globalObservers.isEmpty else { return }
+        globalObservers = [
+            NotificationCenter.default.addObserver(
+                forName: .terminalTitleChanged, object: nil, queue: .main,
+            ) { [weak self] _ in
+                Task { @MainActor in self?.refreshTabBar() }
+            },
+            // A browser pane's URL is part of the persisted layout, so a
+            // navigation must schedule a save the same way a split or a tab
+            // switch does. Without this, the only URL that ever reached disk
+            // was whatever the pane happened to show at the next structural
+            // change — and a pane opened blank and then navigated persisted
+            // nothing at all.
+            NotificationCenter.default.addObserver(
+                forName: .webviewURLChanged, object: nil, queue: .main,
+            ) { [weak self] _ in
+                Task { @MainActor in self?.scheduleSessionSave() }
+            },
+        ]
+    }
+
     func scheduleSessionSave() {
         guard !suppressSessionSave else { return }
         sessionSaveTimer?.invalidate()
@@ -526,13 +576,7 @@ final class TabViewController: NSViewController {
             self?.scheduleSessionSave()  // a pane closed (incl. non-active)
         }
 
-        NotificationCenter.default.addObserver(
-            forName: .terminalTitleChanged,
-            object: nil,
-            queue: .main,
-        ) { [weak self] _ in
-            Task { @MainActor in self?.refreshTabBar() }
-        }
+        registerGlobalObserversIfNeeded()
 
         manager.eventBus = eventBus
         paneManagers.append(manager)

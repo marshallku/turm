@@ -364,4 +364,58 @@ mod tests {
         s.tabs[1].history_generation = Some(3);
         assert_eq!(live_generations(&s), vec![("b".to_string(), 3)]);
     }
+
+    /// The Rust half of the cross-language schema check. The Swift half is
+    /// `copad-macos/Tests/CopadCoreTests/BrowserSnapshotTests.swift`, and **the
+    /// literal below must stay byte-identical to the one there.**
+    ///
+    /// Fully populated on purpose: a fixture of default values decodes and
+    /// re-encodes unchanged even when one side has gained a field the other
+    /// never learned, so it would prove nothing. Keys are sorted on both sides
+    /// (`serde_json::Value` orders a map by key with the `preserve_order`
+    /// feature off) so byte-equality is well defined.
+    ///
+    /// This pins TODAY's schema. It cannot detect a future `#[serde(default)]`
+    /// field that is omitted when empty — the rule that closes that gap is
+    /// procedural, and stated in the module docs: **a schema change updates
+    /// this fixture in the same commit.**
+    const SHARED_SWIFT_FIXTURE: &str = r#"{"active":1,"profile":"work","tabs":[{"history_depth":3,"history_generation":7,"id":"tab-a","last_active":1725840000,"pinned":true,"scroll_y":412.5,"title":"Pull Request #42","url":"https://github.com/o/r/pull/42"},{"id":"tab-b","last_active":1725840001,"url":"https://example.com"}]}"#;
+
+    #[test]
+    fn the_shared_swift_fixture_round_trips() {
+        let pane: BrowserPaneSnap =
+            serde_json::from_str(SHARED_SWIFT_FIXTURE).expect("fixture parses");
+        assert_eq!(pane.active, 1);
+        assert_eq!(pane.profile, "work");
+        assert_eq!(pane.tabs.len(), 2);
+        assert_eq!(pane.tabs[0].history_generation, Some(7));
+        assert_eq!(pane.tabs[0].history_depth, Some(3));
+        assert_eq!(pane.tabs[0].scroll_y, Some(412.5));
+        assert!(pane.tabs[0].pinned);
+        assert_eq!(pane.tabs[0].title, "Pull Request #42");
+        // Second tab exercises every omitted-when-default field.
+        assert!(!pane.tabs[1].pinned);
+        assert!(pane.tabs[1].title.is_empty());
+        assert_eq!(pane.tabs[1].history_generation, None);
+
+        // Re-encode through a key-sorted Value so the comparison is against the
+        // same ordering Swift's `.sortedKeys` produces.
+        let sorted = serde_json::to_value(&pane).expect("serializes");
+        assert_eq!(
+            serde_json::to_string(&sorted).expect("re-serializes"),
+            SHARED_SWIFT_FIXTURE
+        );
+    }
+
+    #[test]
+    fn a_tab_with_no_browser_state_omits_every_optional_field() {
+        // A pane the user never touched must serialize the way the
+        // pre-Workbench binary wrote it, or an older copad can no longer read
+        // the file.
+        let tab = BrowserTabSnap::new("t1", "https://e.com");
+        assert_eq!(
+            serde_json::to_string(&serde_json::to_value(&tab).unwrap()).unwrap(),
+            r#"{"id":"t1","last_active":0,"url":"https://e.com"}"#
+        );
+    }
 }

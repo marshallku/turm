@@ -202,6 +202,37 @@ char *copad_ffi_theme_get(const char *name);
 /// `copad_ffi_free_string`.
 char *copad_ffi_theme_list(void);
 
+// ---------------------------------------------------------------------------
+// Browser Workbench (docs/browser-workbench-plan.md, decision #100)
+//
+// The browser DATA types are mirrored in Swift (Session.swift already mirrors
+// the session model); the browser RULES are not, because a second
+// implementation of a security rule is a second implementation that can be
+// wrong on its own. These three are the rules.
+//
+// Each takes one JSON object and returns a heap-allocated NUL-terminated JSON
+// string the caller MUST free with `copad_ffi_free_string`. NULL means the
+// input was NULL, non-UTF-8, or unparseable — see `copad_ffi_last_error`, and
+// treat it as the fail-closed outcome for that call (empty URL / no pane /
+// refused), never as "carry on with the raw input".
+// ---------------------------------------------------------------------------
+
+/// `{ url, policy }` -> `{ url }`. Applies the `[browser] restore` policy.
+/// An unknown policy falls back to origin-only.
+char *copad_ffi_browser_canonicalize(const char *json);
+
+/// `{ pane }` -> `{ pane, repairs }`. Repairs an untrusted BrowserPaneSnap
+/// (invalid/duplicate ids, out-of-range active index, tab-count cap) and
+/// reports what it had to fix.
+char *copad_ffi_browser_normalize(const char *json);
+
+/// `{ method, mode, profile_protected }` ->
+/// `{ allowed, opaque_write, code?, message? }`.
+/// Answers both dispatcher questions at once: may this run, and must its
+/// result be replaced with a page-independent one. An unknown `mode` reads as
+/// protected.
+char *copad_ffi_browser_authorize(const char *json);
+
 #ifdef __cplusplus
 }
 #endif

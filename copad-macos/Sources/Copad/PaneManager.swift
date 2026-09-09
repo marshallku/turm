@@ -1,4 +1,5 @@
 import AppKit
+import CopadCore
 
 /// NSSplitView subclass that distributes all subviews equally on the first resize pass.
 /// Works for any number of subviews (N panes → each gets 1/N of available space).
@@ -355,7 +356,16 @@ final class PaneManager {
             return .terminal(cwd: t.currentCwd)
         }
         if let w = panel as? WebViewController {
-            return .webview(url: Self.canonicalWebviewURL(w.currentURL))
+            let policy = config.browserRestore
+            // One source for both fields, so the pane's `url` and its tab's
+            // `url` cannot disagree about which page this is. `snapshotSourceURL`
+            // (not `currentURL`) because a pane still loading has no live URL
+            // yet and `currentURL` would report "" — autosave would then erase
+            // the pane before it finished opening.
+            return .webview(
+                url: BrowserFFI.canonicalize(w.snapshotSourceURL, policy: policy).url,
+                pane: w.snapshotPane(policy: policy),
+            )
         }
         if let pl = panel as? PluginPanelController {
             return .plugin(name: pl.pluginName, panelName: pl.currentPanelName, version: nil)
@@ -417,8 +427,13 @@ final class PaneManager {
         switch content {
         case let .terminal(cwd):
             return AlacrittyTerminalViewController(config: config, theme: theme, cwd: cwd, initialInput: nil)
-        case let .webview(url):
-            return WebViewController(url: URL(string: url))
+        case let .webview(url, pane):
+            // An untrusted snapshot goes through the core normalizer before it
+            // reaches a controller. A rule that could not be consulted yields
+            // nil, and the pane falls back to single-URL restore rather than
+            // trusting unvalidated data.
+            let checked = pane.flatMap { BrowserFFI.normalize($0) }
+            return WebViewController(url: URL(string: url), pane: checked)
         case let .plugin(name, panelName, _):
             if let factory = pluginFactory, let panel = factory(name, panelName) {
                 return panel
@@ -446,28 +461,6 @@ final class PaneManager {
         }
     }
 
-    /// Decision #61 C6: reduce a live webview URL to a safe canonical form for
-    /// persistence — the **origin only** (`scheme://host[:port]`), http(s) only.
-    /// Path, query, fragment, and userinfo are ALL dropped, because every one of
-    /// them can carry credentials or one-time tokens (`user:pass@`, `?code=…`,
-    /// `#access_token=…`, `/reset/<token>`, `/oauth/callback/<code>`). Nothing
-    /// beyond the origin reaches disk. Restore reopens the site root — the safe
-    /// default absent a per-URL user approval. Non-http(s) / hostless / unparseable
-    /// persist as "" and restore to the blank URL-entry placeholder.
-    static func canonicalWebviewURL(_ raw: String) -> String {
-        // Parse first, then compare a lowercased scheme — URL schemes are
-        // case-insensitive, so `HTTPS://…` is valid and must not be dropped.
-        guard let comps = URLComponents(string: raw),
-              let scheme = comps.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",
-              let host = comps.host, !host.isEmpty
-        else { return "" }
-        var origin = URLComponents()
-        origin.scheme = scheme
-        origin.host = host
-        origin.port = comps.port
-        return origin.string ?? ""
-    }
 
     /// First non-nil custom title in DFS order. Mirrors Linux's
     /// per-tab custom-title lookup (collect panels, find_map). Returns

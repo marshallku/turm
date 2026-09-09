@@ -130,6 +130,13 @@ struct CopadConfig {
     /// matched in the NSEvent local monitor. Empty when no `[keybindings]`
     /// section is present.
     let keybindings: [String: String]
+    /// `[browser] restore` — how much of a live webview URL may be persisted:
+    /// `origin` (default) | `url` | `full`. Passed verbatim to the Rust
+    /// canonicaliser via `BrowserFFI`, which is the only place it is
+    /// interpreted; an unknown value falls back to `origin` THERE, so this
+    /// string is never validated twice (and cannot be validated differently)
+    /// on the two platforms. See decision #100.
+    let browserRestore: String
     /// PR 5c — raw `[[triggers]]` array from config.toml, walked from the
     /// TOMLKit table tree into JSON-friendly `[[String: Any]]` so it can be
     /// JSON-encoded and shipped to the Rust trigger engine via FFI. We don't
@@ -210,6 +217,7 @@ struct CopadConfig {
         let window = table["window"]?.table
         let tabs = table["tabs"]?.table
         let statusbar = table["statusbar"]?.table
+        let browser = table["browser"]?.table
 
         let bgImage = tomlString(background, "path") ?? tomlString(background, "image")
         let bgPath: String? = if let bgImage, !bgImage.isEmpty { expandTilde(bgImage) } else { nil }
@@ -253,6 +261,7 @@ struct CopadConfig {
                 height: tomlInt(statusbar, "height") ?? d.statusBar.height,
             ),
             keybindings: parseKeybindings(from: contents),
+            browserRestore: tomlString(browser, "restore") ?? d.browserRestore,
             triggers: parseTriggersArray(from: contents),
         )
     }
@@ -346,6 +355,7 @@ struct CopadConfig {
             tabsWidth: 200,
             statusBar: .defaults,
             keybindings: [:],
+            browserRestore: "origin",
             triggers: [],
         )
     }

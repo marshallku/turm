@@ -1,4 +1,5 @@
 import CCopadFFI
+import CopadCore
 import Foundation
 
 /// Persisted tab/split layout (v3 — decision #64). Wire shape mirrors
@@ -101,7 +102,11 @@ extension Session {
     /// "snake_case")]` PaneContent enum. Terminals persist only their cwd.
     enum PaneContent: Equatable {
         case terminal(cwd: String?)
-        case webview(url: String)
+        /// `pane` is the full browser state (tab list, active index, profile).
+        /// Additive and omitted when nil, so a file this binary writes stays
+        /// readable by an older one — which degrades to the single URL rather
+        /// than failing (decision #100 / plan r2-I4).
+        case webview(url: String, pane: BrowserPaneSnap?)
         case plugin(name: String, panelName: String?, version: String?)
         case cockpit
     }
@@ -150,7 +155,7 @@ extension Session.SplitSnap: Codable {
 
 extension Session.PaneContent: Codable {
     private enum CodingKeys: String, CodingKey {
-        case kind, cwd, url, name, version
+        case kind, cwd, url, name, version, pane
         case panelName = "panel_name"
     }
 
@@ -160,7 +165,13 @@ extension Session.PaneContent: Codable {
         case "terminal":
             self = .terminal(cwd: try c.decodeIfPresent(String.self, forKey: .cwd))
         case "webview":
-            self = .webview(url: try c.decode(String.self, forKey: .url))
+            self = .webview(
+                url: try c.decode(String.self, forKey: .url),
+                // A malformed `pane` must not fail the whole session load — the
+                // rest of the layout is still good, and losing one pane's tab
+                // list beats starting from an empty window.
+                pane: try? c.decodeIfPresent(BrowserPaneSnap.self, forKey: .pane),
+            )
         case "plugin":
             self = .plugin(
                 name: try c.decode(String.self, forKey: .name),
@@ -183,9 +194,10 @@ extension Session.PaneContent: Codable {
             try c.encode("terminal", forKey: .kind)
             // Omit when nil to match serde's `skip_serializing_if = "Option::is_none"`.
             try c.encodeIfPresent(cwd, forKey: .cwd)
-        case let .webview(url):
+        case let .webview(url, pane):
             try c.encode("webview", forKey: .kind)
             try c.encode(url, forKey: .url)
+            try c.encodeIfPresent(pane, forKey: .pane)
         case let .plugin(name, panelName, version):
             try c.encode("plugin", forKey: .kind)
             try c.encode(name, forKey: .name)

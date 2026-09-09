@@ -1224,6 +1224,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard let vc = tabVC else { completion(nil); return }
 
+        // Browser RPCs pass through the shared core gate before any handler
+        // runs. `completion` is REPLACED, not merely wrapped, so the same rule
+        // is re-applied when the result comes back — several of these handlers
+        // answer from an async callback, and a read that was already in flight
+        // when a tab entered `protected` has to be suppressed rather than
+        // answered with a stale value.
+        var completion = completion
+        switch browserGate(method: method, params: params, in: vc, completion: completion) {
+        case .notBrowser:
+            break
+        case let .refused(err):
+            completion(err)
+            return
+        case let .allowed(deliver):
+            completion = deliver
+        }
+
         switch method {
         case "system.ping":
             completion(["status": "ok"])
@@ -1631,6 +1648,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case "webview.page_info":
             runWebViewJS(WebViewJS.pageInfo(), params: params, in: vc, completion: completion)
 
+        // Backstop for the same set `browserGate` short-circuits above — kept so
+        // a future caller reaching this switch by another route still gets the
+        // truthful answer rather than `unknown_method`, which is
+        // indistinguishable from a typo.
+        case let m where Self.unimplementedBrowserMethods.contains(m):
+            completion(RPCError(
+                code: "unsupported_capability",
+                message: "\(method) is not implemented on macOS yet",
+            ))
+
         case "webview.screenshot":
             switch resolveWebView(params, in: vc) {
             case let .failure(err): completion(err)
@@ -1747,6 +1774,142 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 completion(parsed)
             }
         }
+    }
+
+    /// Browser methods that are WIRED but not yet built on macOS.
+    ///
+    /// Registering them matters: a `coctl` script gets a truthful,
+    /// machine-readable "not implemented yet" instead of `unknown_method`, which
+    /// is indistinguishable from a typo. `webview.tab.protect` is here because
+    /// protected mode's enforcement half — rebuild the web view so no
+    /// agent-installed script survives, purge the origin's service workers and
+    /// code caches — is work unit B5, and a flag that LOOKS like protection
+    /// while only half of it exists would be worse than no flag at all.
+    static let unimplementedBrowserMethods: Set<String> = [
+        "webview.tab.new", "webview.tab.list", "webview.tab.select",
+        "webview.tab.close", "webview.tab.move", "webview.tab.protect",
+        "webview.profile.list", "webview.profile.clear",
+        "browser.secret.list", "browser.secret.fill",
+        "browser.secret.save", "browser.secret.delete",
+        "webview.net", "webview.console", "webview.clear_log",
+    ]
+
+    /// Outcome of the shared browser authorization gate.
+    private enum BrowserGateOutcome {
+        /// Not a browser method — the dispatcher proceeds untouched.
+        case notBrowser
+        case refused(RPCError)
+        /// Proceed, but deliver results through this replacement completion.
+        case allowed(deliver: (Any?) -> Void)
+    }
+
+    /// Ask `copad-core` whether a browser RPC may run, and prepare the delivery
+    /// path it must return through.
+    ///
+    /// The rule itself lives in Rust (`browser::authorize`) and is reached over
+    /// FFI, so Linux and macOS cannot answer this question differently — which
+    /// is the entire reason it is not implemented here.
+    ///
+    /// Two checks, not one:
+    ///
+    /// 1. **At dispatch** — refuse before the handler runs.
+    /// 2. **At delivery** — re-ask, because `execute_js`, `screenshot`,
+    ///    `get_content` and the JS-snippet commands all answer from an async
+    ///    callback. Without the second check, a read issued a moment before a
+    ///    tab entered `protected` would still hand back the page.
+    ///
+    /// A permitted write additionally has its result replaced with a fixed
+    /// response. `click` reporting "ok" vs "not found" is a selector oracle —
+    /// an agent can probe `input[name=csrf][value^="a"]`, then `^="ab"`, and
+    /// read a protected page one character at a time through nothing but
+    /// allowed writes. The **error** is replaced too, for the same reason: a
+    /// refused-vs-succeeded distinction leaks exactly the same bit.
+    private func browserGate(
+        method: String,
+        params: [String: Any],
+        in vc: TabViewController,
+        completion: @escaping (Any?) -> Void,
+    ) -> BrowserGateOutcome {
+        guard method.hasPrefix("webview.") || method.hasPrefix("browser.") else {
+            return .notBrowser
+        }
+
+        // "Not built yet" is answered BEFORE the policy gate. `browser.secret.*`
+        // requires a protected target, and production tabs are never protected
+        // until B5 — so gating first would answer `requires_protected` and send
+        // the caller to `webview.tab.protect`, which is itself unimplemented.
+        // A truthful dead end beats a loop.
+        if Self.unimplementedBrowserMethods.contains(method) {
+            return .refused(RPCError(
+                code: "unsupported_capability",
+                message: "\(method) is not implemented on macOS yet",
+            ))
+        }
+
+        // A command with no resolvable target (`webview.open` creates one) is
+        // judged against the profile only. The target is captured WEAKLY so the
+        // delivery check below can re-read its mode rather than replaying a
+        // value that was true when dispatch happened.
+        let target: WebViewController? = switch resolveWebView(params, in: vc) {
+        case let .success(webVC): webVC
+        case .failure: nil
+        }
+        let hadTarget = target != nil
+
+        let decision = BrowserFFI.authorize(
+            method: method,
+            mode: (target?.tabMode ?? .automation).rawValue,
+            profileProtected: vc.anyProtectedWebView,
+        )
+        guard decision.allowed else {
+            return .refused(RPCError(
+                code: decision.code ?? "tab_protected",
+                message: decision.message ?? "refused by browser policy",
+            ))
+        }
+
+        return .allowed(deliver: { [weak target, weak vc] result in
+            // Re-evaluate against the state as it is NOW. Reusing the mode
+            // captured at dispatch would authorize a result with state that is
+            // by definition stale — the whole reason this second check exists.
+            //
+            // Fail closed when the target or the window has gone away
+            // mid-flight: a pane that was torn down while its callback was in
+            // flight cannot be asked what mode it is in, and the profile scan
+            // only sees panels still in the window, so "not found" must not
+            // read as "was never protected".
+            guard let vc else {
+                completion(RPCError(
+                    code: "tab_closed",
+                    message: "the window went away before \(method) could answer",
+                ))
+                return
+            }
+            if hadTarget, target == nil {
+                completion(RPCError(
+                    code: "tab_closed",
+                    message: "the target pane closed before \(method) could answer",
+                ))
+                return
+            }
+            let now = BrowserFFI.authorize(
+                method: method,
+                mode: (target?.tabMode ?? .automation).rawValue,
+                profileProtected: vc.anyProtectedWebView,
+            )
+            guard now.allowed else {
+                completion(RPCError(
+                    code: now.code ?? "tab_protected",
+                    message: now.message ?? "refused by browser policy",
+                ))
+                return
+            }
+            if now.opaqueWrite {
+                completion(["status": "ok", "protected": true])
+                return
+            }
+            completion(result)
+        })
     }
 
     /// Resolves the target WebViewController for an `id`-aware webview command.

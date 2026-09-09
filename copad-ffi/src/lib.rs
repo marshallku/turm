@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use copad_core::action_registry::ActionResult;
 use copad_core::background::{self, BackgroundPaths};
+use copad_core::browser;
 use copad_core::event_bus::Event;
 use copad_core::plugin;
 use copad_core::protocol::ResponseError;
@@ -864,4 +865,382 @@ pub extern "C" fn copad_ffi_theme_list() -> *mut c_char {
     };
     clear_last_error();
     cs.into_raw()
+}
+
+// ============================================================================
+// Browser Workbench (docs/browser-workbench-plan.md, decision #100)
+//
+// Three entry points, and deliberately only three. The browser DATA types are
+// fine for Swift to mirror — `Session.swift` already mirrors the whole session
+// model — but the browser RULES are not, because a second implementation of a
+// security rule is a second implementation that can be wrong on its own. Every
+// bug B1a fixed in `canonical_origin` (backslash authority smuggling,
+// percent-encoded token keys) still lived in the Swift copy this replaces.
+//
+// Each takes and returns one JSON object, in the established
+// `*mut c_char` / `copad_ffi_free_string` / `copad_ffi_last_error` shape.
+// ============================================================================
+
+/// Read a NUL-terminated UTF-8 JSON argument into a `serde_json::Value`.
+/// Shared by the browser entry points so each one's failure diagnostics
+/// name itself consistently.
+///
+/// # Safety
+///
+/// `json` must be NULL or a NUL-terminated UTF-8 pointer valid for the call.
+unsafe fn parse_json_arg(fn_name: &str, json: *const c_char) -> Option<Value> {
+    if json.is_null() {
+        set_last_error(format!("{fn_name}: json pointer is NULL"));
+        return None;
+    }
+    // SAFETY: caller contract.
+    let bytes = unsafe { CStr::from_ptr(json) }.to_bytes();
+    let s = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(format!("{fn_name}: input is not valid UTF-8: {e}"));
+            return None;
+        }
+    };
+    match serde_json::from_str(s) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            set_last_error(format!("{fn_name}: JSON parse error: {e}"));
+            None
+        }
+    }
+}
+
+/// Serialize a response value into an owned C string.
+fn json_response(fn_name: &str, value: &Value) -> *mut c_char {
+    let serialized = match serde_json::to_string(value) {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(format!("{fn_name}: serialize failed: {e}"));
+            return ptr::null_mut();
+        }
+    };
+    match CString::new(serialized) {
+        Ok(c) => {
+            clear_last_error();
+            c.into_raw()
+        }
+        Err(e) => {
+            set_last_error(format!("{fn_name}: response contained NUL byte: {e}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `{ url, policy }` → `{ url, persist_title }`.
+///
+/// Applies `[browser] restore` to a live URL. An unknown `policy` string falls
+/// back to `origin` — the safe direction, matching `BrowserConfig::restore_policy`
+/// — because a typo must never silently widen what reaches disk.
+///
+/// `persist_title` is returned because a page TITLE carries the same exposure as
+/// a URL ("Reset password for …"), and the caller must not re-derive it by
+/// comparing the raw policy string itself: `"ORIGIN"`, `" origin "` and a typo
+/// all resolve to origin-only HERE, and a second interpretation on the Swift
+/// side got that wrong. One parse, one answer.
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_canonicalize(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_canonicalize";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+    let url = input.get("url").and_then(Value::as_str).unwrap_or("");
+    let policy = input
+        .get("policy")
+        .and_then(Value::as_str)
+        .and_then(browser::RestorePolicy::parse)
+        .unwrap_or_default();
+    json_response(
+        NAME,
+        &json!({
+            "url": browser::canonicalize_for_restore(url, policy),
+            "persist_title": policy.is_sensitive(),
+        }),
+    )
+}
+
+/// `{ pane }` → `{ pane, repairs }`.
+///
+/// Runs an untrusted `BrowserPaneSnap` through `browser::tabs::normalize`, which
+/// is what keeps a hand-edited or imported session document from becoming
+/// filesystem authority. `repairs` reports what had to be fixed so a caller can
+/// decide whether to tell the user.
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_normalize(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_normalize";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+    let Some(pane_value) = input.get("pane") else {
+        set_last_error(format!("{NAME}: missing 'pane'"));
+        return ptr::null_mut();
+    };
+    let mut pane: browser::BrowserPaneSnap = match serde_json::from_value(pane_value.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            set_last_error(format!("{NAME}: 'pane' does not match the schema: {e}"));
+            return ptr::null_mut();
+        }
+    };
+    let repairs = browser::tabs::normalize(&mut pane);
+    json_response(
+        NAME,
+        &json!({
+            "pane": pane,
+            "repairs": {
+                "dropped_invalid_id": repairs.dropped_invalid_id,
+                "dropped_duplicate_id": repairs.dropped_duplicate_id,
+                "dropped_over_cap": repairs.dropped_over_cap,
+                "clamped_active": repairs.clamped_active,
+                "clean": repairs.is_clean(),
+            }
+        }),
+    )
+}
+
+/// `{ method, mode, profile_protected }` → `{ allowed, opaque_write, code?, message? }`.
+///
+/// One call answers both questions a dispatcher has: may this run, and must its
+/// result be replaced with a page-independent one. Returning them together is
+/// what lets the caller re-ask cheaply at delivery time — and it must, because a
+/// read that was already in flight when a tab entered `protected` has to be
+/// suppressed rather than answered.
+///
+/// An unrecognised `mode` is treated as `protected`, i.e. the restrictive
+/// reading: a caller that cannot say what state a tab is in must not be told
+/// the tab is open for automation.
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_authorize(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_authorize";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+    let method = input.get("method").and_then(Value::as_str).unwrap_or("");
+    let mode = match input.get("mode").and_then(Value::as_str) {
+        Some("automation") => browser::TabMode::Automation,
+        // Anything else — including a missing or misspelled value — reads as
+        // protected. Fail closed.
+        _ => browser::TabMode::Protected,
+    };
+    let profile_protected = input
+        .get("profile_protected")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let opaque_write = browser::authorize::redacts_write_result(method, mode, profile_protected);
+    match browser::authorize(method, mode, profile_protected) {
+        Ok(()) => json_response(
+            NAME,
+            &json!({ "allowed": true, "opaque_write": opaque_write }),
+        ),
+        Err(e) => json_response(
+            NAME,
+            &json!({
+                "allowed": false,
+                "opaque_write": opaque_write,
+                "code": e.code,
+                "message": e.message,
+            }),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod browser_ffi_tests {
+    use super::*;
+
+    /// Call one of the browser entry points with a JSON literal and get the
+    /// response back as a parsed value, freeing the Rust allocation exactly
+    /// once — the same lifecycle the Swift facade implements.
+    fn call(f: unsafe extern "C" fn(*const c_char) -> *mut c_char, input: &str) -> Option<Value> {
+        let arg = CString::new(input).expect("test literal has no NUL");
+        // SAFETY: `arg` outlives the call; the returned pointer is freed below.
+        let out = unsafe { f(arg.as_ptr()) };
+        if out.is_null() {
+            return None;
+        }
+        // SAFETY: the entry points return a pointer from `CString::into_raw`.
+        let owned = unsafe { CString::from_raw(out) };
+        Some(serde_json::from_slice(owned.as_bytes()).expect("response is JSON"))
+    }
+
+    #[test]
+    fn canonicalize_applies_the_requested_policy() {
+        let origin = call(
+            copad_ffi_browser_canonicalize,
+            r#"{"url":"https://github.com/o/r/pull/42","policy":"origin"}"#,
+        )
+        .expect("non-null");
+        assert_eq!(origin["url"], "https://github.com");
+
+        let full = call(
+            copad_ffi_browser_canonicalize,
+            r#"{"url":"https://github.com/o/r/pull/42","policy":"url"}"#,
+        )
+        .expect("non-null");
+        assert_eq!(full["url"], "https://github.com/o/r/pull/42");
+    }
+
+    #[test]
+    fn canonicalize_says_whether_the_title_may_be_persisted() {
+        // A title carries the same exposure as a URL, and the caller must not
+        // re-derive this by comparing the raw policy string (codex review C1).
+        for (policy, expected) in [("origin", false), ("url", true), ("full", true)] {
+            let out = call(
+                copad_ffi_browser_canonicalize,
+                &format!(r#"{{"url":"https://e.com/x","policy":"{policy}"}}"#),
+            )
+            .expect("non-null");
+            assert_eq!(out["persist_title"], expected, "{policy}");
+        }
+        // Case and whitespace resolve HERE, so they cannot disagree with a
+        // second interpretation elsewhere.
+        for weird in ["ORIGIN", " origin ", "nonsense"] {
+            let out = call(
+                copad_ffi_browser_canonicalize,
+                &format!(r#"{{"url":"https://e.com/x","policy":"{weird}"}}"#),
+            )
+            .expect("non-null");
+            assert_eq!(out["persist_title"], false, "{weird}");
+            assert_eq!(out["url"], "https://e.com", "{weird}");
+        }
+    }
+
+    #[test]
+    fn canonicalize_falls_back_to_origin_on_a_bad_policy() {
+        // A typo must never silently widen what reaches disk.
+        let out = call(
+            copad_ffi_browser_canonicalize,
+            r#"{"url":"https://e.com/secret/path","policy":"ful"}"#,
+        )
+        .expect("non-null");
+        assert_eq!(out["url"], "https://e.com");
+    }
+
+    #[test]
+    fn canonicalize_carries_the_backslash_and_percent_fixes_across_the_boundary() {
+        // The two bugs the deleted Swift copy still had.
+        let bs = call(
+            copad_ffi_browser_canonicalize,
+            r#"{"url":"https://example.com\\reset\\SECRET","policy":"origin"}"#,
+        )
+        .expect("non-null");
+        assert_eq!(bs["url"], "https://example.com");
+
+        let pct = call(
+            copad_ffi_browser_canonicalize,
+            r#"{"url":"https://e.com/?%63ode=SECRET&page=2","policy":"url"}"#,
+        )
+        .expect("non-null");
+        assert_eq!(pct["url"], "https://e.com/?page=2");
+    }
+
+    #[test]
+    fn normalize_repairs_an_untrusted_pane_and_reports_what_it_did() {
+        let out = call(
+            copad_ffi_browser_normalize,
+            r#"{"pane":{"tabs":[
+                {"id":"a","url":"https://e.com"},
+                {"id":"..","url":"https://e.com"},
+                {"id":"a","url":"https://e.com"}
+            ],"active":9,"profile":"default"}}"#,
+        )
+        .expect("non-null");
+        assert_eq!(out["pane"]["tabs"].as_array().unwrap().len(), 1);
+        assert_eq!(out["pane"]["active"], 0);
+        assert_eq!(out["repairs"]["dropped_invalid_id"], 1);
+        assert_eq!(out["repairs"]["dropped_duplicate_id"], 1);
+        assert_eq!(out["repairs"]["clean"], false);
+    }
+
+    #[test]
+    fn authorize_answers_both_questions_in_one_call() {
+        let read = call(
+            copad_ffi_browser_authorize,
+            r#"{"method":"webview.get_content","mode":"protected","profile_protected":true}"#,
+        )
+        .expect("non-null");
+        assert_eq!(read["allowed"], false);
+        assert_eq!(read["code"], "tab_protected");
+
+        let write = call(
+            copad_ffi_browser_authorize,
+            r#"{"method":"webview.click","mode":"protected","profile_protected":true}"#,
+        )
+        .expect("non-null");
+        assert_eq!(write["allowed"], true);
+        assert_eq!(write["opaque_write"], true);
+
+        let normal = call(
+            copad_ffi_browser_authorize,
+            r#"{"method":"webview.click","mode":"automation","profile_protected":false}"#,
+        )
+        .expect("non-null");
+        assert_eq!(normal["allowed"], true);
+        assert_eq!(normal["opaque_write"], false);
+    }
+
+    #[test]
+    fn authorize_reads_an_unknown_mode_as_protected() {
+        // Fail closed: a caller that cannot say what state a tab is in must not
+        // be told the tab is open for automation.
+        for body in [
+            r#"{"method":"webview.get_content","mode":"bogus"}"#,
+            r#"{"method":"webview.get_content"}"#,
+        ] {
+            let out = call(copad_ffi_browser_authorize, body).expect("non-null");
+            assert_eq!(out["allowed"], false, "{body}");
+        }
+    }
+
+    #[test]
+    fn malformed_input_returns_null_with_a_diagnostic_rather_than_a_guess() {
+        for f in [
+            copad_ffi_browser_canonicalize as unsafe extern "C" fn(*const c_char) -> *mut c_char,
+            copad_ffi_browser_normalize,
+            copad_ffi_browser_authorize,
+        ] {
+            assert!(call(f, "{not json").is_none());
+            assert!(!last_error_string().is_empty());
+        }
+        // A NULL pointer is a caller bug, not a parse failure — also NULL out.
+        // SAFETY: passing NULL is exactly the case under test.
+        assert!(unsafe { copad_ffi_browser_normalize(ptr::null()) }.is_null());
+    }
+
+    #[test]
+    fn normalize_rejects_a_pane_that_is_not_a_pane() {
+        assert!(call(copad_ffi_browser_normalize, r#"{"pane":42}"#).is_none());
+        assert!(call(copad_ffi_browser_normalize, r#"{}"#).is_none());
+    }
+
+    fn last_error_string() -> String {
+        let p = copad_ffi_last_error();
+        if p.is_null() {
+            return String::new();
+        }
+        // SAFETY: `copad_ffi_last_error` returns a pointer to a thread-local
+        // CString owned by Rust; we only read it.
+        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    }
 }
