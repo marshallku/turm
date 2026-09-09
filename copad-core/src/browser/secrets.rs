@@ -237,6 +237,107 @@ pub fn backend_unavailable(detail: &str) -> ResponseError {
     )
 }
 
+/// The credential index — metadata only, on disk.
+///
+/// Separate from the secret material by construction: this file is a list of
+/// [`CredentialRef`], and that type has no field that can hold a secret. It is
+/// still `0600`, because the set of sites you have accounts on is itself worth
+/// protecting.
+pub fn load_index() -> Vec<CredentialRef> {
+    let path = credential_index_path();
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str(&raw).unwrap_or_else(|e| {
+        eprintln!("[copad] credential index parse failed: {e}");
+        Vec::new()
+    })
+}
+
+/// Replace the index. temp → rename, so a crash mid-write cannot leave a
+/// truncated list that would silently "forget" credentials whose secrets are
+/// still sitting in the keychain.
+pub fn save_index(entries: &[CredentialRef]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let path = credential_index_path();
+    let dir = path
+        .parent()
+        .ok_or_else(|| "credential index has no parent directory".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+
+    let body = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| format!("open {}: {e}", tmp.display()))?;
+        f.write_all(body.as_bytes())
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        f.sync_all()
+            .map_err(|e| format!("fsync {}: {e}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename into {}: {e}", path.display())
+    })
+}
+
+/// Add or replace an entry, keyed by `id`.
+pub fn upsert(entry: CredentialRef) -> Result<Vec<CredentialRef>, String> {
+    let mut all = load_index();
+    all.retain(|c| c.id != entry.id);
+    all.push(entry);
+    all.sort_by(|a, b| a.id.cmp(&b.id));
+    save_index(&all)?;
+    Ok(all)
+}
+
+/// Forget an entry. Returns whether one was there. The caller deletes the
+/// secret from the keychain FIRST — an index entry removed while its secret
+/// survives is an orphan nothing can ever clean up.
+pub fn remove(id: &str) -> Result<bool, String> {
+    let mut all = load_index();
+    let before = all.len();
+    all.retain(|c| c.id != id);
+    let removed = all.len() != before;
+    if removed {
+        save_index(&all)?;
+    }
+    Ok(removed)
+}
+
+/// Entries whose origin matches, or all of them when `origin` is None.
+pub fn list(origin: Option<&str>) -> Vec<CredentialRef> {
+    let all = load_index();
+    match origin {
+        Some(o) => all
+            .into_iter()
+            .filter(|c| origin_matches(&c.origin, o))
+            .collect(),
+        None => all,
+    }
+}
+
+/// A credential id must be usable as a keychain account string and must not be
+/// mistakable for a path. Deliberately permissive about the SHAPE (an id is
+/// conventionally `host/username`) but strict about control characters,
+/// whitespace and length.
+pub fn is_valid_credential_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 256
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| !c.is_control() && c != '\\' && !c.is_whitespace())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +531,132 @@ mod tests {
             !debug.contains("password_input"),
             "FillRequest must not carry a target observation: {debug}"
         );
+    }
+
+    // ---- the credential index ----
+
+    fn with_temp_state<T>(tag: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = super::super::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("copad-cred-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_xdg = std::env::var("XDG_STATE_HOME").ok();
+        // SAFETY: TEST_ENV_LOCK serializes every test that touches these vars.
+        unsafe {
+            std::env::set_var("HOME", &root);
+            std::env::set_var("XDG_STATE_HOME", root.join("state"));
+        }
+        let out = f();
+        // SAFETY: still holding the lock.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_xdg {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        out
+    }
+
+    #[test]
+    fn the_index_round_trips_and_holds_no_secret() {
+        with_temp_state("roundtrip", || {
+            upsert(cred()).unwrap();
+            let all = load_index();
+            assert_eq!(all.len(), 1);
+            assert_eq!(all[0].id, "github.com/marshallku");
+            // The guard that matters: whatever reaches disk cannot carry the
+            // password, because the TYPE cannot. Checked against the object's
+            // KEYS, not a substring — `slot: "password"` is the field NAME a
+            // credential fills and is exactly right to persist.
+            let raw = std::fs::read_to_string(credential_index_path()).unwrap();
+            let parsed: Vec<serde_json::Map<String, serde_json::Value>> =
+                serde_json::from_str(&raw).expect("index is a JSON array of objects");
+            for entry in &parsed {
+                for key in entry.keys() {
+                    assert!(
+                        !matches!(key.as_str(), "password" | "secret" | "value" | "token"),
+                        "the credential index must not persist a `{key}` field: {raw}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn the_index_file_is_0600() {
+        with_temp_state("mode", || {
+            use std::os::unix::fs::PermissionsExt;
+            upsert(cred()).unwrap();
+            let m = std::fs::metadata(credential_index_path()).unwrap();
+            assert_eq!(m.permissions().mode() & 0o777, 0o600);
+        });
+    }
+
+    #[test]
+    fn upsert_replaces_rather_than_duplicating() {
+        with_temp_state("upsert", || {
+            upsert(cred()).unwrap();
+            let mut updated = cred();
+            updated.username = "renamed".into();
+            let all = upsert(updated).unwrap();
+            assert_eq!(all.len(), 1);
+            assert_eq!(all[0].username, "renamed");
+        });
+    }
+
+    #[test]
+    fn remove_reports_whether_anything_was_there() {
+        with_temp_state("remove", || {
+            upsert(cred()).unwrap();
+            assert!(remove("github.com/marshallku").unwrap());
+            assert!(!remove("github.com/marshallku").unwrap());
+            assert!(load_index().is_empty());
+        });
+    }
+
+    #[test]
+    fn list_filters_by_exact_origin() {
+        with_temp_state("list", || {
+            upsert(cred()).unwrap();
+            let mut other = cred();
+            other.id = "gitlab.com/me".into();
+            other.origin = "https://gitlab.com".into();
+            upsert(other).unwrap();
+
+            assert_eq!(list(None).len(), 2);
+            assert_eq!(list(Some("https://github.com")).len(), 1);
+            // Exact, never a suffix match — the same rule the fill validator
+            // enforces, so listing cannot suggest a credential that could not
+            // then be filled.
+            assert!(list(Some("https://evil.github.com")).is_empty());
+        });
+    }
+
+    #[test]
+    fn a_corrupt_index_reads_as_empty_rather_than_failing_startup() {
+        with_temp_state("corrupt", || {
+            let path = credential_index_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"{not json").unwrap();
+            assert!(load_index().is_empty());
+        });
+    }
+
+    #[test]
+    fn credential_ids_reject_control_characters_and_traversal() {
+        assert!(is_valid_credential_id("github.com/marshallku"));
+        assert!(!is_valid_credential_id(""));
+        assert!(!is_valid_credential_id("a/../b"));
+        assert!(!is_valid_credential_id("a\nb"));
+        assert!(!is_valid_credential_id("a b"));
+        assert!(!is_valid_credential_id(&"x".repeat(257)));
     }
 }

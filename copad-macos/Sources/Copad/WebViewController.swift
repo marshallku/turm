@@ -4,172 +4,69 @@ import CopadCore
 
 // MARK: - WebViewController
 
+/// A browser pane: a tab strip, a toolbar, and one visible `BrowserTab`.
+///
+/// Everything that belongs to a *page* lives on `BrowserTab`; this owns the
+/// chrome and the tab list. Inactive tabs stay alive but out of the view
+/// hierarchy — the B3 spike measured `takeSnapshot` on a web view in no window
+/// at all and it rendered correctly, so a background tab needs no hidden-window
+/// trick to remain screenshottable.
 @MainActor
 final class WebViewController: NSViewController, CopadPanel {
     let panelID: String
 
-    private(set) var webView: WKWebView!
+    private(set) var tabs: [BrowserTab] = []
+    private(set) var activeIndex = 0
 
-    /// Focus target for `panel.focusTarget` — the WKWebView is the
-    /// actual keyboard receiver; the controller's `view` is a layout
-    /// container holding the URL bar + back/forward/reload + webView.
-    var focusTarget: NSView {
-        webView ?? view
-    }
+    var activeTab: BrowserTab { tabs[activeIndex] }
+
+    /// The active tab's web view. Kept as a property name so the socket layer,
+    /// which reaches for `webVC.webView.takeSnapshot`, did not have to change
+    /// when the pane gained tabs.
+    var webView: WKWebView! { tabs.indices.contains(activeIndex) ? tabs[activeIndex].webView : nil }
+
+    /// Focus target for `panel.focusTarget` — the WKWebView is the actual
+    /// keyboard receiver; the controller's `view` is a layout container holding
+    /// the tab strip + URL bar + navigation buttons + webView.
+    var focusTarget: NSView { webView ?? view }
 
     private(set) var currentTitle: String = "Web"
-    private var startURL: URL?
-    private var started = false
-
-    /// Stable identity for this pane's (currently sole) browser tab. Seeded
-    /// from a restored snapshot so a tab keeps its identity — and therefore its
-    /// future history blob — across restarts, rather than being reissued each
-    /// launch. Work unit B3 turns this into a list.
-    private(set) var tabID: String
-
-    /// The URL this pane was restored with, held until a main-frame navigation
-    /// supplies an authoritative replacement.
-    ///
-    /// Autosave runs on a timer, so it fires while a restored pane is still
-    /// loading — and `webView.url` is nil until WebKit has one. Without this,
-    /// a snapshot taken in that window would persist `""` and **erase the pane
-    /// before it ever finished opening**. It also means a pane whose first load
-    /// FAILED survives to be retried next launch.
-    private var pendingURL: String?
-
-    /// True once `pendingURL`'s navigation has been reported as failed.
-    ///
-    /// A failed destination is still worth persisting — it is where the user
-    /// asked to go, and a restart should retry it. But it must not outrank a
-    /// LATER same-document navigation: after a failed hop to B, an SPA route
-    /// change or fragment on the page still showing A means the user is on A,
-    /// and B is history. Without this flag nothing could ever clear B (the URL
-    /// observer only clears on equality, and no commit is coming).
-    private var pendingFailed = false
-
-    /// Identity of the navigation `pendingURL` belongs to.
-    ///
-    /// The delegate callbacks are `nonisolated` and hop to the main actor, so
-    /// they run some time AFTER WebKit called them. Without an identity check,
-    /// page A committing and then the user navigating to B means A's queued
-    /// callback clears B's pending destination — and autosave persists A while
-    /// B is still loading, which is the exact bug `pendingURL` exists to
-    /// prevent, reintroduced through the back door. `ObjectIdentifier` rather
-    /// than the `WKNavigation` itself because only the former is `Sendable`.
-    private var pendingNavigationID: ObjectIdentifier?
-
-    /// Does a delegate callback belong to the navigation we are tracking?
-    /// A callback we cannot identify is accepted only when we are not tracking
-    /// one either, so an unidentifiable straggler can never clobber a live
-    /// request.
-    private func isCurrentNavigation(_ id: ObjectIdentifier?) -> Bool {
-        guard let pendingNavigationID else { return id == nil || pendingURL == nil }
-        return id == pendingNavigationID
-    }
-
-    /// Whether this tab currently admits automation. Always `.automation` in
-    /// production until work unit B5 — the enforcement half of protected mode
-    /// (rebuild the web view, purge the origin's service workers and code
-    /// caches) does not exist yet, and a flag that *looks* like protection
-    /// while only half of it is built would be worse than no flag at all.
-    /// `webview.tab.protect` answers `unsupported_capability` until then.
-    private(set) var tabMode: TabMode = .automation
-
-    /// Mirrors `copad_core::browser::secrets::TabMode`.
-    enum TabMode: String {
-        case automation
-        case protected
-    }
 
     private var urlField: NSTextField!
     private var backButton: NSButton!
     private var forwardButton: NSButton!
     private var reloadButton: NSButton!
-    private var observations: [NSKeyValueObservation] = []
+    private var tabStrip: NSStackView!
+    private var tabStripScroll: NSScrollView!
+    private var webContainer: NSView!
+    private var webConstraints: [NSLayoutConstraint] = []
 
     /// Set by AppDelegate after EventBus is created.
     weak var eventBus: EventBus?
 
+    /// `[browser] capture_bodies`. Off by default: bodies are the likeliest
+    /// place for a secret to end up in a file the agent can read.
+    var captureBodies = false
+
+    /// Restore state held until `startIfNeeded`, so the pane's tabs are built
+    /// once rather than half-built in `init` and half in `loadView`.
+    private var pendingRestore: BrowserPaneSnap?
+    private var pendingInitialURL: URL?
+    private var started = false
+
+    // MARK: - Lifecycle
+
     init(url: URL? = nil, restoreID: String? = nil, pane: BrowserPaneSnap? = nil) {
-        self.panelID = restoreID ?? UUID().uuidString
-
-        // Identity and URL both come from the ACTIVE tab, not the first one.
-        // Taking `tabs.first` would hand tab A's identity to tab B's page for
-        // any pane where the user had switched away from the first tab, and the
-        // next autosave would persist that wrong pairing — quietly transplanting
-        // one tab's history blob onto another's page once B2 lands.
-        //
-        // `active` is safe to index because a restored pane reaches here only
-        // through `BrowserFFI.normalize`, which clamps it into range (and drops
-        // every id that fails the Rust charset rule — so there is nothing left
-        // for Swift to validate, and validating again would be the duplicated
-        // security rule this whole layer exists to remove).
-        let activeTab = pane.flatMap { p -> BrowserTabSnap? in
-            p.tabs.indices.contains(p.active) ? p.tabs[p.active] : p.tabs.first
-        }
-        tabID = activeTab?.id ?? BrowserSnapshot.freshTabID()
-
-        // The legacy `url` field is the fallback for a pane written before the
-        // Workbench, or one whose tab list did not survive normalization.
-        let restored = activeTab.flatMap { $0.url.isEmpty ? nil : URL(string: $0.url) } ?? url
-        startURL = restored
-        pendingURL = restored?.absoluteString
-        pendingFailed = false
+        panelID = restoreID ?? UUID().uuidString
+        pendingInitialURL = url
+        // A restored pane reaches here only through `BrowserFFI.normalize`,
+        // which has already clamped `active` into range and dropped every id
+        // that fails the Rust charset rule — so there is nothing left for Swift
+        // to validate, and validating again would be the duplicated security
+        // rule this layer exists to remove.
+        pendingRestore = (pane?.tabs.isEmpty == false) ? pane : nil
         super.init(nibName: nil, bundle: nil)
-    }
-
-    /// Regenerate this pane's persistable browser state.
-    ///
-    /// Regenerated rather than carried: `PaneManager` rebuilds `PaneContent`
-    /// from the live panel on every autosave, so a stashed snapshot would go
-    /// stale the moment the user navigated. `webView` is read optionally so a
-    /// snapshot taken before `loadView` yields the pending URL instead of
-    /// trapping on the implicitly-unwrapped property.
-    func snapshotPane(policy: String) -> BrowserPaneSnap {
-        let resolved = BrowserSnapshot.resolveURL(
-            live: webView?.url?.absoluteString,
-            pending: pendingURL,
-        )
-        let decision = BrowserFFI.canonicalize(resolved, policy: policy)
-        return BrowserSnapshot.pane(
-            tabID: tabID,
-            url: decision.url,
-            // A page title carries the same exposure as a URL. Whether it may be
-            // persisted is Rust's call, not a string comparison here.
-            title: decision.persistTitle ? currentTitle : "",
-        )
-    }
-
-    /// WebKit now reports `live`. Retire the pending destination once it has
-    /// been reached, and schedule a save either way.
-    ///
-    /// Clearing on equality is safe precisely because it is a no-op for the
-    /// snapshot at that instant — `resolveURL` would return the same string
-    /// from either source. What it buys is that a LATER same-document
-    /// navigation is not shadowed by a stale pending value that nothing else
-    /// would ever clear (fragment and SPA route changes never commit).
-    ///
-    /// The failed-load half of the contract is restored by
-    /// `didFailProvisionalNavigation`, which re-arms pending when WebKit
-    /// reverts to the previously committed URL.
-    private func noteURLChanged(_ live: String?) {
-        if let live, !live.isEmpty, live != "about:blank" {
-            // Reached, or superseded: a live URL arriving after a FAILED
-            // destination means the document moved on without it.
-            if live == pendingURL || pendingFailed {
-                pendingURL = nil
-                pendingFailed = false
-                pendingNavigationID = nil
-            }
-        }
-        NotificationCenter.default.post(name: .webviewURLChanged, object: self)
-    }
-
-    /// The URL a snapshot would record, before canonicalisation. Used by
-    /// `PaneManager` so the pane's own `url` field and its tab's `url` cannot
-    /// disagree about which page this is.
-    var snapshotSourceURL: String {
-        BrowserSnapshot.resolveURL(live: webView?.url?.absoluteString, pending: pendingURL)
+        WebViewController.livePanes.add(self)
     }
 
     @available(*, unavailable)
@@ -178,18 +75,11 @@ final class WebViewController: NSViewController, CopadPanel {
     }
 
     override func loadView() {
-        let config = WKWebViewConfiguration()
-        // Enable Safari Web Inspector (right-click → Inspect Element)
-        config.preferences.setValue(true, forKey: "developerExtrasEnabled")
-        let wv = WKWebView(frame: .zero, configuration: config)
-        wv.navigationDelegate = self
-        wv.translatesAutoresizingMaskIntoConstraints = false
-        webView = wv
-
         let back = makeToolbarButton(symbol: "chevron.left", tooltip: "Back", action: #selector(backTapped))
         let forward = makeToolbarButton(symbol: "chevron.right", tooltip: "Forward", action: #selector(forwardTapped))
         let reload = makeToolbarButton(symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped))
         let devtools = makeToolbarButton(symbol: "wrench.and.screwdriver", tooltip: "DevTools", action: #selector(devtoolsTapped))
+        let newTab = makeToolbarButton(symbol: "plus", tooltip: "New tab", action: #selector(newTabTapped))
         back.isEnabled = false
         forward.isEnabled = false
         backButton = back
@@ -206,60 +96,390 @@ final class WebViewController: NSViewController, CopadPanel {
         field.target = self
         field.action = #selector(urlFieldSubmit(_:))
         field.translatesAutoresizingMaskIntoConstraints = false
-        if let url = startURL { field.stringValue = url.absoluteString }
         urlField = field
 
-        let toolbar = NSStackView(views: [back, forward, reload, field, devtools])
+        let toolbar = NSStackView(views: [back, forward, reload, field, newTab, devtools])
         toolbar.orientation = .horizontal
         toolbar.spacing = 4
         toolbar.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
         toolbar.translatesAutoresizingMaskIntoConstraints = false
 
+        // Tab strip. Horizontally scrollable rather than shrinking chips to
+        // nothing: a pane can be narrow, and an unreadable 12-pixel chip is
+        // worse than one that scrolls.
+        let strip = NSStackView()
+        strip.orientation = .horizontal
+        strip.spacing = 4
+        strip.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 6)
+        strip.translatesAutoresizingMaskIntoConstraints = false
+        tabStrip = strip
+
+        let scroll = NSScrollView()
+        scroll.hasHorizontalScroller = false
+        scroll.hasVerticalScroller = false
+        scroll.drawsBackground = false
+        scroll.documentView = strip
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        tabStripScroll = scroll
+
         let container = NSView()
+        let host = NSView()
+        host.translatesAutoresizingMaskIntoConstraints = false
+        webContainer = host
+
+        container.addSubview(scroll)
         container.addSubview(toolbar)
-        container.addSubview(wv)
+        container.addSubview(host)
 
         NSLayoutConstraint.activate([
-            toolbar.topAnchor.constraint(equalTo: container.topAnchor),
+            scroll.topAnchor.constraint(equalTo: container.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scroll.heightAnchor.constraint(equalToConstant: 28),
+            strip.heightAnchor.constraint(equalTo: scroll.heightAnchor),
+
+            toolbar.topAnchor.constraint(equalTo: scroll.bottomAnchor),
             toolbar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             toolbar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            wv.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
-            wv.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            wv.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            wv.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+            host.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+            host.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            host.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
         view = container
-
-        observations = [
-            wv.observe(\.canGoBack, options: [.new, .initial]) { [weak self] wv, _ in
-                Task { @MainActor in self?.backButton?.isEnabled = wv.canGoBack }
-            },
-            wv.observe(\.canGoForward, options: [.new, .initial]) { [weak self] wv, _ in
-                Task { @MainActor in self?.forwardButton?.isEnabled = wv.canGoForward }
-            },
-            wv.observe(\.url, options: [.new]) { [weak self] wv, _ in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.syncURLField(wv.url)
-                    // `history.pushState` / `replaceState` / a fragment change
-                    // never fire `didCommit`, and WebKit's same-document
-                    // delegate callback is SPI, not part of the public
-                    // `WKNavigationDelegate` — so this KVO is the ONLY
-                    // supported signal for them. Under `restore = "url"` those
-                    // are exactly the route changes a single-page app makes.
-                    self.noteURLChanged(wv.url?.absoluteString)
-                }
-            },
-        ]
     }
 
     override func viewDidAppear() {
         super.viewDidAppear()
-        if startURL == nil, urlField?.stringValue.isEmpty == true {
+        // Only when the pane opened with nothing to show. Never on a
+        // programmatic creation, which must not steal the keyboard from
+        // whatever the user is typing into.
+        if tabs.count == 1, activeTab.snapshotSourceURL.isEmpty,
+           urlField?.stringValue.isEmpty == true
+        {
             view.window?.makeFirstResponder(urlField)
         }
     }
+
+    // MARK: - CopadPanel
+
+    func startIfNeeded() {
+        guard !started else { return }
+        started = true
+
+        if let restore = pendingRestore {
+            for snap in restore.tabs {
+                tabs.append(BrowserTab(id: snap.id, url: nil, restored: snap, owner: self))
+            }
+            activeIndex = min(restore.active, tabs.count - 1)
+        } else {
+            tabs.append(BrowserTab(
+                id: BrowserSnapshot.freshTabID(),
+                url: pendingInitialURL,
+                restored: nil,
+                owner: self,
+            ))
+            activeIndex = 0
+        }
+        pendingRestore = nil
+        pendingInitialURL = nil
+
+        // Every tab starts loading, not just the visible one: a restored
+        // background tab that only loaded when first selected would lose its
+        // history blob on the next save (nothing to capture from an empty view)
+        // and come back as a bare URL.
+        for tab in tabs { tab.startIfNeeded() }
+        showActiveTab()
+        refreshTabStrip()
+    }
+
+    /// Background operations are no-ops for WebView panels.
+    func applyBackground(path _: String, tint _: Double, opacity _: Double) {}
+    func clearBackground() {}
+    func setTint(_: Double) {}
+
+    // MARK: - Tabs
+
+    /// Open a tab. `background: true` leaves the user where they are — the
+    /// default for agent-driven opens, which must never yank the visible page
+    /// out from under someone.
+    /// Mirrors `copad_core::browser::tabs::MAX_TABS_PER_PANE`.
+    ///
+    /// Enforced at CREATION, not only on restore. Without it the 101st tab
+    /// opened happily and then vanished after a restart, because core's
+    /// normalizer truncates the list on the way back in — a tab that worked
+    /// until you quit is worse than one that was refused.
+    static let maxTabs = 100
+
+    /// Returns the new tab's id, or nil when the pane is full.
+    @discardableResult
+    func newTab(url: URL?, background: Bool) -> String? {
+        guard tabs.count < Self.maxTabs else { return nil }
+        let tab = BrowserTab(id: BrowserSnapshot.freshTabID(), url: url, restored: nil, owner: self)
+        tabs.append(tab)
+        tab.startIfNeeded()
+        if !background {
+            activeIndex = tabs.count - 1
+            showActiveTab()
+        }
+        refreshTabStrip()
+        NotificationCenter.default.post(name: .webviewStateChanged, object: self)
+        return tab.id
+    }
+
+    func tab(id: String) -> BrowserTab? {
+        tabs.first { $0.id == id }
+    }
+
+    @discardableResult
+    func selectTab(id: String) -> Bool {
+        guard let index = tabs.firstIndex(where: { $0.id == id }),
+              !tabs[index].isRebuilding
+        else { return false }
+        activeIndex = index
+        showActiveTab()
+        refreshTabStrip()
+        NotificationCenter.default.post(name: .webviewStateChanged, object: self)
+        return true
+    }
+
+    /// Close a tab. Refuses the pane's LAST tab rather than leaving an empty
+    /// pane — closing the pane itself is the tab manager's job, not this one's,
+    /// and a pane with no tabs has no coherent snapshot.
+    ///
+    /// Returns an error message, or nil on success.
+    func closeTab(id: String) -> String? {
+        guard tabs.count > 1 else { return "cannot close the pane's last tab" }
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else {
+            return "no such tab: \(id)"
+        }
+        // A tab mid-protection-transition has no web view at all. Both this
+        // and `showActiveTab` used to dereference it unconditionally, so a
+        // second RPC connection could crash the app during the rebuild.
+        guard !tabs[index].isRebuilding else {
+            return "the tab is changing protection mode; try again"
+        }
+        let wasActive = index == activeIndex
+        tabs[index].webView?.removeFromSuperview()
+        tabs.remove(at: index)
+        // Keep the SAME tab selected when one before it closes; only fall to a
+        // neighbour when the active tab itself went away.
+        if wasActive {
+            activeIndex = min(index, tabs.count - 1)
+            showActiveTab()
+        } else if index < activeIndex {
+            activeIndex -= 1
+        }
+        refreshTabStrip()
+        NotificationCenter.default.post(name: .webviewStateChanged, object: self)
+        return nil
+    }
+
+    /// Returns an error message, or nil on success.
+    func moveTab(id: String, to destination: Int) -> String? {
+        guard let from = tabs.firstIndex(where: { $0.id == id }) else {
+            return "no such tab: \(id)"
+        }
+        let to = max(0, min(destination, tabs.count - 1))
+        guard to != from else { return nil }
+        // Track the ACTIVE TAB, not its index: reordering shifts indices, and
+        // carrying the number through would silently reselect a different tab.
+        let activeID = activeTab.id
+        let tab = tabs.remove(at: from)
+        tabs.insert(tab, at: to)
+        activeIndex = tabs.firstIndex { $0.id == activeID } ?? 0
+        refreshTabStrip()
+        NotificationCenter.default.post(name: .webviewStateChanged, object: self)
+        return nil
+    }
+
+    /// True when ANY tab in this pane is protected. Protection freezes the
+    /// whole profile, not one tab — a sibling tab is another window onto the
+    /// same shared storage.
+    var hasProtectedTab: Bool {
+        tabs.contains { $0.tabMode == .protected }
+    }
+
+    /// Is ANY live browser pane protected?
+    ///
+    /// Every pane shares `WKWebsiteDataStore.default()`, so they share the
+    /// logged-in session; protection has to mean the same thing across all of
+    /// them or it means very little.
+    ///
+    /// Answered from a REGISTRY, not by walking up to the window. A pane in an
+    /// inactive copad tab has been detached from the view hierarchy — its
+    /// `view.window` is nil — so a window-based lookup silently fell back to
+    /// "just this pane", and that pane's capture script went on writing the
+    /// shared session's activity into an agent-readable file while another pane
+    /// was protected.
+    var profileHasProtectedTab: Bool {
+        WebViewController.anyProtected
+    }
+
+    /// Every live browser pane, weakly held.
+    ///
+    /// `NSHashTable.weakObjects` so a closed pane drops out without anything
+    /// having to remember to deregister it — a pane can be torn down from
+    /// several paths and a missed deregistration would pin protection on
+    /// forever.
+    private static let livePanes = NSHashTable<WebViewController>.weakObjects()
+
+    static var anyProtected: Bool {
+        livePanes.allObjects.contains { $0.hasProtectedTab }
+    }
+
+    private func showActiveTab() {
+        guard let host = webContainer, tabs.indices.contains(activeIndex) else { return }
+        NSLayoutConstraint.deactivate(webConstraints)
+        for subview in host.subviews { subview.removeFromSuperview() }
+        // Nil while a protected-mode transition rebuilds it; `tabModeChanged`
+        // calls back in once the new view exists.
+        guard let wv = tabs[activeIndex].webView else { return }
+        host.addSubview(wv)
+        webConstraints = [
+            wv.topAnchor.constraint(equalTo: host.topAnchor),
+            wv.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            wv.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            wv.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ]
+        NSLayoutConstraint.activate(webConstraints)
+        syncBackgroundTabSizes()
+        refreshChrome(for: tabs[activeIndex])
+    }
+
+    /// Keep background tabs the same size as the visible one.
+    ///
+    /// A tab that is not in the view hierarchy gets no layout, so without this
+    /// it keeps whatever frame it was born with — and a screenshot of it would
+    /// be laid out at a viewport the user never had. (A ZERO frame is worse
+    /// still: `takeSnapshot` then returns an image that cannot be encoded at
+    /// all, which is how this was found.)
+    private func syncBackgroundTabSizes() {
+        guard let host = webContainer else { return }
+        let size = host.bounds.size.width > 1 ? host.bounds.size : BrowserTab.defaultFrame.size
+        for (index, tab) in tabs.enumerated() where index != activeIndex {
+            tab.setBackgroundSize(size)
+        }
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        syncBackgroundTabSizes()
+    }
+
+    private func refreshTabStrip() {
+        guard let strip = tabStrip else { return }
+        for chip in strip.arrangedSubviews { strip.removeArrangedSubview(chip); chip.removeFromSuperview() }
+        // A single tab gets no strip at all: a lone chip is chrome that tells
+        // the user nothing they cannot already see in the URL bar.
+        tabStripScroll?.isHidden = tabs.count < 2
+        guard tabs.count > 1 else { return }
+        for (index, tab) in tabs.enumerated() {
+            strip.addArrangedSubview(makeTabChip(tab: tab, index: index, active: index == activeIndex))
+        }
+    }
+
+    private func makeTabChip(tab: BrowserTab, index: Int, active: Bool) -> NSView {
+        let button = NSButton()
+        let label = tab.title.isEmpty ? "New tab" : tab.title
+        button.title = label.count > 24 ? String(label.prefix(23)) + "…" : label
+        button.bezelStyle = .recessed
+        button.setButtonType(.pushOnPushOff)
+        button.state = active ? .on : .off
+        button.font = .systemFont(ofSize: 11)
+        button.toolTip = tab.currentURL.isEmpty ? label : tab.currentURL
+        button.tag = index
+        button.target = self
+        button.action = #selector(tabChipClicked(_:))
+        button.translatesAutoresizingMaskIntoConstraints = false
+        return button
+    }
+
+    @objc private func tabChipClicked(_ sender: NSButton) {
+        guard tabs.indices.contains(sender.tag) else { return }
+        selectTab(id: tabs[sender.tag].id)
+    }
+
+    // MARK: - Callbacks from BrowserTab
+
+    /// Keep the toolbar and strip in step with whichever tab changed. A
+    /// background tab's navigation must update its CHIP but must not touch the
+    /// URL bar, which belongs to the visible page.
+    func refreshChrome(for tab: BrowserTab?) {
+        guard let tab else { return }
+        if tab === tabs[safe: activeIndex] {
+            backButton?.isEnabled = tab.canGoBack
+            forwardButton?.isEnabled = tab.canGoForward
+            syncURLField(tab.currentURL)
+        }
+        refreshTabStrip()
+    }
+
+    func tabDidFinishLoading(_ tab: BrowserTab) {
+        if tab === tabs[safe: activeIndex] {
+            // A protected page's TITLE is page-derived and travels on the event
+            // bus, which anything subscribed can read. "Reset password for …"
+            // is the case that matters.
+            currentTitle = tab.underProtection ? "Protected" : tab.title
+            NotificationCenter.default.post(name: .terminalTitleChanged, object: self)
+            eventBus?.broadcast(event: "webview.loaded", data: ["panel_id": panelID])
+            eventBus?.broadcast(
+                event: "webview.title_changed",
+                data: ["panel_id": panelID, "title": currentTitle],
+            )
+            eventBus?.broadcast(
+                event: "panel.title_changed",
+                data: ["panel_id": panelID, "title": currentTitle],
+            )
+        }
+        refreshTabStrip()
+    }
+
+    /// A tab entered or left protected mode. Its web view was replaced, so the
+    /// visible one has to be re-installed and the chrome re-synced.
+    func tabModeChanged(_ tab: BrowserTab) {
+        if tab === tabs[safe: activeIndex] { showActiveTab() }
+        refreshTabStrip()
+        eventBus?.broadcast(event: "webview.tab_mode_changed", data: [
+            "panel_id": panelID,
+            "tab_id": tab.id,
+            "mode": tab.tabMode.rawValue,
+        ])
+    }
+
+    func tabDidCommit(_ tab: BrowserTab, url: String) {
+        // Same reasoning as the log: an event carrying a protected page's URL
+        // is a channel out, whoever is listening.
+        guard !tab.underProtection else { return }
+        eventBus?.broadcast(
+            event: "webview.navigated",
+            data: ["panel_id": panelID, "tab_id": tab.id, "url": url],
+        )
+    }
+
+    // MARK: - Snapshot
+
+    func snapshotPane(policy: String) -> BrowserPaneSnap {
+        BrowserPaneSnap(
+            tabs: tabs.map { $0.snapshot(policy: policy) },
+            active: activeIndex,
+        )
+    }
+
+    /// URL a snapshot would record for the pane as a whole — the active tab's.
+    ///
+    /// Blanked for a protected tab. `PaneManager.paneContent` persists this
+    /// INDEPENDENTLY as `PaneContent.webview.url`, so blanking only
+    /// `BrowserTabSnap.url` left a protected `/reset/<token>` URL reaching
+    /// session.json through the legacy field under `url`/`full`.
+    var snapshotSourceURL: String {
+        guard let tab = tabs[safe: activeIndex], !tab.underProtection else { return "" }
+        return tab.snapshotSourceURL
+    }
+
+    // MARK: - Toolbar
 
     private func makeToolbarButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
         let btn = NSButton()
@@ -276,29 +496,28 @@ final class WebViewController: NSViewController, CopadPanel {
         return btn
     }
 
-    private func syncURLField(_ url: URL?) {
+    private func syncURLField(_ urlString: String) {
         guard let urlField else { return }
-        let s = url?.absoluteString ?? ""
-        guard !s.isEmpty, s != "about:blank" else { return }
+        guard !urlString.isEmpty, urlString != "about:blank" else { return }
         // Don't clobber what the user is currently typing.
         if view.window?.firstResponder === urlField.currentEditor() { return }
-        urlField.stringValue = s
+        urlField.stringValue = urlString
     }
 
-    @objc private func backTapped() {
-        goBack()
-    }
+    @objc private func backTapped() { goBack() }
+    @objc private func forwardTapped() { goForward() }
+    @objc private func reloadTapped() { reload() }
+    @objc private func devtoolsTapped() { toggleDevTools() }
 
-    @objc private func forwardTapped() {
-        goForward()
-    }
-
-    @objc private func reloadTapped() {
-        reload()
-    }
-
-    @objc private func devtoolsTapped() {
-        toggleDevTools()
+    /// The toolbar's new-tab button switches to the new tab, unlike
+    /// `webview.tab.new` which defaults to background — a human clicking `+`
+    /// means "take me there", an agent calling it does not.
+    @objc private func newTabTapped() {
+        guard newTab(url: nil, background: false) != nil else {
+            NSSound.beep()
+            return
+        }
+        view.window?.makeFirstResponder(urlField)
     }
 
     @objc private func urlFieldSubmit(_ sender: NSTextField) {
@@ -308,244 +527,44 @@ final class WebViewController: NSViewController, CopadPanel {
         view.window?.makeFirstResponder(webView)
     }
 
-    // MARK: - CopadPanel
+    // MARK: - Navigation (active tab)
 
-    func startIfNeeded() {
-        guard !started else { return }
-        started = true
-        if let url = startURL {
-            pendingNavigationID = webView.load(URLRequest(url: url)).map(ObjectIdentifier.init)
-        } else {
-            loadBlankPage()
-        }
-    }
-
-    /// Background operations are no-ops for WebView panels.
-    func applyBackground(path _: String, tint _: Double, opacity _: Double) {}
-    func clearBackground() {}
-    func setTint(_: Double) {}
-
-    // MARK: - Navigation
-
-    func navigate(to urlString: String) {
-        let finalString: String = if urlString.hasPrefix("http://") || urlString.hasPrefix("https://") || urlString.hasPrefix("file://") {
-            urlString
-        } else {
-            "https://" + urlString
-        }
-        guard let url = URL(string: finalString) else { return }
-        // Record the destination BEFORE loading it. Otherwise a blank pane the
-        // user typed an unreachable address into has no live URL and no pending
-        // one either, and the debounced autosave writes "" — the same erasure
-        // the restore path was fixed for, reached by a different route.
-        pendingURL = url.absoluteString
-        pendingFailed = false
-        pendingNavigationID = webView.load(URLRequest(url: url)).map(ObjectIdentifier.init)
-
-        // Persist the destination now rather than when the page happens to
-        // load: an unreachable address never commits, and nothing else in the
-        // app would schedule a save for it.
-        NotificationCenter.default.post(name: .webviewURLChanged, object: self)
-    }
-
-    func goBack() {
-        if webView.canGoBack { adoptNavigation(webView.goBack()) }
-    }
-
-    func goForward() {
-        if webView.canGoForward { adoptNavigation(webView.goForward()) }
-    }
-
-    func reload() {
-        adoptNavigation(webView.reload())
-    }
-
-    /// Take over the pending state for a navigation this controller did not
-    /// choose a URL for — back, forward, reload.
-    ///
-    /// Two things go wrong without it. The identity check would reject the new
-    /// navigation's `didCommit` (it still names the *previous* navigation), so
-    /// nothing would ever clear the pending state. And a destination abandoned
-    /// by the user pressing Back is no longer what should be persisted — start
-    /// loading unreachable B from A, hit reload, and autosave would keep
-    /// writing B while A is on screen.
-    ///
-    /// The pending URL is dropped only when there is a usable live URL to fall
-    /// back on. Reloading a restored pane that has never managed to load is the
-    /// case that would otherwise snap the snapshot to `""` and erase it.
-    private func adoptNavigation(_ navigation: WKNavigation?) {
-        pendingNavigationID = navigation.map(ObjectIdentifier.init)
-        let live = webView?.url?.absoluteString
-        if let live, !live.isEmpty, live != "about:blank" {
-            pendingURL = nil
-            pendingFailed = false
-        }
-    }
+    func navigate(to urlString: String) { activeTab.navigate(to: urlString) }
+    func goBack() { activeTab.goBack() }
+    func goForward() { activeTab.goForward() }
+    func reload() { activeTab.reload() }
 
     func executeJS(_ script: String, completion: @escaping (Any?, Error?) -> Void) {
-        // WKWebView's completionHandler is @Sendable in the Swift 6 SDK; the socket
-        // command chain that ultimately owns `completion` is not @Sendable-typed yet.
-        // Box the callback so the @Sendable closure literal we pass in only captures
-        // a Sendable wrapper. WebKit invokes the callback on the main thread, so the
-        // unchecked-sendable bridge is sound.
-        let box = SendableBox(completion)
-        webView.evaluateJavaScript(script) { result, error in
-            box.value(result, error)
-        }
+        activeTab.executeJS(script, completion: completion)
     }
 
     func getContent(completion: @escaping (String) -> Void) {
-        let box = SendableBox(completion)
-        webView.evaluateJavaScript("document.documentElement.outerHTML") { result, _ in
-            box.value(result as? String ?? "")
-        }
+        activeTab.getContent(completion: completion)
     }
 
     // MARK: - State
 
     func toggleDevTools() {
         // Enables right-click → "Inspect Element" via Safari Web Inspector.
-        // developerExtrasEnabled is already set in loadView(); this re-applies it
-        // in case the caller wants to toggle the state at runtime.
-        let current = webView.configuration.preferences.value(forKey: "developerExtrasEnabled") as? Bool ?? false
+        // Already set at tab creation; this re-applies it so a caller can
+        // toggle at runtime.
+        guard let webView else { return }
+        let current = webView.configuration.preferences
+            .value(forKey: "developerExtrasEnabled") as? Bool ?? false
         webView.configuration.preferences.setValue(!current, forKey: "developerExtrasEnabled")
     }
 
-    var currentURL: String {
-        webView.url?.absoluteString ?? ""
-    }
-
-    var canGoBack: Bool {
-        webView.canGoBack
-    }
-
-    var canGoForward: Bool {
-        webView.canGoForward
-    }
-
-    var isLoading: Bool {
-        webView.isLoading
-    }
-
-    // MARK: - Private
-
-    private func loadBlankPage() {
-        let html = """
-        <html>
-        <body style="background:#1e1e2e;color:#cdd6f4;font-family:system-ui;
-                     display:flex;align-items:center;justify-content:center;
-                     height:100vh;margin:0">
-          <p style="opacity:0.4">Open a URL to get started</p>
-        </body>
-        </html>
-        """
-        webView.loadHTMLString(html, baseURL: nil)
-    }
+    var currentURL: String { tabs[safe: activeIndex]?.currentURL ?? "" }
+    var canGoBack: Bool { tabs[safe: activeIndex]?.canGoBack ?? false }
+    var canGoForward: Bool { tabs[safe: activeIndex]?.canGoForward ?? false }
+    var isLoading: Bool { tabs[safe: activeIndex]?.isLoading ?? false }
 }
 
-// MARK: - WKNavigationDelegate
-
-extension WebViewController: WKNavigationDelegate {
-    nonisolated func webView(_ webView: WKWebView, didFinish _: WKNavigation!) {
-        Task { @MainActor in
-            let title = webView.title
-            let host = webView.url?.host
-            self.currentTitle = (title?.isEmpty == false ? title! : host) ?? "Web"
-            NotificationCenter.default.post(name: .terminalTitleChanged, object: self)
-            let id = self.panelID
-            eventBus?.broadcast(event: "webview.loaded", data: ["panel_id": id])
-            eventBus?.broadcast(event: "webview.title_changed", data: ["panel_id": id, "title": self.currentTitle])
-            eventBus?.broadcast(event: "panel.title_changed", data: ["panel_id": id, "title": self.currentTitle])
-        }
-    }
-
-    /// Any navigation starting — including one the PAGE began by itself: a link
-    /// click, a `<meta refresh>`, a JS redirect.
-    ///
-    /// Those never pass through `navigate`/`goBack`/`reload`, so without
-    /// adopting them here the controller would still be tracking an older
-    /// navigation and would reject the new one's `didCommit` — leaving the
-    /// pending destination stuck forever and autosaving a page the user left
-    /// long ago.
-    ///
-    /// The equality guard is what keeps this from eating our OWN navigations:
-    /// `navigate` assigns `pendingNavigationID` synchronously from `load()`'s
-    /// return value, before this callback can run, so a navigation we initiated
-    /// matches and its freshly-set pending URL survives.
-    nonisolated func webView(
-        _ webView: WKWebView,
-        didStartProvisionalNavigation navigation: WKNavigation!,
-    ) {
-        let navID = navigation.map(ObjectIdentifier.init)
-        Task { @MainActor in
-            guard self.pendingNavigationID != navID else { return }
-            self.pendingNavigationID = navID
-            // Same rule as `adoptNavigation`: an abandoned destination is only
-            // dropped when there is a live URL to fall back on, or the snapshot
-            // would go empty and erase the pane.
-            let live = webView.url?.absoluteString
-            if let live, !live.isEmpty, live != "about:blank" {
-                self.pendingURL = nil
-                self.pendingFailed = false
-            }
-        }
-    }
-
-    /// A load that never got off the ground — an unreachable host, DNS
-    /// failure, a refused connection.
-    ///
-    /// WebKit reverts `url` to the previously committed page here, so without
-    /// re-arming the pending destination the pane would autosave the OLD page
-    /// and silently discard where the user asked to go. That is the same
-    /// erasure `pendingURL` exists to prevent, reached from the other end.
-    nonisolated func webView(
-        _: WKWebView,
-        didFailProvisionalNavigation navigation: WKNavigation!,
-        withError error: Error,
-    ) {
-        let navID = navigation.map(ObjectIdentifier.init)
-        let ns = error as NSError
-        // A cancellation is not a failed load — it is THIS navigation being
-        // superseded by a newer one. Re-arming from it would resurrect the
-        // abandoned destination.
-        let cancelled = ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled
-        let failing = ns.userInfo[NSURLErrorFailingURLStringErrorKey] as? String
-        Task { @MainActor in
-            guard self.isCurrentNavigation(navID) else { return }
-            if !cancelled, let failing, !failing.isEmpty, failing != "about:blank",
-               // Never overwrite a NEWER pending destination with an older
-               // one's failure: start loading A, navigate to B, then A's
-               // callback arrives — B is what the user asked for.
-               self.pendingURL == nil || self.pendingURL == failing
-            {
-                self.pendingURL = failing
-                self.pendingFailed = true
-            }
-            NotificationCenter.default.post(name: .webviewURLChanged, object: self)
-        }
-    }
-
-    nonisolated func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        let navID = navigation.map(ObjectIdentifier.init)
-        Task { @MainActor in
-            guard self.isCurrentNavigation(navID) else { return }
-            let urlStr = webView.url?.absoluteString ?? ""
-            // The live document is now authoritative; stop preferring the
-            // restore URL. A committed document supersedes the pending
-            // destination whether or not the two strings match (a redirect
-            // lands elsewhere), which is why this does not go through
-            // `noteURLChanged`'s equality check.
-            if !urlStr.isEmpty, urlStr != "about:blank" {
-                self.pendingURL = nil
-                self.pendingFailed = false
-                self.pendingNavigationID = nil
-            }
-            NotificationCenter.default.post(name: .webviewURLChanged, object: self)
-            let id = self.panelID
-            eventBus?.broadcast(event: "webview.navigated", data: ["panel_id": id, "url": urlStr])
-        }
+private extension Array {
+    /// Bounds-checked access. The tab list is mutated from socket commands, so
+    /// an index that was valid when a callback was queued may not be by the
+    /// time it runs.
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
-
-// SendableBox lives in Sources/Copad/SendableBox.swift now — same need shows
-// up in PluginSupervisor (PR 3), so the type was hoisted out of this file.

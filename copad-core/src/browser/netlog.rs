@@ -395,6 +395,274 @@ pub fn sanitize_console(record: &mut ConsoleRecord, caps: &LogCaps) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// The JSONL sink
+// ---------------------------------------------------------------------------
+//
+// One file per pane, holding both kinds, each line tagged with `kind`. A file
+// rather than an in-memory buffer because that is what makes browser
+// observability affordable at all: the agent greps and reads slices of it
+// instead of receiving a verbose dump after every action (the shape Cursor's
+// browser tool settled on).
+
+/// Which kind of record a line holds.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Net,
+    Console,
+}
+
+/// Filters for a read. Everything is optional; the default is "the most recent
+/// `limit` records of both kinds".
+#[derive(Debug, Clone, Default)]
+pub struct ReadQuery {
+    pub kind: Option<Kind>,
+    /// Only records with `ts` strictly greater than this.
+    pub since: Option<u64>,
+    pub tab_id: Option<String>,
+    pub level: Option<ConsoleLevel>,
+    /// Substring match against a net record's URL or a console record's text.
+    pub contains: Option<String>,
+    pub limit: usize,
+}
+
+fn ensure_dir() -> Result<std::path::PathBuf, String> {
+    let dir = crate::paths::state_dir().join("browser").join("logs");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    Ok(dir)
+}
+
+/// Append one record. Returns false when the record was DROPPED for exceeding
+/// the per-record cap even after shedding — a caller that treats that as
+/// success would silently under-report.
+pub fn append_net(panel_id: &str, mut record: NetRecord, caps: &LogCaps) -> Result<bool, String> {
+    if !sanitize_net(&mut record, caps) {
+        return Ok(false);
+    }
+    append_line(
+        panel_id,
+        Kind::Net,
+        &serde_json::to_value(&record).map_err(|e| e.to_string())?,
+        caps,
+    )?;
+    Ok(true)
+}
+
+pub fn append_console(
+    panel_id: &str,
+    mut record: ConsoleRecord,
+    caps: &LogCaps,
+) -> Result<bool, String> {
+    if !sanitize_console(&mut record, caps) {
+        return Ok(false);
+    }
+    append_line(
+        panel_id,
+        Kind::Console,
+        &serde_json::to_value(&record).map_err(|e| e.to_string())?,
+        caps,
+    )?;
+    Ok(true)
+}
+
+fn append_line(
+    panel_id: &str,
+    kind: Kind,
+    body: &serde_json::Value,
+    caps: &LogCaps,
+) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = log_path(panel_id).ok_or_else(|| format!("invalid panel id: {panel_id:?}"))?;
+    ensure_dir()?;
+    let mut line = serde_json::json!({ "kind": kind });
+    if let (Some(obj), Some(fields)) = (line.as_object_mut(), body.as_object()) {
+        for (k, v) in fields {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    let mut text = serde_json::to_string(&line).map_err(|e| e.to_string())?;
+    text.push('\n');
+
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    f.write_all(text.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+
+    // Trim lazily: rewriting on every append would turn a chatty page into a
+    // rewrite storm. The file is allowed to overshoot by a margin and is then
+    // cut back to the cap.
+    //
+    // Both ceilings, not just bytes. Triggering on size alone meant the
+    // record cap was not enforced until the log passed the BYTE margin — with
+    // small records that is tens of thousands of lines past the 2000-record
+    // limit, which is retention nobody asked for and a slower read every time.
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0) as usize;
+    let over_bytes = len > caps.ring_bytes + caps.ring_bytes / 4;
+    let over_records = appends_since_trim(&path) > caps.ring_records / 4;
+    if over_bytes || over_records {
+        trim(&path, caps)?;
+        reset_append_counter(&path);
+    }
+    Ok(())
+}
+
+/// Appends since the last trim, per log path.
+///
+/// Counted in memory rather than by re-reading the file: the point is to avoid
+/// touching the whole log on every append, so a check that read it would defeat
+/// itself. ONE map — a second `static` inside the reset function would be a
+/// different map, and the counter would never actually reset.
+static APPEND_COUNTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn appends_since_trim(path: &std::path::Path) -> usize {
+    let mut counts = APPEND_COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+    let n = counts.entry(path.to_path_buf()).or_insert(0);
+    *n += 1;
+    *n
+}
+
+fn reset_append_counter(path: &std::path::Path) {
+    let mut counts = APPEND_COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+    counts.insert(path.to_path_buf(), 0);
+}
+
+/// Cut the file back to the ring caps, oldest-first.
+fn trim(path: &std::path::Path, caps: &LogCaps) -> Result<(), String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut kept: Vec<&str> = Vec::new();
+    let mut bytes = 0usize;
+    // Walk backwards so the NEWEST records are the ones that survive.
+    for line in raw.lines().rev() {
+        if kept.len() >= caps.ring_records || bytes + line.len() + 1 > caps.ring_bytes {
+            break;
+        }
+        bytes += line.len() + 1;
+        kept.push(line);
+    }
+    kept.reverse();
+    let mut out = kept.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    // temp + rename, so a reader mid-trim sees either the old file or the new
+    // one — never a half-truncated log.
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension("jsonl.tmp");
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| format!("open {}: {e}", tmp.display()))?;
+        f.write_all(out.as_bytes())
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rewrite {}: {e}", path.display())
+    })
+}
+
+/// Read matching records, newest last (the order they happened in).
+pub fn read(panel_id: &str, query: &ReadQuery) -> Result<Vec<serde_json::Value>, String> {
+    let path = log_path(panel_id).ok_or_else(|| format!("invalid panel id: {panel_id:?}"))?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        // No file yet is not an error: the pane simply has not logged anything.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
+    let limit = if query.limit == 0 { 200 } else { query.limit };
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    // Backwards, so `limit` keeps the NEWEST matches rather than the oldest.
+    for line in raw.lines().rev() {
+        if out.len() >= limit {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if !matches_query(&value, query) {
+            continue;
+        }
+        out.push(value);
+    }
+    out.reverse();
+    Ok(out)
+}
+
+fn matches_query(value: &serde_json::Value, query: &ReadQuery) -> bool {
+    let kind = value.get("kind").and_then(|v| v.as_str());
+    if let Some(want) = query.kind {
+        let want_str = match want {
+            Kind::Net => "net",
+            Kind::Console => "console",
+        };
+        if kind != Some(want_str) {
+            return false;
+        }
+    }
+    if let Some(since) = query.since
+        && value.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) <= since
+    {
+        return false;
+    }
+    if let Some(tab) = &query.tab_id
+        && value.get("tab_id").and_then(|v| v.as_str()) != Some(tab.as_str())
+    {
+        return false;
+    }
+    if let Some(level) = query.level {
+        let Some(actual) = value
+            .get("level")
+            .and_then(|v| serde_json::from_value::<ConsoleLevel>(v.clone()).ok())
+        else {
+            return false;
+        };
+        if actual < level {
+            return false;
+        }
+    }
+    if let Some(needle) = &query.contains {
+        let hay = value
+            .get("url")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("text").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        if !hay.to_lowercase().contains(&needle.to_lowercase()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Drop a pane's log. Returns how many records were discarded.
+pub fn clear(panel_id: &str) -> Result<usize, String> {
+    let path = log_path(panel_id).ok_or_else(|| format!("invalid panel id: {panel_id:?}"))?;
+    let count = std::fs::read_to_string(&path)
+        .map(|r| r.lines().count())
+        .unwrap_or(0);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(count),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(format!("remove {}: {e}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,5 +975,305 @@ mod tests {
     #[test]
     fn defaults_keep_bodies_off() {
         assert!(!LogCaps::default().capture_bodies);
+    }
+
+    // ---- the JSONL sink ----
+
+    fn with_temp_state<T>(tag: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = super::super::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("copad-netlog-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_xdg = std::env::var("XDG_STATE_HOME").ok();
+        // SAFETY: SINK_ENV serializes every test that touches these vars.
+        unsafe {
+            std::env::set_var("HOME", &root);
+            std::env::set_var("XDG_STATE_HOME", root.join("state"));
+        }
+        let out = f();
+        // SAFETY: still holding the lock.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_xdg {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        out
+    }
+
+    fn console_at(ts: u64, level: ConsoleLevel, text: &str) -> ConsoleRecord {
+        ConsoleRecord {
+            ts,
+            tab_id: "t1".into(),
+            level,
+            text: text.into(),
+            source: None,
+            redacted: vec![],
+        }
+    }
+
+    #[test]
+    fn records_of_both_kinds_land_in_one_file_and_read_back_in_order() {
+        with_temp_state("roundtrip", || {
+            let caps = LogCaps::default();
+            assert!(append_net("panel1", net(), &caps).unwrap());
+            assert!(
+                append_console("panel1", console_at(2, ConsoleLevel::Log, "hello"), &caps).unwrap()
+            );
+
+            let all = read(
+                "panel1",
+                &ReadQuery {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(all.len(), 2);
+            assert_eq!(all[0]["kind"], "net");
+            assert_eq!(all[1]["kind"], "console");
+            // Oldest first — the order they happened in.
+            assert!(all[0]["ts"].as_u64() < all[1]["ts"].as_u64());
+        });
+    }
+
+    #[test]
+    fn reading_a_pane_that_never_logged_is_empty_not_an_error() {
+        with_temp_state("empty", || {
+            assert!(read("panel1", &ReadQuery::default()).unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn filters_narrow_by_kind_time_tab_level_and_substring() {
+        with_temp_state("filters", || {
+            let caps = LogCaps::default();
+            append_net("panel1", net(), &caps).unwrap();
+            append_console("panel1", console_at(5, ConsoleLevel::Debug, "noise"), &caps).unwrap();
+            append_console("panel1", console_at(6, ConsoleLevel::Error, "boom"), &caps).unwrap();
+
+            let only_console = read(
+                "panel1",
+                &ReadQuery {
+                    kind: Some(Kind::Console),
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(only_console.len(), 2);
+
+            // `level` is a FLOOR, not an equality test: asking for warnings
+            // should not hide the errors above them.
+            let serious = read(
+                "panel1",
+                &ReadQuery {
+                    kind: Some(Kind::Console),
+                    level: Some(ConsoleLevel::Warn),
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(serious.len(), 1);
+            assert_eq!(serious[0]["text"], "boom");
+
+            let recent = read(
+                "panel1",
+                &ReadQuery {
+                    since: Some(5),
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(recent.len(), 1);
+
+            let matching = read(
+                "panel1",
+                &ReadQuery {
+                    contains: Some("LOGIN".into()),
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(matching.len(), 1);
+            assert_eq!(matching[0]["kind"], "net");
+
+            let other_tab = read(
+                "panel1",
+                &ReadQuery {
+                    tab_id: Some("nope".into()),
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(other_tab.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_limit_keeps_the_newest_records_not_the_oldest() {
+        with_temp_state("limit", || {
+            let caps = LogCaps::default();
+            for i in 1..=10 {
+                append_console(
+                    "panel1",
+                    console_at(i, ConsoleLevel::Log, &format!("line{i}")),
+                    &caps,
+                )
+                .unwrap();
+            }
+            let out = read(
+                "panel1",
+                &ReadQuery {
+                    limit: 3,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(out.len(), 3);
+            assert_eq!(out[0]["text"], "line8");
+            assert_eq!(out[2]["text"], "line10");
+        });
+    }
+
+    #[test]
+    fn the_record_cap_is_enforced_without_waiting_for_the_byte_cap() {
+        // Triggering on size alone meant a log of small records ran tens of
+        // thousands of lines past the record cap before anything trimmed it.
+        with_temp_state("ring-records", || {
+            let caps = LogCaps {
+                ring_records: 20,
+                ring_bytes: 8 * 1024 * 1024,
+                ..Default::default()
+            };
+            for i in 1..=400 {
+                append_console("panel1", console_at(i, ConsoleLevel::Log, "x"), &caps).unwrap();
+            }
+            let lines = std::fs::read_to_string(log_path("panel1").unwrap())
+                .unwrap()
+                .lines()
+                .count();
+            assert!(
+                lines <= caps.ring_records + caps.ring_records / 4 + 1,
+                "log kept {lines} records against a {} cap, nowhere near the byte cap",
+                caps.ring_records
+            );
+        });
+    }
+
+    #[test]
+    fn the_ring_trims_oldest_first_and_keeps_the_file_bounded() {
+        with_temp_state("ring", || {
+            let caps = LogCaps {
+                ring_bytes: 2000,
+                ring_records: 20,
+                ..Default::default()
+            };
+            for i in 1..=200 {
+                append_console(
+                    "panel1",
+                    console_at(i, ConsoleLevel::Log, &format!("line{i}")),
+                    &caps,
+                )
+                .unwrap();
+            }
+            let path = log_path("panel1").unwrap();
+            let size = std::fs::metadata(&path).unwrap().len() as usize;
+            assert!(
+                size <= caps.ring_bytes + caps.ring_bytes / 4,
+                "log grew to {size} bytes against a {} cap",
+                caps.ring_bytes
+            );
+            let out = read(
+                "panel1",
+                &ReadQuery {
+                    limit: 1000,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            // Whatever survived is the TAIL: the newest record is still there.
+            assert_eq!(out.last().unwrap()["text"], "line200");
+            assert!(out.len() < 200);
+        });
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_shed_under_the_cap_is_reported_as_dropped() {
+        with_temp_state("dropped", || {
+            let caps = LogCaps {
+                per_record: 1,
+                ..Default::default()
+            };
+            assert!(
+                !append_console("panel1", console_at(1, ConsoleLevel::Log, "x"), &caps).unwrap()
+            );
+            // Nothing was written, so a caller treating `false` as success
+            // would be silently under-reporting.
+            assert!(read("panel1", &ReadQuery::default()).unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn clear_removes_the_log_and_reports_the_count() {
+        with_temp_state("clear", || {
+            let caps = LogCaps::default();
+            for i in 1..=3 {
+                append_console("panel1", console_at(i, ConsoleLevel::Log, "x"), &caps).unwrap();
+            }
+            assert_eq!(clear("panel1").unwrap(), 3);
+            assert_eq!(clear("panel1").unwrap(), 0);
+            assert!(read("panel1", &ReadQuery::default()).unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn an_invalid_panel_id_cannot_write_or_read_outside_the_log_dir() {
+        with_temp_state("traversal", || {
+            let caps = LogCaps::default();
+            assert!(
+                append_console(
+                    "../../etc/passwd",
+                    console_at(1, ConsoleLevel::Log, "x"),
+                    &caps
+                )
+                .is_err()
+            );
+            assert!(read("../../etc/passwd", &ReadQuery::default()).is_err());
+            assert!(clear("../../etc/passwd").is_err());
+        });
+    }
+
+    #[test]
+    fn a_corrupt_line_is_skipped_rather_than_failing_the_whole_read() {
+        with_temp_state("corrupt", || {
+            let caps = LogCaps::default();
+            append_console("panel1", console_at(1, ConsoleLevel::Log, "good"), &caps).unwrap();
+            let path = log_path("panel1").unwrap();
+            let mut raw = std::fs::read_to_string(&path).unwrap();
+            raw.push_str("{not json\n");
+            std::fs::write(&path, raw).unwrap();
+            let out = read(
+                "panel1",
+                &ReadQuery {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(out.len(), 1);
+        });
     }
 }

@@ -180,7 +180,21 @@ final class PaneManager {
         AlacrittyTerminalViewController(config: config, theme: theme, cwd: cwd, initialInput: initialInput)
     }
 
-    func splitActiveWithWebView(url: URL? = nil, orientation: SplitOrientation = .horizontal) {
+    /// `background: true` adds the pane WITHOUT focusing it — the shape an
+    /// agent asks for. Previously `--background` was silently ignored here, so
+    /// `webview.open --background --mode split_h` still moved the user's focus.
+    func splitActiveWithWebView(
+        url: URL? = nil,
+        orientation: SplitOrientation = .horizontal,
+        background: Bool = false,
+    ) {
+        let previouslyActive = activePane
+        // The RESPONDER, not just the pane. Restoring the pane and calling
+        // `makeFirstResponder(focusTarget)` would still evict a field editor —
+        // if the user was mid-edit in the URL bar, their caret and selection
+        // would be gone even though the "focused pane" looked unchanged.
+        let previousWindow = activePane.view.window
+        let previousResponder = previousWindow?.firstResponder
         let webVC = WebViewController(url: url)
         assignEventBus(to: webVC)
         wirePanel(webVC)
@@ -192,7 +206,18 @@ final class PaneManager {
         setActive(webVC)
         webVC.startIfNeeded()
         onPaneAdded?(webVC)
-        webVC.view.window?.makeFirstResponder(webVC.focusTarget)
+        if background {
+            // The new pane still has to be started (above) so it loads and can
+            // be driven; only the focus move is skipped.
+            setActive(previouslyActive)
+            if let previousResponder, let previousWindow {
+                previousWindow.makeFirstResponder(previousResponder)
+            } else {
+                previouslyActive.view.window?.makeFirstResponder(previouslyActive.focusTarget)
+            }
+        } else {
+            webVC.view.window?.makeFirstResponder(webVC.focusTarget)
+        }
     }
 
     /// Tier 4.1 — split with a pre-built plugin panel. Caller assembles the
@@ -262,7 +287,10 @@ final class PaneManager {
 
     private func assignEventBus(to panel: any CopadPanel) {
         if let a = panel as? AlacrittyTerminalViewController { a.eventBus = eventBus }
-        if let w = panel as? WebViewController { w.eventBus = eventBus }
+        if let w = panel as? WebViewController {
+            w.eventBus = eventBus
+            w.captureBodies = config.browserCaptureBodies
+        }
     }
 
     func allPanels() -> [any CopadPanel] {

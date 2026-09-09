@@ -203,4 +203,71 @@ final class BrowserSnapshotTests: XCTestCase {
         XCTAssertTrue(decision.allowed)
         XCTAssertTrue(decision.opaqueWrite)
     }
+
+    // MARK: - History blobs (B2)
+
+    func testHexDecodeMirrorsTheRustDecoder() {
+        XCTAssertEqual(BrowserSnapshot.self is Any.Type, true) // keep the type referenced
+        XCTAssertEqual(BrowserFFIDecode.hexDecode("0001feff"), Data([0x00, 0x01, 0xfe, 0xff]))
+        XCTAssertEqual(BrowserFFIDecode.hexDecode("FF"), Data([0xff]))
+        XCTAssertEqual(BrowserFFIDecode.hexDecode(""), Data())
+    }
+
+    func testHexDecodeRejectsMalformedInputRatherThanDroppingBytes() {
+        // A corrupted payload must surface as "no history", not as a shorter
+        // history that looks plausible.
+        XCTAssertNil(BrowserFFIDecode.hexDecode("abc"))
+        XCTAssertNil(BrowserFFIDecode.hexDecode("zz"))
+        XCTAssertNil(BrowserFFIDecode.hexDecode("00 11"))
+    }
+
+    func testHexDecodeRejectsNonASCIIDigitsSoBothSidesAgree() {
+        // Swift's `hexDigitValue` also accepts full-width forms, which the Rust
+        // decoder rejects. If the two disagreed, the same payload would decode
+        // differently on each platform.
+        XCTAssertNil(BrowserFFIDecode.hexDecode("ＦＦ"))
+    }
+
+    func testHistoryDecodersFailClosed() {
+        for bad in [nil, "{not json", "{}"] as [String?] {
+            XCTAssertFalse(BrowserFFIDecode.wroteHistory(bad), "input: \(bad ?? "nil")")
+            XCTAssertNil(BrowserFFIDecode.historyBlob(bad), "input: \(bad ?? "nil")")
+            XCTAssertEqual(BrowserFFIDecode.gcRemoved(bad), 0, "input: \(bad ?? "nil")")
+            XCTAssertFalse(BrowserFFIDecode.keepsHistory(bad), "input: \(bad ?? "nil")")
+        }
+        XCTAssertTrue(BrowserFFIDecode.wroteHistory(#"{"ok":true}"#))
+        XCTAssertEqual(BrowserFFIDecode.historyBlob(#"{"data_hex":"ab"}"#), Data([0xab]))
+        XCTAssertEqual(BrowserFFIDecode.gcRemoved(#"{"removed":3}"#), 3)
+        XCTAssertTrue(BrowserFFIDecode.keepsHistory(#"{"keeps_history":true}"#))
+    }
+
+    func testAWriteFailureMustNotBeReadAsSuccess() {
+        // Recording a generation whose blob was never written turns a write
+        // failure now into a silent restore failure later.
+        XCTAssertFalse(BrowserFFIDecode.wroteHistory(#"{"ok":false}"#))
+        XCTAssertFalse(BrowserFFIDecode.wroteHistory(#"{"written":true}"#))
+    }
+
+    func testLiveGenerationsListsOnlyTabsThatWroteABlob() {
+        let pane = BrowserPaneSnap(
+            tabs: [
+                BrowserTabSnap(id: "a", url: "https://a.example"),
+                BrowserTabSnap(id: "b", url: "https://b.example", historyGeneration: 4),
+            ],
+            active: 0,
+        )
+        let live = BrowserSnapshot.liveGenerations([pane])
+        XCTAssertEqual(live.count, 1)
+        XCTAssertEqual(live.first?.0, "b")
+        XCTAssertEqual(live.first?.1, 4)
+    }
+
+    func testLiveGenerationsSpansEveryPaneSoGCDoesNotEatASiblingsBlob() {
+        let panes = [
+            BrowserPaneSnap(tabs: [BrowserTabSnap(id: "a", url: "x", historyGeneration: 1)]),
+            BrowserPaneSnap(tabs: [BrowserTabSnap(id: "b", url: "y", historyGeneration: 2)]),
+        ]
+        let live = BrowserSnapshot.liveGenerations(panes)
+        XCTAssertEqual(Set(live.map(\.0)), ["a", "b"])
+    }
 }

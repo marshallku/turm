@@ -9,7 +9,8 @@ extension Notification.Name {
     /// `TerminalViewController.swift` so all panel types share one
     /// notification key.
     static let terminalTitleChanged = Notification.Name("copad.terminalTitleChanged")
-    /// A webview pane's URL changed, so its persisted snapshot is now stale.
+    /// A webview pane's persisted state — its URL or its scroll offset — is now
+    /// stale.
     ///
     /// Layout changes (new tab, split, close, tab switch) were the only things
     /// that scheduled a session save, which meant a browser pane's URL was
@@ -17,7 +18,7 @@ extension Notification.Name {
     /// it. Navigate to a page and quit, and the pane came back at wherever it
     /// had been when the last split or tab switch occurred — or, for a pane
     /// opened blank and then navigated, at nothing at all.
-    static let webviewURLChanged = Notification.Name("copad.webviewURLChanged")
+    static let webviewStateChanged = Notification.Name("copad.webviewStateChanged")
 }
 
 /// Common interface for all panel types (terminal, webview, …).

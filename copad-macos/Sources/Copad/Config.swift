@@ -137,6 +137,10 @@ struct CopadConfig {
     /// string is never validated twice (and cannot be validated differently)
     /// on the two platforms. See decision #100.
     let browserRestore: String
+    /// `[browser] capture_bodies` — include request/response bodies in the
+    /// captured network log. Off by default: bodies are the likeliest place for
+    /// a secret to end up in a file the agent can read.
+    let browserCaptureBodies: Bool
     /// PR 5c — raw `[[triggers]]` array from config.toml, walked from the
     /// TOMLKit table tree into JSON-friendly `[[String: Any]]` so it can be
     /// JSON-encoded and shipped to the Rust trigger engine via FFI. We don't
@@ -262,6 +266,7 @@ struct CopadConfig {
             ),
             keybindings: parseKeybindings(from: contents),
             browserRestore: tomlString(browser, "restore") ?? d.browserRestore,
+            browserCaptureBodies: tomlBool(browser, "capture_bodies") ?? d.browserCaptureBodies,
             triggers: parseTriggersArray(from: contents),
         )
     }
@@ -356,6 +361,7 @@ struct CopadConfig {
             statusBar: .defaults,
             keybindings: [:],
             browserRestore: "origin",
+            browserCaptureBodies: false,
             triggers: [],
         )
     }

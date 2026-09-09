@@ -126,6 +126,91 @@ public struct BrowserTabSnap: Codable, Equatable, Sendable {
     }
 }
 
+/// Transport for a refusal, so `CopadCore` need not know the executable's
+/// `RPCError` type.
+public struct RPCErrorShape: Equatable, Sendable {
+    public let code: String
+    public let message: String
+    public init(code: String, message: String) {
+        self.code = code
+        self.message = message
+    }
+}
+
+/// Swift mirror of `copad_core::browser::secrets::CredentialRef`.
+///
+/// **Metadata only.** This is what crosses the RPC boundary, and therefore what
+/// an agent can see. It has no field that can hold secret material, and adding
+/// one would silently undo the entire design — the test suite asserts that.
+public struct CredentialRef: Codable, Equatable, Sendable {
+    public let id: String
+    public let origin: String
+    public let username: String
+    public let label: String?
+    /// `"username"` or `"password"` — which field of a login form this fills.
+    public let slot: String
+    public let createdAt: UInt64
+    public let lastUsed: UInt64?
+
+    public init(
+        id: String,
+        origin: String,
+        username: String,
+        label: String? = nil,
+        slot: String = "password",
+        createdAt: UInt64 = 0,
+        lastUsed: UInt64? = nil,
+    ) {
+        self.id = id
+        self.origin = origin
+        self.username = username
+        self.label = label
+        self.slot = slot
+        self.createdAt = createdAt
+        self.lastUsed = lastUsed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, origin, username, label, slot
+        case createdAt = "created_at"
+        case lastUsed = "last_used"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        origin = try c.decode(String.self, forKey: .origin)
+        username = try c.decode(String.self, forKey: .username)
+        label = try c.decodeIfPresent(String.self, forKey: .label)
+        slot = try c.decodeIfPresent(String.self, forKey: .slot) ?? "password"
+        createdAt = try c.decodeIfPresent(UInt64.self, forKey: .createdAt) ?? 0
+        lastUsed = try c.decodeIfPresent(UInt64.self, forKey: .lastUsed)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(origin, forKey: .origin)
+        try c.encode(username, forKey: .username)
+        try c.encodeIfPresent(label, forKey: .label)
+        try c.encode(slot, forKey: .slot)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encodeIfPresent(lastUsed, forKey: .lastUsed)
+    }
+
+    /// Dictionary form for the RPC wire. Explicit rather than derived so a
+    /// field added to the type does not silently start crossing the boundary.
+    public var wire: [String: Any] {
+        var out: [String: Any] = [
+            "id": id, "origin": origin, "username": username,
+            "slot": slot, "created_at": createdAt,
+        ]
+        if let label { out["label"] = label }
+        if let lastUsed { out["last_used"] = lastUsed }
+        return out
+    }
+}
+
 // MARK: - Snapshot lifecycle
 
 /// How a browser pane turns itself back into a persistable snapshot.
@@ -177,6 +262,21 @@ public enum BrowserSnapshot {
             active: 0,
             profile: profile,
         )
+    }
+
+    /// Every `(tab id, generation)` a pane still references.
+    ///
+    /// What GC needs: anything in the history directory NOT in this set is a
+    /// superseded generation and can be reclaimed. Collected from the snapshot
+    /// that was just committed, never from the live views — reclaiming against
+    /// a set gathered before the write would delete the blob the new session
+    /// document points at.
+    public static func liveGenerations(_ panes: [BrowserPaneSnap]) -> [(String, UInt64)] {
+        panes.flatMap { pane in
+            pane.tabs.compactMap { tab in
+                tab.historyGeneration.map { (tab.id, $0) }
+            }
+        }
     }
 
     /// A fresh id in the accepted charset.
@@ -282,6 +382,149 @@ public enum BrowserFFIDecode {
               let paneData = try? JSONSerialization.data(withJSONObject: paneObj)
         else { return nil }
         return try? JSONDecoder().decode(BrowserPaneSnap.self, from: paneData)
+    }
+
+    /// `{ keeps_history }` → may the opaque history blob be written at all?
+    /// Missing reads as `false`: the restrictive direction, matching every
+    /// other decode here.
+    public static func keepsHistory(_ raw: String?) -> Bool {
+        guard let raw,
+              let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return obj["keeps_history"] as? Bool ?? false
+    }
+
+    /// `{ ok }` → did the blob actually reach disk?
+    ///
+    /// Fail-closed as `false`: recording a generation whose blob was never
+    /// written would turn a write failure now into a silent restore failure
+    /// later, which is far harder to diagnose.
+    public static func wroteHistory(_ raw: String?) -> Bool {
+        guard let raw,
+              let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return obj["ok"] as? Bool ?? false
+    }
+
+    /// `{ data_hex }` → the blob. `nil` for every failure shape, which the
+    /// caller treats uniformly as "restore the URL plainly".
+    public static func historyBlob(_ raw: String?) -> Data? {
+        guard let raw,
+              let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let hex = obj["data_hex"] as? String
+        else { return nil }
+        return hexDecode(hex)
+    }
+
+    /// `{ written }` → did the record reach the log? `false` means core shed it
+    /// entirely; missing reads as `false`, the honest direction.
+    public static func wroteLog(_ raw: String?) -> Bool {
+        guard let raw,
+              let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return obj["written"] as? Bool ?? false
+    }
+
+    /// `{ records, coverage }` → the slice plus what the capture can see.
+    ///
+    /// A failed read yields an empty list with the coverage string still set,
+    /// so a caller can never accidentally present "no records" as if it meant
+    /// "nothing happened" without the caveat attached.
+    public static func logRecords(_ raw: String?) -> (records: [Any], coverage: String) {
+        guard let raw,
+              let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return ([], unknownCoverage) }
+        return (
+            obj["records"] as? [Any] ?? [],
+            obj["coverage"] as? String ?? unknownCoverage
+        )
+    }
+
+    /// What a read reports when the coverage could not be established. Never a
+    /// blank string: an agent must not be able to read "" as "everything".
+    public static let unknownCoverage = "unknown"
+
+    /// `{ ok, code?, message? }` → nil when the fill may proceed, an error
+    /// otherwise.
+    ///
+    /// A response that cannot be read is a REFUSAL, not a pass: a dispatcher
+    /// that could not ask whether a password may be written must not write it.
+    public static func fillVerdict(_ raw: String?) -> RPCErrorShape? {
+        guard let raw,
+              let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ok = obj["ok"] as? Bool
+        else {
+            return RPCErrorShape(
+                code: "validation_unavailable",
+                message: "the fill preconditions could not be evaluated",
+            )
+        }
+        if ok { return nil }
+        return RPCErrorShape(
+            code: obj["code"] as? String ?? "refused",
+            message: obj["message"] as? String ?? "refused by browser policy",
+        )
+    }
+
+    /// `{ credentials }` → the index. An unreadable response yields an EMPTY
+    /// list, never a partial one: offering a credential that may not exist is
+    /// worse than offering none.
+    public static func credentials(_ raw: String?) -> [CredentialRef] {
+        guard let raw,
+              let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let list = obj["credentials"],
+              let listData = try? JSONSerialization.data(withJSONObject: list)
+        else { return [] }
+        return (try? JSONDecoder().decode([CredentialRef].self, from: listData)) ?? []
+    }
+
+    /// `{ removed }` → was an index entry actually there?
+    public static func removedCredential(_ raw: String?) -> Bool {
+        guard let raw,
+              let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return obj["removed"] as? Bool ?? false
+    }
+
+    /// `{ removed }` → how many superseded blobs were reclaimed.
+    public static func gcRemoved(_ raw: String?) -> Int {
+        guard let raw,
+              let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return 0 }
+        return obj["removed"] as? Int ?? 0
+    }
+
+    /// Mirrors `copad_core::browser::history::hex_decode`. Rejects odd lengths
+    /// and non-hex digits rather than dropping them, so a corrupted payload
+    /// surfaces as "no history" instead of as a shorter, plausible-looking one.
+    public static func hexDecode(_ hex: String) -> Data? {
+        guard hex.count % 2 == 0 else { return nil }
+        var out = Data(capacity: hex.count / 2)
+        var high: UInt8?
+        for ch in hex {
+            // `isASCII` matters: `hexDigitValue` also accepts full-width and
+            // other Unicode digit forms, which the Rust decoder rejects. The
+            // two must agree or a payload could decode differently on each side.
+            guard ch.isASCII, let value = ch.hexDigitValue, let v = UInt8(exactly: value) else {
+                return nil
+            }
+            if let h = high {
+                out.append((h << 4) | v)
+                high = nil
+            } else {
+                high = v
+            }
+        }
+        return high == nil ? out : nil
     }
 
     /// `{ allowed, opaque_write, code?, message? }` → the decision. Any failure

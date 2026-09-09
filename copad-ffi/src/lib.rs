@@ -965,6 +965,7 @@ pub unsafe extern "C" fn copad_ffi_browser_canonicalize(json: *const c_char) -> 
         &json!({
             "url": browser::canonicalize_for_restore(url, policy),
             "persist_title": policy.is_sensitive(),
+            "keeps_history": policy.keeps_history(),
         }),
     )
 }
@@ -1061,6 +1062,434 @@ pub unsafe extern "C" fn copad_ffi_browser_authorize(json: *const c_char) -> *mu
                 "code": e.code,
                 "message": e.message,
             }),
+        ),
+    }
+}
+
+/// `{ tab_id, generation, data_hex }` → `{ ok }`.
+///
+/// Persist a tab's opaque back/forward + scroll blob as a NEW generation. The
+/// caller writes `session.json` referencing that generation only after this
+/// returns, so a crash between the two cannot pair old metadata with new
+/// history.
+///
+/// Hex rather than base64 because `copad-core` carries no base64 dependency and
+/// the workspace's only implementation is a private encoder with no decoder.
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_history_write(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_history_write";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+    let tab_id = input.get("tab_id").and_then(Value::as_str).unwrap_or("");
+    let generation = input
+        .get("generation")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let hex = input.get("data_hex").and_then(Value::as_str).unwrap_or("");
+    let data = match browser::history::hex_decode(hex) {
+        Ok(d) => d,
+        Err(e) => {
+            set_last_error(format!("{NAME}: {e}"));
+            return ptr::null_mut();
+        }
+    };
+    match browser::history::write(tab_id, generation, &data) {
+        Ok(()) => json_response(NAME, &json!({ "ok": true })),
+        Err(e) => {
+            set_last_error(format!("{NAME}: {e}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `{ tab_id, generation }` → `{ data_hex }`.
+///
+/// NULL when the blob is absent, unreadable, oversize, or a symlink was planted
+/// at its name — all of which the caller treats identically: fall back to a
+/// plain URL load rather than restoring a history it cannot trust.
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_history_read(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_history_read";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+    let tab_id = input.get("tab_id").and_then(Value::as_str).unwrap_or("");
+    let generation = input
+        .get("generation")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    match browser::history::read(tab_id, generation) {
+        Ok(data) => json_response(
+            NAME,
+            &json!({ "data_hex": browser::history::hex_encode(&data) }),
+        ),
+        Err(e) => {
+            set_last_error(format!("{NAME}: {e}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `{ live: [[tab_id, generation], …] }` → `{ removed }`.
+///
+/// Reclaim superseded generations after a session has committed. Only files
+/// matching the exact blob grammar are candidates — this is not a directory
+/// wipe, so anything else that ends up there survives.
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_history_gc(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_history_gc";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+    let mut live: Vec<(String, u64)> = Vec::new();
+    if let Some(arr) = input.get("live").and_then(Value::as_array) {
+        for pair in arr {
+            let Some(pair) = pair.as_array() else {
+                continue;
+            };
+            let (Some(id), Some(generation)) = (
+                pair.first().and_then(Value::as_str),
+                pair.get(1).and_then(Value::as_u64),
+            ) else {
+                continue;
+            };
+            live.push((id.to_string(), generation));
+        }
+    }
+    json_response(NAME, &json!({ "removed": browser::history::gc(&live) }))
+}
+
+fn log_caps_from(input: &Value) -> browser::LogCaps {
+    let mut caps = browser::LogCaps::default();
+    if let Some(v) = input.get("capture_bodies").and_then(Value::as_bool) {
+        caps.capture_bodies = v;
+    }
+    caps
+}
+
+/// `{ panel_id, kind, record, capture_bodies? }` → `{ written }`.
+///
+/// `written: false` means the record was DROPPED for exceeding the per-record
+/// cap even after shedding. It is reported rather than swallowed because a
+/// caller that treats a drop as success is silently under-reporting what the
+/// page did.
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_netlog_append(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_netlog_append";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+    let panel_id = input.get("panel_id").and_then(Value::as_str).unwrap_or("");
+    let caps = log_caps_from(&input);
+    let Some(record) = input.get("record") else {
+        set_last_error(format!("{NAME}: missing 'record'"));
+        return ptr::null_mut();
+    };
+    let kind = input.get("kind").and_then(Value::as_str).unwrap_or("");
+    let written = match kind {
+        "net" => match serde_json::from_value::<browser::NetRecord>(record.clone()) {
+            Ok(r) => browser::netlog::append_net(panel_id, r, &caps),
+            Err(e) => Err(format!("record does not match the net schema: {e}")),
+        },
+        "console" => match serde_json::from_value::<browser::ConsoleRecord>(record.clone()) {
+            Ok(r) => browser::netlog::append_console(panel_id, r, &caps),
+            Err(e) => Err(format!("record does not match the console schema: {e}")),
+        },
+        other => Err(format!("unknown record kind: {other:?}")),
+    };
+    match written {
+        Ok(ok) => json_response(NAME, &json!({ "written": ok })),
+        Err(e) => {
+            set_last_error(format!("{NAME}: {e}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `{ panel_id, kind?, since?, tab_id?, level?, contains?, limit? }`
+/// → `{ records, coverage }`.
+///
+/// `coverage` is returned on EVERY read, not documented once and forgotten:
+/// patching `fetch`/`XHR` is not a packet log, and an agent reading an empty
+/// list must not conclude "no request was made".
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_netlog_read(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_netlog_read";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+    let panel_id = input.get("panel_id").and_then(Value::as_str).unwrap_or("");
+    let query = browser::netlog::ReadQuery {
+        kind: match input.get("kind").and_then(Value::as_str) {
+            Some("net") => Some(browser::netlog::Kind::Net),
+            Some("console") => Some(browser::netlog::Kind::Console),
+            _ => None,
+        },
+        since: input.get("since").and_then(Value::as_u64),
+        tab_id: input
+            .get("tab_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        level: input
+            .get("level")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        contains: input
+            .get("contains")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        limit: input.get("limit").and_then(Value::as_u64).unwrap_or(0) as usize,
+    };
+    match browser::netlog::read(panel_id, &query) {
+        Ok(records) => json_response(
+            NAME,
+            &json!({ "records": records, "coverage": browser::NETLOG_COVERAGE }),
+        ),
+        Err(e) => {
+            set_last_error(format!("{NAME}: {e}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `{ panel_id }` → `{ removed }`.
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_netlog_clear(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_netlog_clear";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+    let panel_id = input.get("panel_id").and_then(Value::as_str).unwrap_or("");
+    match browser::netlog::clear(panel_id) {
+        Ok(removed) => json_response(NAME, &json!({ "removed": removed })),
+        Err(e) => {
+            set_last_error(format!("{NAME}: {e}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `{ origin? }` → `{ credentials }`. Metadata only — see `CredentialRef`.
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_credentials_list(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_credentials_list";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+    let origin = input.get("origin").and_then(Value::as_str);
+    json_response(
+        NAME,
+        &json!({ "credentials": browser::secrets::list(origin) }),
+    )
+}
+
+/// `{ credential }` → `{ ok }`. Add or replace one index entry.
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_credentials_upsert(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_credentials_upsert";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+    let Some(value) = input.get("credential") else {
+        set_last_error(format!("{NAME}: missing 'credential'"));
+        return ptr::null_mut();
+    };
+    let entry: browser::CredentialRef = match serde_json::from_value(value.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            set_last_error(format!("{NAME}: credential does not match the schema: {e}"));
+            return ptr::null_mut();
+        }
+    };
+    if !browser::secrets::is_valid_credential_id(&entry.id) {
+        set_last_error(format!("{NAME}: invalid credential id: {:?}", entry.id));
+        return ptr::null_mut();
+    }
+    match browser::secrets::upsert(entry) {
+        Ok(_) => json_response(NAME, &json!({ "ok": true })),
+        Err(e) => {
+            set_last_error(format!("{NAME}: {e}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `{ credential_id }` → `{ removed }`.
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_credentials_remove(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_credentials_remove";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+    let id = input
+        .get("credential_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match browser::secrets::remove(id) {
+        Ok(removed) => json_response(NAME, &json!({ "removed": removed })),
+        Err(e) => {
+            set_last_error(format!("{NAME}: {e}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `{ request, credential, live, target }` → `{ ok }` or NULL with the reason.
+///
+/// The credential-fill preconditions, evaluated by `copad_core` rather than
+/// re-implemented per platform. That matters more here than anywhere else in
+/// this surface: these are the checks that decide whether a password is written
+/// into a page, and a second implementation is a second thing that can be
+/// subtly wrong on its own.
+///
+/// `target` is the element as observed in the SAME synchronous step that will
+/// perform the injection — never a value captured earlier, because a page can
+/// swap the input or flip its `type` without navigating.
+///
+/// # Safety
+///
+/// `json` must be a NUL-terminated UTF-8 pointer valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn copad_ffi_browser_validate_fill(json: *const c_char) -> *mut c_char {
+    const NAME: &str = "copad_ffi_browser_validate_fill";
+    // SAFETY: caller contract, forwarded.
+    let Some(input) = (unsafe { parse_json_arg(NAME, json) }) else {
+        return ptr::null_mut();
+    };
+
+    let get = |key: &str| input.get(key).cloned().unwrap_or(Value::Null);
+    let slot = |v: &Value| match v.as_str() {
+        Some("username") => browser::CredentialSlot::Username,
+        _ => browser::CredentialSlot::Password,
+    };
+
+    let cred: browser::CredentialRef = match serde_json::from_value(get("credential")) {
+        Ok(c) => c,
+        Err(e) => {
+            set_last_error(format!("{NAME}: credential does not match the schema: {e}"));
+            return ptr::null_mut();
+        }
+    };
+    let req_v = get("request");
+    let live_v = get("live");
+    let target_v = get("target");
+
+    let req = browser::FillRequest {
+        credential_id: req_v
+            .get("credential_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        profile: req_v
+            .get("profile")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        tab_id: req_v
+            .get("tab_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        origin: req_v
+            .get("origin")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        document_generation: req_v
+            .get("document_generation")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        slot: slot(&req_v.get("slot").cloned().unwrap_or(Value::Null)),
+    };
+    let live = browser::secrets::TabState {
+        tab_id: live_v
+            .get("tab_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        profile: live_v
+            .get("profile")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        // An unrecognised mode reads as Automation here, which REFUSES the
+        // fill — the restrictive direction.
+        mode: match live_v.get("mode").and_then(Value::as_str) {
+            Some("protected") => browser::TabMode::Protected,
+            _ => browser::TabMode::Automation,
+        },
+        origin: live_v
+            .get("origin")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        document_generation: live_v
+            .get("document_generation")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    };
+    let target = browser::secrets::LiveTarget {
+        selector: target_v
+            .get("selector")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        is_password_input: target_v
+            .get("is_password_input")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+
+    match browser::secrets::validate_fill(&req, &cred, &live, &target) {
+        Ok(()) => json_response(NAME, &json!({ "ok": true })),
+        Err(e) => json_response(
+            NAME,
+            &json!({ "ok": false, "code": e.code, "message": e.message }),
         ),
     }
 }
@@ -1232,6 +1661,225 @@ mod browser_ffi_tests {
     fn normalize_rejects_a_pane_that_is_not_a_pane() {
         assert!(call(copad_ffi_browser_normalize, r#"{"pane":42}"#).is_none());
         assert!(call(copad_ffi_browser_normalize, r#"{}"#).is_none());
+    }
+
+    // ---- history blobs ----
+    //
+    // These touch the filesystem through `state_dir()`, so they redirect HOME /
+    // XDG_STATE_HOME and serialize on a lock, the same shape `copad-core`'s own
+    // history tests use.
+
+    static HISTORY_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_temp_state<T>(tag: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = HISTORY_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let root =
+            std::env::temp_dir().join(format!("copad-ffi-hist-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_xdg = std::env::var("XDG_STATE_HOME").ok();
+        // SAFETY: HISTORY_ENV serializes every test that touches these vars.
+        unsafe {
+            std::env::set_var("HOME", &root);
+            std::env::set_var("XDG_STATE_HOME", root.join("state"));
+        }
+        let out = f();
+        // SAFETY: still holding the lock.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_xdg {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        out
+    }
+
+    #[test]
+    fn a_history_blob_round_trips_through_the_boundary() {
+        with_temp_state("roundtrip", || {
+            let written = call(
+                copad_ffi_browser_history_write,
+                r#"{"tab_id":"tab-a","generation":1,"data_hex":"0001feff"}"#,
+            )
+            .expect("non-null");
+            assert_eq!(written["ok"], true);
+
+            let read = call(
+                copad_ffi_browser_history_read,
+                r#"{"tab_id":"tab-a","generation":1}"#,
+            )
+            .expect("non-null");
+            assert_eq!(read["data_hex"], "0001feff");
+        });
+    }
+
+    #[test]
+    fn a_missing_or_invalid_blob_reads_as_null_so_the_caller_falls_back() {
+        with_temp_state("missing", || {
+            assert!(
+                call(
+                    copad_ffi_browser_history_read,
+                    r#"{"tab_id":"tab-a","generation":7}"#
+                )
+                .is_none()
+            );
+            assert!(
+                call(
+                    copad_ffi_browser_history_read,
+                    r#"{"tab_id":"../../etc/passwd","generation":1}"#
+                )
+                .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn a_malformed_hex_payload_is_refused_rather_than_written() {
+        with_temp_state("badhex", || {
+            assert!(
+                call(
+                    copad_ffi_browser_history_write,
+                    r#"{"tab_id":"tab-a","generation":1,"data_hex":"zz"}"#
+                )
+                .is_none()
+            );
+            assert!(
+                call(
+                    copad_ffi_browser_history_read,
+                    r#"{"tab_id":"tab-a","generation":1}"#
+                )
+                .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn gc_reclaims_superseded_generations_and_reports_the_count() {
+        with_temp_state("gc", || {
+            for generation in 1..=3 {
+                call(
+                    copad_ffi_browser_history_write,
+                    &format!(r#"{{"tab_id":"tab-a","generation":{generation},"data_hex":"00"}}"#),
+                )
+                .expect("write");
+            }
+            let out =
+                call(copad_ffi_browser_history_gc, r#"{"live":[["tab-a",3]]}"#).expect("non-null");
+            assert_eq!(out["removed"], 2);
+            assert!(
+                call(
+                    copad_ffi_browser_history_read,
+                    r#"{"tab_id":"tab-a","generation":3}"#
+                )
+                .is_some()
+            );
+        });
+    }
+
+    #[test]
+    fn gc_with_a_malformed_live_list_keeps_nothing_alive_but_does_not_crash() {
+        with_temp_state("gc-malformed", || {
+            call(
+                copad_ffi_browser_history_write,
+                r#"{"tab_id":"tab-a","generation":1,"data_hex":"00"}"#,
+            )
+            .expect("write");
+            // Entries that are not [string, number] pairs are skipped, not
+            // guessed at — the blob is simply unreferenced and reclaimed.
+            let out = call(
+                copad_ffi_browser_history_gc,
+                r#"{"live":[["tab-a"],42,{"tab_id":"tab-a"}]}"#,
+            )
+            .expect("non-null");
+            assert_eq!(out["removed"], 1);
+        });
+    }
+
+    // ---- netlog ----
+
+    #[test]
+    fn netlog_records_round_trip_with_declared_coverage() {
+        with_temp_state("netlog", || {
+            let written = call(
+                copad_ffi_browser_netlog_append,
+                r#"{"panel_id":"panel1","kind":"console","record":{"ts":1,"tab_id":"t1","level":"error","text":"boom"}}"#,
+            )
+            .expect("non-null");
+            assert_eq!(written["written"], true);
+
+            let out = call(
+                copad_ffi_browser_netlog_read,
+                r#"{"panel_id":"panel1","limit":10}"#,
+            )
+            .expect("non-null");
+            assert_eq!(out["records"].as_array().unwrap().len(), 1);
+            assert_eq!(out["records"][0]["text"], "boom");
+            // Every read says what the capture can and cannot see.
+            assert_eq!(out["coverage"], "js+navigation");
+        });
+    }
+
+    #[test]
+    fn netlog_redacts_credential_headers_before_they_reach_the_file() {
+        with_temp_state("netlog-redact", || {
+            call(
+                copad_ffi_browser_netlog_append,
+                r#"{"panel_id":"panel1","kind":"net","record":{"ts":1,"tab_id":"t1","source":"script","method":"POST","url":"https://api.example.com/login","request_headers":[["Authorization","Bearer sk-live-abc"]]}}"#,
+            )
+            .expect("non-null");
+            let out = call(
+                copad_ffi_browser_netlog_read,
+                r#"{"panel_id":"panel1","limit":10}"#,
+            )
+            .expect("non-null");
+            let text = out.to_string();
+            assert!(!text.contains("sk-live-abc"), "{text}");
+            assert!(text.contains("redacted"), "{text}");
+        });
+    }
+
+    #[test]
+    fn netlog_rejects_a_record_that_does_not_match_its_kind() {
+        with_temp_state("netlog-bad", || {
+            assert!(
+                call(
+                    copad_ffi_browser_netlog_append,
+                    r#"{"panel_id":"panel1","kind":"net","record":{"ts":1}}"#
+                )
+                .is_none()
+            );
+            assert!(
+                call(
+                    copad_ffi_browser_netlog_append,
+                    r#"{"panel_id":"panel1","kind":"bogus","record":{}}"#
+                )
+                .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn netlog_clear_reports_what_it_discarded() {
+        with_temp_state("netlog-clear", || {
+            for i in 1..=2 {
+                call(
+                    copad_ffi_browser_netlog_append,
+                    &format!(
+                        r#"{{"panel_id":"panel1","kind":"console","record":{{"ts":{i},"tab_id":"t1","level":"log","text":"x"}}}}"#
+                    ),
+                )
+                .expect("append");
+            }
+            let out =
+                call(copad_ffi_browser_netlog_clear, r#"{"panel_id":"panel1"}"#).expect("non-null");
+            assert_eq!(out["removed"], 2);
+        });
     }
 
     fn last_error_string() -> String {

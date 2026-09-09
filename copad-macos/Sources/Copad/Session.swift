@@ -32,7 +32,14 @@ enum Session {
         }
     }
 
-    static func save(_ snap: Snapshot) {
+    /// Returns whether the snapshot actually reached disk.
+    ///
+    /// The caller needs to know: history-blob GC runs against the COMMITTED
+    /// session, and running it after a failed save would delete generations the
+    /// previously committed session still references — destroying recoverable
+    /// history rather than reclaiming dead files.
+    @discardableResult
+    static func save(_ snap: Snapshot) -> Bool {
         let encoder = JSONEncoder()
         let data: Data
         do {
@@ -41,7 +48,7 @@ enum Session {
             FileHandle.standardError.write(
                 Data("[copad] session encode failed: \(error)\n".utf8),
             )
-            return
+            return false
         }
         let json = String(decoding: data, as: UTF8.self)
         let rc = json.withCString { copad_ffi_session_save($0) }
@@ -50,7 +57,9 @@ enum Session {
             FileHandle.standardError.write(
                 Data("[copad] session save failed: \(msg)\n".utf8),
             )
+            return false
         }
+        return true
     }
 
     static func clear() {

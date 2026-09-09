@@ -31,6 +31,10 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$REPO/copad-macos/.build/debug/Copad.app/Contents/MacOS/Copad"
 COCTL="$REPO/target/release/coctl"; [ -x "$COCTL" ] || COCTL="$REPO/target/debug/coctl"
+# Every CLI invocation below runs after `export COPAD_SOCKET=` for the instance
+# under test. Without that a `coctl` call inherits the ambient socket and opens
+# a tab in the user's REAL copad — which is not a test failure, it is a test
+# that reached out and touched something it had no business touching.
 [ -x "$APP" ] || { echo "build the bundle first — see the header"; exit 2; }
 
 # Raw JSON-RPC over the per-instance GUI socket.
@@ -262,10 +266,9 @@ echo "[4/5] not-yet-built methods answer unsupported_capability, not unknown_met
 H3=$(mktemp -d /private/tmp/copad-e2e-XXXXXX)
 read -r PID3 SOCK3 <<<"$(launch "$H3")" || exit 1
 export COPAD_SOCKET="$SOCK3"; sleep 1
-# `browser.secret.fill` is in the list on purpose: it is the one that would
-# answer `requires_protected` if the policy gate ran before the not-built check,
-# sending a caller to `webview.tab.protect` — which is itself unimplemented.
-for m in webview.tab.list webview.tab.protect browser.secret.list browser.secret.fill webview.net; do
+# The list shrinks as the units land — that is the point of registering them.
+# Only the profile surface is still unbuilt.
+for m in webview.profile.list webview.profile.clear; do
     OUT=$(rpc "$m")
     if grep -q '"unsupported_capability"' <<<"$OUT"; then
         echo "  PASS: $m -> unsupported_capability"
@@ -273,6 +276,17 @@ for m in webview.tab.list webview.tab.protect browser.secret.list browser.secret
         echo "  FAIL: $m -> $OUT"; RC=1
     fi
 done
+# And the case that motivated answering "not built" BEFORE the policy gate:
+# without that ordering `browser.secret.fill` would have said
+# `requires_protected` and pointed the caller at `webview.tab.protect`, which
+# was itself unimplemented. Now that both are built, the refusal is the
+# genuinely useful one.
+OUT=$(rpc browser.secret.fill '{"credential_id":"nobody/nothing"}')
+if grep -q "requires_protected" <<<"$OUT"; then
+    echo "  PASS: browser.secret.fill on an unprotected tab -> requires_protected"
+else
+    echo "  FAIL: browser.secret.fill -> $OUT"; RC=1
+fi
 kill -9 "$PID3" 2>/dev/null; rm -f "$SOCK3"; rm -rf "$H3"
 
 # --- 5. a navigation the PAGE starts is persisted too -----------------------

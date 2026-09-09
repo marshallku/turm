@@ -233,6 +233,53 @@ char *copad_ffi_browser_normalize(const char *json);
 /// protected.
 char *copad_ffi_browser_authorize(const char *json);
 
+/// `{ tab_id, generation, data_hex }` -> `{ ok }`. Persist a tab's opaque
+/// back/forward + scroll blob as a NEW generation, so the generation the
+/// committed session.json still references is never overwritten in place.
+char *copad_ffi_browser_history_write(const char *json);
+
+/// `{ tab_id, generation }` -> `{ data_hex }`. NULL when the blob is absent,
+/// unreadable, oversize, or a symlink was planted at its name — the caller
+/// treats all of those identically and falls back to a plain URL load.
+char *copad_ffi_browser_history_read(const char *json);
+
+/// `{ live: [[tab_id, generation], ...] }` -> `{ removed }`. Reclaim
+/// superseded generations after a session has committed. Only files matching
+/// the exact blob grammar are candidates — not a directory wipe.
+char *copad_ffi_browser_history_gc(const char *json);
+
+/// `{ panel_id, kind, record, capture_bodies? }` -> `{ written }`. Append one
+/// network or console record. `written: false` means it was DROPPED for
+/// exceeding the per-record cap even after shedding — reported rather than
+/// swallowed, because a caller treating a drop as success under-reports.
+char *copad_ffi_browser_netlog_append(const char *json);
+
+/// `{ panel_id, kind?, since?, tab_id?, level?, contains?, limit? }` ->
+/// `{ records, coverage }`. `coverage` comes back on EVERY read: patching
+/// fetch/XHR is not a packet log, and an empty list must not be read as
+/// "no request was made".
+char *copad_ffi_browser_netlog_read(const char *json);
+
+/// `{ panel_id }` -> `{ removed }`.
+char *copad_ffi_browser_netlog_clear(const char *json);
+
+/// `{ origin? }` -> `{ credentials }`. The credential INDEX: metadata only.
+/// No shape of this response can carry secret material — that lives in the
+/// platform keychain and never crosses this boundary.
+char *copad_ffi_browser_credentials_list(const char *json);
+
+/// `{ credential }` -> `{ ok }`. Add or replace one index entry.
+char *copad_ffi_browser_credentials_upsert(const char *json);
+
+/// `{ credential_id }` -> `{ removed }`.
+char *copad_ffi_browser_credentials_remove(const char *json);
+
+/// `{ request, credential, live, target }` -> `{ ok, code?, message? }`.
+/// The credential-fill preconditions, decided by copad-core rather than
+/// re-implemented per platform. `target` must be the element as observed in the
+/// SAME synchronous step that performs the injection.
+char *copad_ffi_browser_validate_fill(const char *json);
+
 #ifdef __cplusplus
 }
 #endif

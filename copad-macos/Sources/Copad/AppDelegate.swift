@@ -393,8 +393,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let snap = tabVC?.snapshotSession() {
             if snap.tabs.isEmpty {
                 Session.clear()
-            } else {
-                Session.save(snap)
+            } else if Session.save(snap) {
+                // Same rule as the debounced path: GC only follows a commit.
+                TabViewController.gcHistoryBlobs(after: snap)
             }
         }
         // Order matters:
@@ -1289,6 +1290,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             case let .success(panel): completion(panel.context(historyLines: historyLines))
             }
 
+        // Diagnostic, and the load-bearing half of the no-focus-theft audit.
+        //
+        // "Did the frontmost application change" is an endpoint check that
+        // misses focus moving WITHIN copad — a browser command that grabbed
+        // first responder would swallow the user's keystrokes while every
+        // system-level signal still looked clean. This reports what the app
+        // itself believes is focused, so a test can assert it is unchanged
+        // across a sweep of every browser command without touching global
+        // input state (which would mean typing into whatever the user has open).
+        case "window.focus_state":
+            let window = NSApp.keyWindow ?? vc.view.window
+            completion([
+                "key_window": window?.title ?? "",
+                "is_key": window?.isKeyWindow ?? false,
+                // `type(of: x as Any)` on an Optional reports `Optional<…>`,
+                // which is the same string for every responder and would make
+                // this diagnostic — and the audit built on it — unable to
+                // detect the change it exists to detect. Unwrap first.
+                "first_responder": window?.firstResponder.map { String(describing: type(of: $0)) } ?? "none",
+                "active_tab": vc.activeIndex,
+                "active_pane": vc.activePaneID ?? "",
+                "app_active": NSApp.isActive,
+            ])
+
         case "tab.new":
             vc.newTab()
             completion(["ok": true])
@@ -1479,13 +1504,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return URL(string: final)
             }
             let mode = params["mode"] as? String ?? "tab"
+            // `background: true` creates the copad tab without switching to
+            // it. `mode` keeps its original meaning — a new COPAD tab or a
+            // split — because changing what `mode: "tab"` does would silently
+            // break every existing caller. A tab inside an existing browser
+            // pane is `webview.tab.new`, which is a different question.
+            let background = params["background"] as? Bool ?? false
             switch mode {
             case "split_h":
-                vc.splitActivePaneWithWebView(url: url, orientation: .horizontal)
+                vc.splitActivePaneWithWebView(
+                    url: url, orientation: .horizontal, background: background,
+                )
             case "split_v":
-                vc.splitActivePaneWithWebView(url: url, orientation: .vertical)
+                vc.splitActivePaneWithWebView(
+                    url: url, orientation: .vertical, background: background,
+                )
             default: // "tab"
-                vc.newWebViewTab(url: url)
+                vc.newWebViewTab(url: url, background: background)
             }
             completion(["ok": true])
 
@@ -1494,34 +1529,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 completion(RPCError(code: "invalid_params", message: "Missing 'url' param"))
                 return
             }
-            switch resolveWebView(params, in: vc) {
+            switch resolveBrowserTab(params, in: vc) {
             case let .failure(err): completion(err)
-            case let .success(webVC):
-                webVC.navigate(to: urlString)
+            case let .success(t):
+                t.tab.navigate(to: urlString)
                 completion(["status": "ok"])
             }
 
         case "webview.back":
-            switch resolveWebView(params, in: vc) {
+            switch resolveBrowserTab(params, in: vc) {
             case let .failure(err): completion(err)
-            case let .success(webVC):
-                webVC.goBack()
+            case let .success(t):
+                t.tab.goBack()
                 completion(["status": "ok"])
             }
 
         case "webview.forward":
-            switch resolveWebView(params, in: vc) {
+            switch resolveBrowserTab(params, in: vc) {
             case let .failure(err): completion(err)
-            case let .success(webVC):
-                webVC.goForward()
+            case let .success(t):
+                t.tab.goForward()
                 completion(["status": "ok"])
             }
 
         case "webview.reload":
-            switch resolveWebView(params, in: vc) {
+            switch resolveBrowserTab(params, in: vc) {
             case let .failure(err): completion(err)
-            case let .success(webVC):
-                webVC.reload()
+            case let .success(t):
+                t.tab.reload()
                 completion(["status": "ok"])
             }
 
@@ -1532,10 +1567,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 completion(RPCError(code: "invalid_params", message: "Missing 'code' param"))
                 return
             }
-            switch resolveWebView(params, in: vc) {
+            switch resolveBrowserTab(params, in: vc) {
             case let .failure(err): completion(err)
-            case let .success(webVC):
-                webVC.executeJS(code) { result, error in
+            case let .success(t):
+                t.tab.executeJS(code) { result, error in
                     if let error {
                         completion(RPCError(code: "js_error", message: error.localizedDescription))
                     } else {
@@ -1545,10 +1580,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
         case "webview.get_content":
-            switch resolveWebView(params, in: vc) {
+            switch resolveBrowserTab(params, in: vc) {
             case let .failure(err): completion(err)
-            case let .success(webVC):
-                webVC.getContent { html in
+            case let .success(t):
+                t.tab.getContent { html in
                     completion(["html": html])
                 }
             }
@@ -1561,12 +1596,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // parity but treat show/attach/detach as "ensure enabled" and
             // close as "no-op" (the user closes the inspector window manually).
             let action = (params["action"] as? String) ?? "show"
-            switch resolveWebView(params, in: vc) {
+            switch resolveBrowserTab(params, in: vc) {
             case let .failure(err): completion(err)
-            case let .success(webVC):
+            case let .success(t):
                 switch action {
                 case "show", "attach", "detach", "toggle":
-                    webVC.toggleDevTools()
+                    // The TARGET tab's configuration, not the pane's active
+                    // one: every other page-level command honours `tab_id`, and
+                    // silently toggling a different tab's inspector would be a
+                    // surprise rather than a convenience.
+                    t.tab.toggleDevTools()
                     completion(["status": "ok"])
                 case "close":
                     completion(["status": "ok"])
@@ -1579,15 +1618,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
         case "webview.state":
-            switch resolveWebView(params, in: vc) {
+            switch resolveBrowserTab(params, in: vc) {
             case let .failure(err): completion(err)
-            case let .success(webVC):
+            case let .success(t):
                 completion([
-                    "url": webVC.currentURL,
-                    "title": webVC.currentTitle,
-                    "can_go_back": webVC.canGoBack,
-                    "can_go_forward": webVC.canGoForward,
-                    "is_loading": webVC.isLoading,
+                    "tab_id": t.tab.id,
+                    "url": t.tab.currentURL,
+                    "title": t.tab.title,
+                    "can_go_back": t.tab.canGoBack,
+                    "can_go_forward": t.tab.canGoForward,
+                    "is_loading": t.tab.isLoading,
                 ])
             }
 
@@ -1658,21 +1698,260 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 message: "\(method) is not implemented on macOS yet",
             ))
 
-        case "webview.screenshot":
-            switch resolveWebView(params, in: vc) {
+        case "webview.tab.new":
+            switch resolveBrowserTab(params, in: vc) {
             case let .failure(err): completion(err)
-            case let .success(webVC):
+            case let .success(t):
+                let raw = params["url"] as? String
+                let url = raw.flatMap { s -> URL? in
+                    let final = s.hasPrefix("http://") || s.hasPrefix("https://") || s.hasPrefix("file://")
+                        ? s : "https://" + s
+                    return URL(string: final)
+                }
+                // Background by DEFAULT here, unlike the toolbar's own new-tab:
+                // this method is reached by agents, and an agent opening a tab
+                // must not change what the human is looking at.
+                let background = params["background"] as? Bool ?? true
+                guard let tabID = t.pane.newTab(url: url, background: background) else {
+                    completion(RPCError(
+                        code: "refused",
+                        message: "this pane already holds the maximum of \(WebViewController.maxTabs) tabs",
+                    ))
+                    return
+                }
+                completion(["tab_id": tabID, "panel_id": t.pane.panelID])
+            }
+
+        case "webview.tab.list":
+            switch resolveBrowserTab(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(t):
+                // A protected tab contributes BOOKKEEPING only.
+                //
+                // `tab.list` is classified `Meta` in core — an agent must always
+                // be able to discover that a tab exists and that it is
+                // protected — but url and title are page-derived, exactly what
+                // `webview.state` is refused for. Returning them here would
+                // have routed an OAuth code or a reset-token URL straight
+                // around the protection.
+                // Profile-wide, not per-tab. Sibling tabs share the
+                // authenticated session, so an agent could navigate one to a
+                // sensitive endpoint and read its URL back through this
+                // "metadata" method while `webview.state` refused the same
+                // read.
+                let anyProtected = WebViewController.anyProtected
+                let list = t.pane.tabs.map { tab in
+                    let isProtected = anyProtected || tab.tabMode == .protected
+                    return [
+                        "id": tab.id,
+                        "url": isProtected ? "" : tab.currentURL,
+                        "title": isProtected ? "" : tab.title,
+                        "loading": tab.isLoading,
+                        "mode": tab.tabMode.rawValue,
+                    ] as [String: Any]
+                }
+                completion([
+                    "panel_id": t.pane.panelID,
+                    "tabs": list,
+                    "active": t.pane.activeIndex,
+                ])
+            }
+
+        case "webview.tab.select":
+            guard let tabID = params["tab_id"] as? String, !tabID.isEmpty else {
+                completion(RPCError(code: "invalid_params", message: "Missing 'tab_id' param"))
+                return
+            }
+            switch resolveBrowserTab(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(t):
+                if t.pane.selectTab(id: tabID) {
+                    completion(["status": "ok", "active": t.pane.activeIndex])
+                } else {
+                    completion(RPCError(code: "tab_closed", message: "Tab not found: \(tabID)"))
+                }
+            }
+
+        case "webview.tab.close":
+            guard let tabID = params["tab_id"] as? String, !tabID.isEmpty else {
+                completion(RPCError(code: "invalid_params", message: "Missing 'tab_id' param"))
+                return
+            }
+            switch resolveBrowserTab(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(t):
+                if let problem = t.pane.closeTab(id: tabID) {
+                    // Refusing the last tab is deliberate: closing the PANE is
+                    // the tab manager's job, and a pane with no tabs has no
+                    // coherent snapshot.
+                    completion(RPCError(code: "refused", message: problem))
+                } else {
+                    completion(["status": "ok", "remaining": t.pane.tabs.count])
+                }
+            }
+
+        case "webview.tab.move":
+            guard let tabID = params["tab_id"] as? String, !tabID.isEmpty else {
+                completion(RPCError(code: "invalid_params", message: "Missing 'tab_id' param"))
+                return
+            }
+            guard let index = params["index"] as? Int else {
+                completion(RPCError(code: "invalid_params", message: "Missing 'index' param"))
+                return
+            }
+            switch resolveBrowserTab(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(t):
+                if let problem = t.pane.moveTab(id: tabID, to: index) {
+                    completion(RPCError(code: "not_found", message: problem))
+                } else {
+                    completion(["status": "ok", "active": t.pane.activeIndex])
+                }
+            }
+
+        case "webview.tab.protect":
+            switch resolveBrowserTab(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(t):
+                let on = params["on"] as? Bool ?? true
+                // Answer only once the rebuild has finished. The transition
+                // tears the old web view down, awaits an async cache purge and
+                // builds a new one; replying early left `webView` nil, so an
+                // immediately-following `reload`/`navigate`/`click` — all of
+                // which protection ALLOWS — dereferenced it and crashed.
+                t.tab.setProtected(on) {
+                    completion([
+                        "mode": t.tab.tabMode.rawValue,
+                        "document_generation": t.tab.documentGeneration,
+                    ])
+                }
+            }
+
+        case "browser.secret.list":
+            // Metadata only. `CredentialRef` has no field that could carry the
+            // secret, which is why this is safe to answer to an agent at all.
+            let origin = params["origin"] as? String
+            completion(["credentials": BrowserSecrets.list(origin: origin).map(\.wire)])
+
+        case "browser.secret.fill":
+            guard let credentialID = params["credential_id"] as? String, !credentialID.isEmpty else {
+                completion(RPCError(code: "invalid_params", message: "Missing 'credential_id' param"))
+                return
+            }
+            switch resolveBrowserTab(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(t):
+                guard let credential = BrowserSecrets.find(id: credentialID) else {
+                    completion(RPCError(code: "not_found", message: "No such credential: \(credentialID)"))
+                    return
+                }
+                t.tab.fillCredential(credential) { result in
+                    switch result {
+                    case let .failure(err): completion(err)
+                    case let .success(selector):
+                        // The selector, never the value. There is no shape of
+                        // this response that carries the secret.
+                        completion(["ok": true, "filled": [selector]])
+                    }
+                }
+            }
+
+        case "browser.secret.save":
+            // The SECRET is read natively from the protected page — it is not a
+            // parameter, so an agent calling this never handles it and never
+            // sees it.
+            guard let username = params["username"] as? String, !username.isEmpty else {
+                completion(RPCError(code: "invalid_params", message: "Missing 'username' param"))
+                return
+            }
+            switch resolveBrowserTab(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(t):
+                BrowserSecrets.saveFromPage(tab: t.tab, username: username) { result in
+                    switch result {
+                    case let .failure(err): completion(err)
+                    case let .success(ref): completion(["credential": ref.wire])
+                    }
+                }
+            }
+
+        case "browser.secret.delete":
+            guard let credentialID = params["credential_id"] as? String, !credentialID.isEmpty else {
+                completion(RPCError(code: "invalid_params", message: "Missing 'credential_id' param"))
+                return
+            }
+            BrowserSecrets.delete(id: credentialID) { result in
+                switch result {
+                case let .failure(err): completion(err)
+                case let .success(removed): completion(["removed": removed])
+                }
+            }
+
+        case "webview.net", "webview.console":
+            switch resolveBrowserTab(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(t):
+                var query: [String: Any] = [
+                    "kind": method == "webview.net" ? "net" : "console",
+                    "limit": params["limit"] as? Int ?? 200,
+                ]
+                if let since = params["since"] as? Int { query["since"] = since }
+                if let contains = params["filter"] as? String { query["contains"] = contains }
+                if let level = params["level"] as? String { query["level"] = level }
+                // A `tab_id` in the params scopes the READ as well as the
+                // target, so "what did this background tab do" is answerable
+                // without selecting it.
+                if let tabID = params["tab_id"] as? String, !tabID.isEmpty {
+                    query["tab_id"] = tabID
+                }
+                let result = BrowserFFI.readLog(panelID: t.pane.panelID, query: query)
+                completion([
+                    "records": result.records,
+                    // Declared on every response. Patching fetch/XHR is not a
+                    // packet log — subresources, sendBeacon, WebSocket frames
+                    // and service-worker traffic are invisible to it — so an
+                    // empty list must never be read as "no request was made".
+                    "coverage": result.coverage,
+                ])
+            }
+
+        case "webview.clear_log":
+            switch resolveBrowserTab(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(t):
+                completion(["removed": BrowserFFI.clearLog(panelID: t.pane.panelID)])
+            }
+
+        case "webview.screenshot":
+            switch resolveBrowserTab(params, in: vc) {
+            case let .failure(err): completion(err)
+            case let .success(t):
                 let config = WKSnapshotConfiguration()
                 // Default rect = visible area at full resolution. Linux's
                 // SnapshotRegion::Visible matches this, modulo platform pixel
                 // density differences.
-                webVC.webView.takeSnapshot(with: config) { image, error in
+                //
+                // Works on a BACKGROUND tab, which is the point: the B3 spike
+                // measured `takeSnapshot` on a web view in no window at all and
+                // it rendered correctly at the right size. Capturing a
+                // background tab therefore neither raises it nor disturbs what
+                // the user is looking at.
+                t.tab.webView.takeSnapshot(with: config) { image, error in
                     if let error {
                         completion(RPCError(code: "snapshot_failed", message: error.localizedDescription))
                         return
                     }
-                    guard let image,
-                          let tiff = image.tiffRepresentation,
+                    guard let image, image.size.width > 1, image.size.height > 1 else {
+                        // A zero-sized snapshot means the view had no frame —
+                        // say so, rather than blaming the PNG encoder, which is
+                        // what sent the first investigation the wrong way.
+                        completion(RPCError(
+                            code: "snapshot_failed",
+                            message: "the tab has no rendered size yet",
+                        ))
+                        return
+                    }
+                    guard let tiff = image.tiffRepresentation,
                           let bitmap = NSBitmapImageRep(data: tiff),
                           let png = bitmap.representation(using: .png, properties: [:])
                     else {
@@ -1746,11 +2025,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         in vc: TabViewController,
         completion: @escaping (Any?) -> Void,
     ) {
-        switch resolveWebView(params, in: vc) {
+        switch resolveBrowserTab(params, in: vc) {
         case let .failure(err):
             completion(err)
-        case let .success(webVC):
-            webVC.executeJS(js) { result, error in
+        case let .success(t):
+            t.tab.executeJS(js) { result, error in
                 if let error {
                     completion(RPCError(code: "js_error", message: error.localizedDescription))
                     return
@@ -1786,12 +2065,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// code caches — is work unit B5, and a flag that LOOKS like protection
     /// while only half of it exists would be worse than no flag at all.
     static let unimplementedBrowserMethods: Set<String> = [
-        "webview.tab.new", "webview.tab.list", "webview.tab.select",
-        "webview.tab.close", "webview.tab.move", "webview.tab.protect",
         "webview.profile.list", "webview.profile.clear",
-        "browser.secret.list", "browser.secret.fill",
-        "browser.secret.save", "browser.secret.delete",
-        "webview.net", "webview.console", "webview.clear_log",
     ]
 
     /// Outcome of the shared browser authorization gate.
@@ -1850,8 +2124,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // judged against the profile only. The target is captured WEAKLY so the
         // delivery check below can re-read its mode rather than replaying a
         // value that was true when dispatch happened.
-        let target: WebViewController? = switch resolveWebView(params, in: vc) {
-        case let .success(webVC): webVC
+        let target: BrowserTab? = switch resolveBrowserTab(params, in: vc) {
+        case let .success(pair): pair.tab
         case .failure: nil
         }
         let hadTarget = target != nil
@@ -1912,18 +2186,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         })
     }
 
-    /// Resolves the target WebViewController for an `id`-aware webview command.
+    /// Resolves the target TAB for a browser command.
     ///
-    /// - If `params["id"]` is a non-empty string, look it up across all tabs and
-    ///   return the panel (errors out on `not_found` / `wrong_panel_type`,
-    ///   matching Linux `socket.rs` codes).
-    /// - If `id` is absent, fall back to the active webview. Linux's handlers
-    ///   require `id`; macOS keeps the lenient default per the parity plan
-    ///   (Tier 1.6) so existing coctl-without-id calls keep working.
-    private func resolveWebView(
+    /// Two levels: `id` picks the pane (absent → the active pane), `tab_id`
+    /// picks the tab within it (absent → that pane's active tab). Every
+    /// page-level method takes a tab target, because selecting a tab in order
+    /// to operate on it would change what the user sees — so no operation may
+    /// require it.
+    ///
+    /// The target resolves ONCE, before any await. A caller that re-resolved
+    /// later could silently retarget onto a different tab if the list changed
+    /// underneath it; `tab_closed` is the honest answer instead.
+    private func resolveBrowserTab(
         _ params: [String: Any],
         in vc: TabViewController,
-    ) -> Result<WebViewController, RPCError> {
+    ) -> Result<(pane: WebViewController, tab: BrowserTab), RPCError> {
+        let pane: WebViewController
         if let id = params["id"] as? String, !id.isEmpty {
             guard let panel = vc.panel(id: id) else {
                 return .failure(RPCError(code: "not_found", message: "Panel not found: \(id)"))
@@ -1931,14 +2209,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let webVC = panel as? WebViewController else {
                 return .failure(RPCError(code: "wrong_panel_type", message: "Panel is not a webview"))
             }
-            return .success(webVC)
+            pane = webVC
+        } else {
+            // Linux's handlers require `id`; macOS keeps the lenient default
+            // per the parity plan (Tier 1.6) so existing coctl-without-id calls
+            // keep working.
+            guard let webVC = vc.activeWebView else {
+                return .failure(RPCError(
+                    code: "no_active_webview",
+                    message: "No active webview and no 'id' provided",
+                ))
+            }
+            pane = webVC
         }
-        guard let webVC = vc.activeWebView else {
-            return .failure(RPCError(
-                code: "no_active_webview",
-                message: "No active webview and no 'id' provided",
-            ))
+
+        guard !pane.tabs.isEmpty else {
+            return .failure(RPCError(code: "tab_closed", message: "the pane has no tabs"))
         }
-        return .success(webVC)
+        if let tabID = params["tab_id"] as? String, !tabID.isEmpty {
+            guard let tab = pane.tab(id: tabID) else {
+                return .failure(RPCError(code: "tab_closed", message: "Tab not found: \(tabID)"))
+            }
+            return .success((pane, tab))
+        }
+        return .success((pane, pane.activeTab))
     }
 }

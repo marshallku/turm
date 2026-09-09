@@ -1,4 +1,5 @@
 import AppKit
+import CopadCore
 
 /// Manages multiple tabs, each backed by a PaneManager (split-pane tree).
 /// Panels can be terminals or webviews.
@@ -202,6 +203,12 @@ final class TabViewController: NSViewController {
         return false
     }
 
+    /// Panel id of the focused pane in the active tab, for diagnostics and the
+    /// focus audit.
+    var activePaneID: String? {
+        activePaneManager?.activePane.panelID
+    }
+
     /// True when ANY webview in this window is in protected mode.
     ///
     /// Protection freezes the whole profile, not one tab: a concurrent tab on
@@ -211,7 +218,7 @@ final class TabViewController: NSViewController {
     /// window" and "this profile" are the same set today.
     var anyProtectedWebView: Bool {
         paneManagers.contains { manager in
-            manager.allPanels().contains { ($0 as? WebViewController)?.tabMode == .protected }
+            manager.allPanels().contains { ($0 as? WebViewController)?.hasProtectedTab == true }
         }
     }
 
@@ -406,6 +413,27 @@ final class TabViewController: NSViewController {
         return Session.Snapshot(version: Session.version, tabs: tabs, currentTab: clamped)
     }
 
+    /// Reclaim history blobs no longer referenced by a COMMITTED snapshot.
+    ///
+    /// Called only after `Session.save` returns. Running it against a set
+    /// gathered before the write would delete the very blob the new session
+    /// document points at — the reason blob generations are immutable in the
+    /// first place is that these two writes are not atomic together.
+    static func gcHistoryBlobs(after snap: Session.Snapshot) {
+        let panes = snap.tabs.flatMap { browserPanes(in: $0.root) }
+        BrowserFFI.gcHistory(live: BrowserSnapshot.liveGenerations(panes))
+    }
+
+    private static func browserPanes(in node: Session.SplitSnap) -> [BrowserPaneSnap] {
+        switch node {
+        case let .leaf(content):
+            if case let .webview(_, pane) = content, let pane { return [pane] }
+            return []
+        case let .branch(_, _, first, second):
+            return browserPanes(in: first) + browserPanes(in: second)
+        }
+    }
+
     /// Build tabs + splits to mirror `snap` (v3). Restored panels start fresh —
     /// only cwd + layout + split ratios are replayed, not process/scrollback.
     /// Caller falls back to `openInitialTab` if `snap` has zero tabs.
@@ -471,7 +499,7 @@ final class TabViewController: NSViewController {
             // change — and a pane opened blank and then navigated persisted
             // nothing at all.
             NotificationCenter.default.addObserver(
-                forName: .webviewURLChanged, object: nil, queue: .main,
+                forName: .webviewStateChanged, object: nil, queue: .main,
             ) { [weak self] _ in
                 Task { @MainActor in self?.scheduleSessionSave() }
             },
@@ -489,8 +517,12 @@ final class TabViewController: NSViewController {
                 let snap = self.snapshotSession()
                 if snap.tabs.isEmpty {
                     Session.clear()
-                } else {
-                    Session.save(snap)
+                } else if Session.save(snap) {
+                    // Only after a save that COMMITTED. Reclaiming against a
+                    // snapshot that never reached disk would delete the
+                    // generations the previously committed session still points
+                    // at — turning a failed write into lost history.
+                    Self.gcHistoryBlobs(after: snap)
                 }
             }
         }
@@ -518,9 +550,12 @@ final class TabViewController: NSViewController {
         return (manager.activePane.panelID, paneManagers.count - 1)
     }
 
-    func newWebViewTab(url: URL? = nil) {
+    /// `background: true` creates the copad tab without switching to it, so an
+    /// agent opening a page does not yank the user out of what they were
+    /// looking at.
+    func newWebViewTab(url: URL? = nil, background: Bool = false) {
         let manager = PaneManager(config: config, theme: theme, initialPanel: .webview(url: url))
-        addTab(manager: manager)
+        addTab(manager: manager, background: background)
     }
 
     /// Tier 4.1 — open a pre-built plugin panel as a new tab. Caller is
@@ -549,7 +584,7 @@ final class TabViewController: NSViewController {
         PaneManager(config: config, theme: theme)
     }
 
-    private func addTab(manager: PaneManager) {
+    private func addTab(manager: PaneManager, background: Bool = false) {
         manager.onLastPaneClosed = { [weak self, weak manager] in
             guard let self, let manager else { return }
             if let index = paneManagers.firstIndex(where: { $0 === manager }) {
@@ -589,7 +624,16 @@ final class TabViewController: NSViewController {
             syncVerticalBarWidth()
         }
 
-        switchTab(to: tabIndex)
+        if background {
+            // `switchTab` is what STARTS a tab's panes, so skipping it left a
+            // background browser pane with an empty tab array: page commands
+            // answered `tab_closed` and autosave persisted an empty URL instead
+            // of the destination that was asked for. Start it here without
+            // selecting it — which is the whole point of `background`.
+            manager.allPanels().forEach { $0.startIfNeeded() }
+        } else {
+            switchTab(to: tabIndex)
+        }
         eventBus?.broadcast(event: "tab.opened", data: [
             "index": tabIndex,
             "panel_id": manager.activePane.panelID,
@@ -678,8 +722,14 @@ final class TabViewController: NSViewController {
         activePaneManager?.focusNextPane(direction: direction)
     }
 
-    func splitActivePaneWithWebView(url: URL? = nil, orientation: SplitOrientation = .horizontal) {
-        activePaneManager?.splitActiveWithWebView(url: url, orientation: orientation)
+    func splitActivePaneWithWebView(
+        url: URL? = nil,
+        orientation: SplitOrientation = .horizontal,
+        background: Bool = false,
+    ) {
+        activePaneManager?.splitActiveWithWebView(
+            url: url, orientation: orientation, background: background,
+        )
     }
 
     func closeActivePane() {

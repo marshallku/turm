@@ -74,6 +74,9 @@ pub enum Command {
     /// WebView panel management
     #[command(subcommand)]
     Webview(WebviewCommand),
+    /// Saved website passwords (the secret never passes through this CLI)
+    #[command(subcommand)]
+    Secret(SecretCommand),
 
     /// Terminal agent commands (read, exec, state)
     #[command(subcommand)]
@@ -541,12 +544,22 @@ pub enum WebviewCommand {
         /// Panel mode: tab, split_h, split_v
         #[arg(long, default_value = "tab")]
         mode: String,
+        /// Create the tab WITHOUT switching to it.
+        ///
+        /// The default switches, which is right for a person running this by
+        /// hand and wrong for an agent — it moves focus away from whatever the
+        /// user was doing. Agents should pass this.
+        #[arg(long)]
+        background: bool,
     },
     /// Navigate an existing webview to a new URL
     Navigate {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
         /// URL to navigate to
         url: String,
     },
@@ -555,24 +568,36 @@ pub enum WebviewCommand {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
     },
     /// Go forward in webview history
     Forward {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
     },
     /// Reload webview
     Reload {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
     },
     /// Execute JavaScript in a webview
     ExecJs {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
         /// JavaScript code to execute
         code: String,
     },
@@ -581,6 +606,9 @@ pub enum WebviewCommand {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
         /// Content format: text or html
         #[arg(long, default_value = "text")]
         format: String,
@@ -590,6 +618,9 @@ pub enum WebviewCommand {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
         /// Save to file path (omit for base64 in response)
         #[arg(long)]
         path: Option<String>,
@@ -599,6 +630,9 @@ pub enum WebviewCommand {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
         /// CSS selector
         selector: String,
     },
@@ -607,6 +641,9 @@ pub enum WebviewCommand {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
         /// CSS selector
         selector: String,
         /// Max results
@@ -618,6 +655,9 @@ pub enum WebviewCommand {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
         /// CSS selector
         selector: String,
         /// CSS property names (comma-separated)
@@ -628,6 +668,9 @@ pub enum WebviewCommand {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
         /// CSS selector
         selector: String,
     },
@@ -636,6 +679,9 @@ pub enum WebviewCommand {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
         /// CSS selector for the input element
         selector: String,
         /// Value to type
@@ -646,6 +692,9 @@ pub enum WebviewCommand {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
         /// CSS selector to scroll to (overrides x/y)
         #[arg(long)]
         selector: Option<String>,
@@ -661,15 +710,183 @@ pub enum WebviewCommand {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
     },
     /// Toggle DevTools inspector
     Devtools {
         /// Panel ID
         #[arg(long)]
         id: String,
+        /// Tab ID within that pane (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
         /// Action: show, close, attach, detach
         #[arg(default_value = "show")]
         action: String,
+    },
+    /// Browser tabs INSIDE a webview pane (distinct from copad's own tabs)
+    #[command(subcommand)]
+    Tab(WebviewTabCommand),
+    /// Network requests the page made (JS-initiated + navigations)
+    Net {
+        /// Panel ID (omit for the active pane)
+        #[arg(long)]
+        id: Option<String>,
+        /// Only this tab
+        #[arg(long)]
+        tab_id: Option<String>,
+        /// Only records newer than this unix timestamp
+        #[arg(long)]
+        since: Option<u64>,
+        /// Substring match against the URL
+        #[arg(long)]
+        filter: Option<String>,
+        /// Max records
+        #[arg(long, default_value_t = 200)]
+        limit: u32,
+    },
+    /// Console output the page produced
+    Console {
+        /// Panel ID (omit for the active pane)
+        #[arg(long)]
+        id: Option<String>,
+        /// Only this tab
+        #[arg(long)]
+        tab_id: Option<String>,
+        /// Only records newer than this unix timestamp
+        #[arg(long)]
+        since: Option<u64>,
+        /// Minimum level: debug, log, info, warn, error
+        #[arg(long)]
+        level: Option<String>,
+        /// Substring match against the text
+        #[arg(long)]
+        filter: Option<String>,
+        /// Max records
+        #[arg(long, default_value_t = 200)]
+        limit: u32,
+    },
+    /// Discard a pane's captured network + console log
+    ClearLog {
+        /// Panel ID (omit for the active pane)
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Put a tab into (or out of) protected mode
+    ///
+    /// Entering DESTROYS and rebuilds the tab's web view, so no script an agent
+    /// installed survives, and purges the origin's service workers and code
+    /// caches. It is the only mode in which a password may be filled or saved.
+    /// While it is on, every value-returning command against the pane is
+    /// refused.
+    Protect {
+        /// Panel ID (omit for the active pane)
+        #[arg(long)]
+        id: Option<String>,
+        /// Tab ID (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
+        /// Leave protected mode instead of entering it
+        #[arg(long)]
+        off: bool,
+    },
+}
+
+/// Saved website passwords.
+///
+/// The secret NEVER passes through this CLI: `fill` names a credential and
+/// copad injects it inside a protected page; `save` reads it natively from that
+/// page. Neither takes a password argument, which is the point.
+#[derive(Subcommand)]
+pub enum SecretCommand {
+    /// List stored credentials (metadata only — never the secret)
+    List {
+        /// Only credentials for this exact origin
+        #[arg(long)]
+        origin: Option<String>,
+    },
+    /// Fill a stored credential into a protected tab
+    Fill {
+        /// Panel ID (omit for the active pane)
+        #[arg(long)]
+        id: Option<String>,
+        /// Tab ID (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
+        /// Credential id, e.g. github.com/marshallku
+        credential_id: String,
+    },
+    /// Remember the password currently typed into a protected page
+    Save {
+        /// Panel ID (omit for the active pane)
+        #[arg(long)]
+        id: Option<String>,
+        /// Tab ID (omit for the pane's active tab)
+        #[arg(long)]
+        tab_id: Option<String>,
+        /// Username to file it under
+        username: String,
+    },
+    /// Forget a credential (keychain entry and index)
+    Delete {
+        /// Credential id
+        credential_id: String,
+    },
+}
+
+/// Tabs within one browser pane.
+///
+/// `--id` selects the PANE (omit for the active one) and `--tab-id` the tab
+/// within it (omit for that pane's active tab). Every page-level `webview`
+/// command accepts `--tab-id` too, so a background tab can be driven without
+/// selecting it — selecting a tab in order to operate on it would change what
+/// the user is looking at.
+#[derive(Subcommand)]
+pub enum WebviewTabCommand {
+    /// Open a tab. Stays in the BACKGROUND unless --foreground is given.
+    New {
+        /// Panel ID (omit for the active pane)
+        #[arg(long)]
+        id: Option<String>,
+        /// URL to open
+        url: Option<String>,
+        /// Switch to the new tab instead of leaving the user where they are
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// List the pane's tabs
+    List {
+        /// Panel ID (omit for the active pane)
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Switch to a tab
+    Select {
+        /// Panel ID (omit for the active pane)
+        #[arg(long)]
+        id: Option<String>,
+        /// Tab ID
+        tab_id: String,
+    },
+    /// Close a tab (refused for the pane's last tab)
+    Close {
+        /// Panel ID (omit for the active pane)
+        #[arg(long)]
+        id: Option<String>,
+        /// Tab ID
+        tab_id: String,
+    },
+    /// Reorder a tab
+    Move {
+        /// Panel ID (omit for the active pane)
+        #[arg(long)]
+        id: Option<String>,
+        /// Tab ID
+        tab_id: String,
+        /// Destination index
+        index: i64,
     },
 }
 
@@ -725,6 +942,13 @@ impl Cli {
                 EventCommand::Publish { .. } => "events.publish",
             }
             .to_string(),
+            Command::Secret(cmd) => match cmd {
+                SecretCommand::List { .. } => "browser.secret.list",
+                SecretCommand::Fill { .. } => "browser.secret.fill",
+                SecretCommand::Save { .. } => "browser.secret.save",
+                SecretCommand::Delete { .. } => "browser.secret.delete",
+            }
+            .to_string(),
             Command::Webview(cmd) => match cmd {
                 WebviewCommand::Open { .. } => "webview.open",
                 WebviewCommand::Navigate { .. } => "webview.navigate",
@@ -742,6 +966,17 @@ impl Cli {
                 WebviewCommand::Scroll { .. } => "webview.scroll",
                 WebviewCommand::PageInfo { .. } => "webview.page_info",
                 WebviewCommand::Devtools { .. } => "webview.devtools",
+                WebviewCommand::Net { .. } => "webview.net",
+                WebviewCommand::Console { .. } => "webview.console",
+                WebviewCommand::ClearLog { .. } => "webview.clear_log",
+                WebviewCommand::Protect { .. } => "webview.tab.protect",
+                WebviewCommand::Tab(tab) => match tab {
+                    WebviewTabCommand::New { .. } => "webview.tab.new",
+                    WebviewTabCommand::List { .. } => "webview.tab.list",
+                    WebviewTabCommand::Select { .. } => "webview.tab.select",
+                    WebviewTabCommand::Close { .. } => "webview.tab.close",
+                    WebviewTabCommand::Move { .. } => "webview.tab.move",
+                },
             }
             .to_string(),
             Command::Terminal(cmd) => match cmd {
@@ -1048,40 +1283,137 @@ impl Cli {
                     serde_json::Value::Object(obj)
                 }
             },
+            Command::Secret(cmd) => match cmd {
+                SecretCommand::List { origin } => json!({ "origin": origin }),
+                SecretCommand::Fill {
+                    id,
+                    tab_id,
+                    credential_id,
+                } => json!({
+                    "id": id, "tab_id": tab_id, "credential_id": credential_id,
+                }),
+                SecretCommand::Save {
+                    id,
+                    tab_id,
+                    username,
+                } => json!({
+                    "id": id, "tab_id": tab_id, "username": username,
+                }),
+                SecretCommand::Delete { credential_id } => {
+                    json!({ "credential_id": credential_id })
+                }
+            },
             Command::Webview(cmd) => match cmd {
-                WebviewCommand::Open { url, mode } => json!({ "url": url, "mode": mode }),
-                WebviewCommand::Navigate { id, url } => json!({ "id": id, "url": url }),
-                WebviewCommand::Back { id } => json!({ "id": id }),
-                WebviewCommand::Forward { id } => json!({ "id": id }),
-                WebviewCommand::Reload { id } => json!({ "id": id }),
-                WebviewCommand::ExecJs { id, code } => json!({ "id": id, "code": code }),
-                WebviewCommand::GetContent { id, format } => json!({ "id": id, "format": format }),
-                WebviewCommand::Screenshot { id, path } => json!({ "id": id, "path": path }),
-                WebviewCommand::Query { id, selector } => json!({ "id": id, "selector": selector }),
+                WebviewCommand::Open {
+                    url,
+                    mode,
+                    background,
+                } => json!({
+                    "url": url, "mode": mode, "background": background,
+                }),
+                WebviewCommand::Navigate { id, tab_id, url } => {
+                    json!({ "id": id, "tab_id": tab_id, "url": url })
+                }
+                WebviewCommand::Back { id, tab_id } => json!({ "id": id, "tab_id": tab_id }),
+                WebviewCommand::Forward { id, tab_id } => json!({ "id": id, "tab_id": tab_id }),
+                WebviewCommand::Reload { id, tab_id } => json!({ "id": id, "tab_id": tab_id }),
+                WebviewCommand::ExecJs { id, tab_id, code } => {
+                    json!({ "id": id, "tab_id": tab_id, "code": code })
+                }
+                WebviewCommand::GetContent { id, tab_id, format } => {
+                    json!({ "id": id, "tab_id": tab_id, "format": format })
+                }
+                WebviewCommand::Screenshot { id, tab_id, path } => {
+                    json!({ "id": id, "tab_id": tab_id, "path": path })
+                }
+                WebviewCommand::Query {
+                    id,
+                    tab_id,
+                    selector,
+                } => json!({ "id": id, "tab_id": tab_id, "selector": selector }),
                 WebviewCommand::QueryAll {
                     id,
+                    tab_id,
                     selector,
                     limit,
-                } => json!({ "id": id, "selector": selector, "limit": limit }),
+                } => json!({ "id": id, "tab_id": tab_id, "selector": selector, "limit": limit }),
                 WebviewCommand::GetStyles {
                     id,
+                    tab_id,
                     selector,
                     properties,
                 } => {
                     let props: Vec<&str> = properties.split(',').map(|s| s.trim()).collect();
-                    json!({ "id": id, "selector": selector, "properties": props })
+                    json!({ "id": id, "tab_id": tab_id, "selector": selector, "properties": props })
                 }
-                WebviewCommand::Click { id, selector } => json!({ "id": id, "selector": selector }),
+                WebviewCommand::Click {
+                    id,
+                    tab_id,
+                    selector,
+                } => json!({ "id": id, "tab_id": tab_id, "selector": selector }),
                 WebviewCommand::Fill {
                     id,
+                    tab_id,
                     selector,
                     value,
-                } => json!({ "id": id, "selector": selector, "value": value }),
-                WebviewCommand::Scroll { id, selector, x, y } => {
-                    json!({ "id": id, "selector": selector, "x": x, "y": y })
+                } => json!({ "id": id, "tab_id": tab_id, "selector": selector, "value": value }),
+                WebviewCommand::Scroll {
+                    id,
+                    tab_id,
+                    selector,
+                    x,
+                    y,
+                } => {
+                    json!({ "id": id, "tab_id": tab_id, "selector": selector, "x": x, "y": y })
                 }
-                WebviewCommand::PageInfo { id } => json!({ "id": id }),
-                WebviewCommand::Devtools { id, action } => json!({ "id": id, "action": action }),
+                WebviewCommand::PageInfo { id, tab_id } => json!({ "id": id, "tab_id": tab_id }),
+                WebviewCommand::Devtools { id, tab_id, action } => {
+                    json!({ "id": id, "tab_id": tab_id, "action": action })
+                }
+                WebviewCommand::Net {
+                    id,
+                    tab_id,
+                    since,
+                    filter,
+                    limit,
+                } => json!({
+                    "id": id, "tab_id": tab_id, "since": since,
+                    "filter": filter, "limit": limit,
+                }),
+                WebviewCommand::Console {
+                    id,
+                    tab_id,
+                    since,
+                    level,
+                    filter,
+                    limit,
+                } => json!({
+                    "id": id, "tab_id": tab_id, "since": since, "level": level,
+                    "filter": filter, "limit": limit,
+                }),
+                WebviewCommand::ClearLog { id } => json!({ "id": id }),
+                WebviewCommand::Protect { id, tab_id, off } => json!({
+                    "id": id, "tab_id": tab_id, "on": !off,
+                }),
+                WebviewCommand::Tab(tab) => match tab {
+                    WebviewTabCommand::New {
+                        id,
+                        url,
+                        foreground,
+                    } => {
+                        json!({ "id": id, "url": url, "background": !foreground })
+                    }
+                    WebviewTabCommand::List { id } => json!({ "id": id }),
+                    WebviewTabCommand::Select { id, tab_id } => {
+                        json!({ "id": id, "tab_id": tab_id })
+                    }
+                    WebviewTabCommand::Close { id, tab_id } => {
+                        json!({ "id": id, "tab_id": tab_id })
+                    }
+                    WebviewTabCommand::Move { id, tab_id, index } => {
+                        json!({ "id": id, "tab_id": tab_id, "index": index })
+                    }
+                },
             },
         }
     }

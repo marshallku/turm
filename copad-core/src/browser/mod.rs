@@ -38,6 +38,7 @@
 //!   [`TabMode`], enforced in [`authorize`].
 
 pub mod authorize;
+pub mod history;
 pub mod netlog;
 pub mod profile;
 pub mod restore;
@@ -50,3 +51,15 @@ pub use profile::{BrowserProfile, DEFAULT_PROFILE};
 pub use restore::{RestorePolicy, canonical_origin, canonicalize_for_restore};
 pub use secrets::{CredentialRef, CredentialSlot, FillRequest, TabMode};
 pub use tabs::{BrowserPaneSnap, BrowserTabSnap};
+
+/// One lock for every test in this module tree that redirects `HOME` /
+/// `XDG_STATE_HOME` to a sandbox.
+///
+/// `history` and `netlog` both do it, and they started with a mutex EACH — so
+/// each module's tests were internally serialized and mutually racing. The
+/// failure only appeared when the whole suite ran (four unrelated tests failing
+/// at once), never when either module was filtered on its own, which is exactly
+/// the shape that wastes an afternoon. The lock has to be shared because the
+/// resource is: one process-wide environment.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
